@@ -1,161 +1,53 @@
-mod file_func {
-    use std::env;
-    use std::fs;
-    use std::io::{ self, Write };
-    use std::path::PathBuf;
+mod exif_tag;
 
-    pub fn get_directory_path() -> Result<PathBuf, io::Error> {
-        let mut input_path = String::new();
-        println!("Enter the directory path (leave blank for current directory): ");
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use exif_tag::get_date_taken;
 
-        io::stdin().read_line(&mut input_path)?;
-        let input_path = input_path.trim();
+fn main() {
+    rexiv2::initialize();
 
-        if input_path.is_empty() {
-            return env::current_dir();
-        }
+    let args: Vec<String> = env::args().collect();
+    let dir_path = if args.len() == 2 {
+        Path::new(&args[1]).to_path_buf()
+    } else {
+        env::current_dir().unwrap()
+    };
 
-        let path = PathBuf::from(input_path);
-        if path.exists() {
-            Ok(path)
-        } else {
-            Err(io::Error::new(io::ErrorKind::NotFound, "유효하지 않은 경로입니다."))
-        }
+    if !dir_path.is_dir() {
+        eprintln!("Error: {} is not a valid directory.", dir_path.display());
+        return;
     }
 
-    pub fn list_files_in_directory(path: &PathBuf) -> Result<Vec<PathBuf>, io::Error> {
-        // let mut file_list = Vec::new();
-        // for entry in fs::read_dir(path)? {
-        //     let entry = entry?;
-        //     let file_path = entry.path();
-        //     if fs::metadata(&file_path)?.is_file() {
-        //         file_list.push(file_path);
-        //     }
-        // }
-        // Ok(file_list);
+    let files = list_jpg_files(&dir_path);
 
-        let extensions = ["jpg", "jpeg", "png", "gif"];
-        let mut image_files = Vec::new();
-        for entry in fs::read_dir(path)? {
-            let entry = entry?;
+    for file in files {
+        print_file_info(&file);
+    }
+}
+
+fn list_jpg_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() {
-                if let Some(ext) = path.extension() {
-                    if extensions.contains(&ext.to_str().unwrap().to_lowercase().as_str()) {
-                        image_files.push(path);
-                    }
+            if let Some(ext) = path.extension() {
+                let ext = ext.to_string_lossy().to_lowercase();
+                if ext == "jpg" || ext == "jpeg" {
+                    files.push(path);
                 }
             }
         }
-        Ok(image_files)
     }
 
-    pub fn get_file_name(pathbuf: &PathBuf) -> Option<String> {
-        pathbuf
-            .file_name()
-            .and_then(|os_str| os_str.to_str())
-            .map(|str| str.to_owned())
-    }
-
-    pub fn get_file_size(pathbuf: &PathBuf) -> io::Result<u64> {
-        let metadata = fs::metadata(pathbuf)?;
-        Ok(metadata.len())
-    }
-
-    // pub fn rename_file(old_path: &str, new_path: &str) -> Result<(), std::io::Error> {
-    //     // 파일명 변경 함수
-    //     unimplemented!()
-    // }
-
-    pub fn save_as_jpg_with_new_name(input_path: &PathBuf) -> PathBuf {
-        let mut output_path = input_path.to_path_buf();
-        if let Some(stem) = output_path.file_stem() {
-            let mut new_file_name = stem.to_owned();
-            new_file_name.push("_NEW");
-            if let Some(ext) = input_path.extension() {
-                new_file_name.push(".");
-                new_file_name.push(ext);
-            }
-            output_path.set_file_name(new_file_name);
-        }
-        let img = image::open(input_path).expect("이미지를 열 수 없습니다");
-        img.save(&output_path).expect("이미지를 저장할 수 없습니다");
-        output_path
-    }
+    files
 }
 
-mod print_func {
-    use std::io::{ self, ErrorKind };
-
-    pub fn print_files_info_oneline(
-        str_o_filename: Option<String>,
-        str_o_filesize: u64,
-        str_o_filedate: Result<String, io::Error>
-    ) {
-        if str_o_filename.is_none() {
-            println!("No filename found");
-            return;
-        }
-
-        let str_filename = str_o_filename.unwrap();
-        let str_date = match str_o_filedate {
-            Ok(date_str) => date_str,
-            Err(e) => { String::from("N/A") }
-        };
-
-        println!("File Name: {}, Size: {} bytes, Date: {}", str_filename, str_o_filesize, str_date);
-    }
-}
-
-fn main() -> Result<(), std::io::Error> {
-    let dir_path = match file_func::get_directory_path() {
-        Ok(dir_path) => {
-            println!("your path: {:?}", dir_path);
-            dir_path
-        }
-        Err(e) => {
-            eprintln!("error: {}", e);
-            return Err(e);
-        }
-    };
-
-    let list_files_in_dir = match file_func::list_files_in_directory(&dir_path) {
-        Ok(list_files_in_dir) => list_files_in_dir,
-        Err(e) => {
-            eprintln!("error: {}", e);
-            return Err(e);
-        }
-    };
-
-    // println!("your files:");
-    // for file in list_files_in_dir {
-    //     // match file_func::get_file_name(&file) { Some(ref value) => println!("{}", value), None => println!("None"), }
-    //     match exif_func::get_exif_date(&file) {
-    //         Ok(_) => println!("{}: EXIF 데이터를 성공적으로 읽었습니다.", file.to_str().unwrap()),
-    //         Err(e) => eprintln!("error: {}", e),
-    //     }
-    // }
-
-    println!("your files:");
-    for file in list_files_in_dir {
-        print_func::print_files_info_oneline(
-            file_func::get_file_name(&file),
-            file_func::get_file_size(&file)?,
-            exif_func::get_exif_date(&file)
-        );
-    }
-
-    // if let Some(mut exif_data) = exif_utils::read_exif_tags(&file)? {
-    //     if exif_data.date.is_none() {
-    //         if let Some(date) = exif_utils::parse_date_from_filename(&file) {
-    //             exif_data.date = Some(date);
-    //             exif_utils::write_exif_tags(&file, &exif_data)?;
-    //             let new_file_name = format!("{}_new.jpg", file);
-    //             file_func::rename_file(&file, &new_file_name)?;
-    //         }
-    //     }
-    // }
-    // }
-
-    Ok(())
+fn print_file_info(path: &PathBuf) {
+    let file_size_kb = fs::metadata(path).unwrap().len() / 1024;
+    let filename = path.file_name().unwrap().to_string_lossy();
+    let date_taken = get_date_taken(path);
+    println!("{}\t{} KB\t{}", filename, file_size_kb, date_taken);
 }
