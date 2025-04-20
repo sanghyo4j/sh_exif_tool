@@ -4,6 +4,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use exif_tag::get_date_taken;
+use unicode_width::UnicodeWidthStr;
 
 fn main() {
     rexiv2::initialize();
@@ -45,9 +46,17 @@ fn list_jpg_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+use exif_tag::ensure_date_taken;
+
 fn print_file_info(path: &PathBuf) {
     let file_size_kb = fs::metadata(path).unwrap().len() / 1024;
-    let filename = path.file_name().unwrap().to_string_lossy();
-    let date_taken = get_date_taken(path);
-    println!("{}\t{} KB\t{}", filename, file_size_kb, date_taken);
+    let filename_cow = path.file_name().unwrap().to_string_lossy();
+    let filename = filename_cow.as_ref();
+
+    let width = UnicodeWidthStr::width(filename);
+    let padding = if width < 40 { 40 - width } else { 0 };
+    let padded = format!("{}{}", filename, " ".repeat(padding));
+
+    let date_taken = ensure_date_taken(path).unwrap_or_else(|| "N/A".to_string());
+    println!("{} {:>6} KB   {}", padded, file_size_kb, date_taken);
 }
