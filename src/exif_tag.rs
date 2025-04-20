@@ -4,41 +4,32 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rexiv2::Metadata;
 
 pub fn get_or_create_metadata(path: &Path) -> Option<Metadata> {
-    match Metadata::new_from_path(path) {
-        Ok(meta) => Some(meta),
-        Err(_) => {
-            let meta = Metadata::new();
-            if meta.save_to_file(path).is_ok() {
-                Some(meta)
-            } else {
-                None
-            }
-        }
-    }
+    Metadata::new_from_path(path).ok()
 }
 
 pub fn get_date_taken(path: &Path) -> Option<String> {
-    get_or_create_metadata(path).and_then(|meta| {
-        meta.get_tag_string("Exif.Photo.DateTimeOriginal").ok()
-    })
+    Metadata::new_from_path(path)
+        .ok()?
+        .get_tag_string("Exif.Photo.DateTimeOriginal")
+        .ok()
 }
 
 pub fn ensure_date_taken(path: &Path) -> Option<String> {
-    match get_date_taken(path) {
-        Some(date) => Some(date),
-        None => {
-            if let Ok(created) = fs::metadata(path).and_then(|m| m.created()) {
-                if let Ok(formatted) = format_system_time(created) {
-                    if let Some(mut meta) = get_or_create_metadata(path) {
-                        let _ = meta.set_tag_string("Exif.Photo.DateTimeOriginal", &formatted);
-                        let _ = meta.save_to_file(path);
-                        return Some(formatted);
-                    }
-                }
+    if let Some(date) = get_date_taken(path) {
+        return Some(date);
+    }
+
+    if let Ok(created) = fs::metadata(path).and_then(|m| m.created()) {
+        if let Ok(formatted) = format_system_time(created) {
+            if let Ok(mut meta) = Metadata::new_from_path(path) {
+                let _ = meta.set_tag_string("Exif.Photo.DateTimeOriginal", &formatted);
+                let _ = meta.save_to_file(path);
+                return Some(formatted);
             }
-            None
         }
     }
+
+    None
 }
 
 fn format_system_time(time: SystemTime) -> Result<String, ()> {
