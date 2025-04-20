@@ -1,17 +1,26 @@
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 use rexiv2::Metadata;
-
-pub fn get_or_create_metadata(path: &Path) -> Option<Metadata> {
-    Metadata::new_from_path(path).ok()
-}
+use regex::Regex;
+use time::OffsetDateTime;
 
 pub fn get_date_taken(path: &Path) -> Option<String> {
-    Metadata::new_from_path(path)
-        .ok()?
-        .get_tag_string("Exif.Photo.DateTimeOriginal")
-        .ok()
+    if let Ok(meta) = Metadata::new_from_path(path) {
+        if let Ok(tag) = meta.get_tag_string("Exif.Photo.DateTimeOriginal") {
+            return Some(tag);
+        }
+    }
+
+    if let Some(dt) = extract_datetime_from_filename(path) {
+        if let Ok(mut meta) = Metadata::new_from_path(path) {
+            let _ = meta.set_tag_string("Exif.Photo.DateTimeOriginal", &dt);
+            let _ = meta.save_to_file(path);
+            return Some(dt);
+        }
+    }
+
+    None
 }
 
 pub fn ensure_date_taken(path: &Path) -> Option<String> {
@@ -32,29 +41,36 @@ pub fn ensure_date_taken(path: &Path) -> Option<String> {
     None
 }
 
-fn format_system_time(time: SystemTime) -> Result<String, ()> {
-    let datetime = time.duration_since(UNIX_EPOCH).map_err(|_| ())?;
+fn extract_datetime_from_filename(path: &Path) -> Option<String> {
+    let filename = path.file_stem()?.to_str()?;
+    println!("→ 파일명 분석 대상: {}", filename); // 디버깅용
 
-    let secs = datetime.as_secs();
-    let naive = time_t_to_ymdhms(secs);
-    Ok(format!(
-        "{:04}:{:02}:{:02} {:02}:{:02}:{:02}",
-        naive.0, naive.1, naive.2, naive.3, naive.4, naive.5
-    ))
+    let re = Regex::new(r"^(\d{8})_(\d{6})").ok()?;
+    let caps = re.captures(filename)?;
+
+    let date = &caps[1];
+    let time = &caps[2];
+
+    let result = format!(
+        "{}:{}:{} {}:{}:{}",
+        &date[0..4], &date[4..6], &date[6..8],
+        &time[0..2], &time[2..4], &time[4..6]
+    );
+
+    println!("→ 파싱 성공: {}", result); // 디버깅용
+    Some(result)
 }
 
-fn time_t_to_ymdhms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
-    use std::time::Duration;
-    use time::OffsetDateTime;
-
-    let t = UNIX_EPOCH + Duration::from_secs(secs);
-    let odt = OffsetDateTime::from(t);
-    (
-        odt.year() as u32,
-        odt.month() as u32,
-        odt.day() as u32,
-        odt.hour() as u32,
-        odt.minute() as u32,
-        odt.second() as u32,
-    )
+fn format_system_time(system_time: SystemTime) -> Result<String, ()> {
+    let datetime: OffsetDateTime = system_time.into();
+    let formatted = format!(
+        "{:04}:{:02}:{:02} {:02}:{:02}:{:02}",
+        datetime.year(),
+        datetime.month() as u8,
+        datetime.day(),
+        datetime.hour(),
+        datetime.minute(),
+        datetime.second()
+    );
+    Ok(formatted)
 }
