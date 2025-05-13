@@ -15,7 +15,7 @@ pub fn get_date_taken(path: &Path) -> Option<String> {
     if let Some(dt) = extract_datetime_from_filename(path) {
         if let Ok(mut meta) = Metadata::new_from_path(path) {
             let r1 = meta.set_tag_string("Exif.Photo.DateTimeOriginal", &dt);
-            let r2 = meta.set_tag_string("Exif.Image.Software", "SH EXIF TAG CREATOR");
+            let r2 = meta.set_tag_string("Exif.Image.Software", "SH148 EXIF TAG CREATOR v0.1");
 
             if r1.is_ok() && r2.is_ok() && meta.save_to_file(path).is_ok() {
                 append_creator_suffix(path);
