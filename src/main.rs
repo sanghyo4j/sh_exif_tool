@@ -1,10 +1,13 @@
 mod exif_tag;
 
 use std::env;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use exif_tag::ensure_date_taken;
 use unicode_width::UnicodeWidthStr;
+use image::{DynamicImage, ImageFormat, io::Reader as ImageReader};
+use image::codecs::jpeg::JpegEncoder;
+
 
 fn main() {
     rexiv2::initialize();
@@ -21,14 +24,29 @@ fn main() {
         return;
     }
 
-    let files = list_jpg_files(&dir_path);
+    let files = list_image_files(&dir_path);
+
+    if files.is_empty() {
+        println!("No file found: {}", dir_path.to_string_lossy());
+        return;
+    }
 
     for file in files {
-        print_file_info(&file);
+        let ext = file.extension().unwrap_or_default().to_string_lossy().to_lowercase();
+    
+        if ext == "jpg" || ext == "jpeg" {
+            print_file_info(&file);
+        } else {
+            if let Some(jpg_path) = convert_to_jpeg(&file) {
+                print_file_info(&jpg_path);
+            } else {
+                println!("Failed to convert: {}", file.display());
+            }
+        }
     }
 }
 
-fn list_jpg_files(dir: &Path) -> Vec<PathBuf> {
+fn list_image_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
     if let Ok(entries) = fs::read_dir(dir) {
@@ -36,7 +54,7 @@ fn list_jpg_files(dir: &Path) -> Vec<PathBuf> {
             let path = entry.path();
             if let Some(ext) = path.extension() {
                 let ext = ext.to_string_lossy().to_lowercase();
-                if ext == "jpg" || ext == "jpeg" {
+                if ["jpg", "jpeg", "png", "gif"].contains(&ext.as_str()) {
                     files.push(path);
                 }
             }
@@ -58,4 +76,15 @@ fn print_file_info(path: &PathBuf) {
     let date_taken = ensure_date_taken(path).unwrap_or_else(|| "N/A".to_string());
 
     println!("{} {:>6} KB   {}", padded, file_size_kb, date_taken);
+}
+
+fn convert_to_jpeg(path: &Path) -> Option<PathBuf> {
+    let img = ImageReader::open(path).ok()?.decode().ok()?;
+    let new_path = path.with_extension("jpg");
+
+    let file = File::create(&new_path).ok()?;
+    let mut encoder = JpegEncoder::new_with_quality(file, 100);
+    encoder.encode_image(&img).ok()?;
+
+    Some(new_path)
 }
