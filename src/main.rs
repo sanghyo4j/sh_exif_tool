@@ -3,11 +3,12 @@ mod exif_tag;
 use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use exif_tag::{get_date_taken, extract_datetime_from_filename, append_creator_suffix};
+use exif_tag::{get_date_taken, extract_datetime_from_filename, append_creator_suffix, set_exif_datetime_and_software};
 
 use unicode_width::UnicodeWidthStr;
 use image::{DynamicImage, ImageFormat, io::Reader as ImageReader};
 use image::codecs::jpeg::JpegEncoder;
+use rexiv2::{Metadata, Rexiv2Error};
 
 
 fn main() {
@@ -25,16 +26,17 @@ fn main() {
         return;
     }
 
-    let files = list_image_files(&dir_path);
+    let input_files = list_image_files(&dir_path);
 
-    if files.is_empty() {
+    if input_files.is_empty() {
         println!("No file found: {}", dir_path.to_string_lossy());
         return;
     }
 
+    let mut jpeg_files = Vec::new();
     let mut missing_date_files = Vec::new();
 
-    for file in files {
+    for file in input_files {
         let ext = file.extension().unwrap_or_default().to_string_lossy().to_lowercase();
 
         let target_path = if ext == "jpg" || ext == "jpeg" {
@@ -49,17 +51,27 @@ fn main() {
             }
         };
 
-        let has_date = print_file_info(&target_path);
-        if !has_date {
-            missing_date_files.push(target_path);
+        jpeg_files.push(target_path);
+    }
+
+    for file in &jpeg_files {
+        let date = get_date_taken(file);
+
+        match date {
+            Some(d) => println!("{} → {}", file.display(), d),
+            None => {
+                println!("{} → N/A", file.display());
+                missing_date_files.push(file.clone());
+            }
         }
     }
 
-    for file in missing_date_files {
-        if let Some(updated) = try_update_date_from_filename(&file) {
-            println!("→ EXIF 작성 완료: {} ({})", file.display(), updated);
-        } else {
-            println!("→ EXIF 작성 실패: {}", file.display());
+    println!("→ missing_date_files 개수: {}", missing_date_files.len());
+
+    for file in &missing_date_files {
+        match try_update_date_from_filename(file) {
+            Ok(dt) => println!("→ EXIF 작성 완료: {} ({})", file.display(), dt),
+            Err(e) => println!("→ EXIF 작성 실패: {} → {}", file.display(), e),
         }
     }
 }
@@ -108,17 +120,17 @@ fn convert_to_jpeg(path: &Path) -> Option<PathBuf> {
     Some(new_path)
 }
 
-fn try_update_date_from_filename(path: &Path) -> Option<String> {
-    if let Some(dt) = extract_datetime_from_filename(path) {
-        if let Ok(mut meta) = rexiv2::Metadata::new_from_path(path) {
-            let r1 = meta.set_tag_string("Exif.Photo.DateTimeOriginal", &dt);
-            let r2 = meta.set_tag_string("Exif.Image.Software", "SH EXIF TAG CREATOR");
+pub fn try_update_date_from_filename(path: &Path) -> Result<String, String> {
+    println!("→ try_update_date_from_filename 진입: {}", path.display());
 
-            if r1.is_ok() && r2.is_ok() && meta.save_to_file(path).is_ok() {
-                append_creator_suffix(path);
-                return Some(dt);
-            }
-        }
+    if let Some(dt) = extract_datetime_from_filename(path) {
+        
+        println!("→ 날짜 추출됨: {dt}");
+        
+        set_exif_datetime_and_software(path, &dt)?;
+        append_creator_suffix(path);
+        Ok(dt)
+    } else {
+        Err("날짜 추출 실패".to_string())
     }
-    None
 }

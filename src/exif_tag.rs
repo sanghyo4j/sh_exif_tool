@@ -8,32 +8,13 @@ use time::{OffsetDateTime, PrimitiveDateTime, Date, Time};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn get_date_taken(path: &Path) -> Option<String> {
-    if let Ok(mut meta) = Metadata::new_from_path(path) {
+    if let Ok(meta) = Metadata::new_from_path(path) {
         if let Ok(tag) = meta.get_tag_string("Exif.Photo.DateTimeOriginal") {
             return Some(tag);
         }
 
         if let Ok(tag) = meta.get_tag_string("Exif.Image.DateTime") {
-            if meta.set_tag_string("Exif.Photo.DateTimeOriginal", &tag).is_ok() &&
-               meta.save_to_file(path).is_ok() {
-                return Some(tag);
-            } else {
-                eprintln!("→ DateTimeOriginal 복사 실패: {}", path.display());
-            }
-        }
-    }
-
-    if let Some(dt) = extract_datetime_from_filename(path) {
-        if let Ok(mut meta) = Metadata::new_from_path(path) {
-            let software = format!("SH148 EXIF TAG CREATOR v{}", VERSION);
-
-            let r1 = meta.set_tag_string("Exif.Photo.DateTimeOriginal", &dt);
-            let r2 = meta.set_tag_string("Exif.Image.Software", &software);
-
-            if r1.is_ok() && r2.is_ok() && meta.save_to_file(path).is_ok() {
-                append_creator_suffix(path);
-                return Some(dt);
-            }
+            return Some(tag);
         }
     }
 
@@ -42,18 +23,16 @@ pub fn get_date_taken(path: &Path) -> Option<String> {
 
 pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
     let filename = path.file_stem()?.to_str()?;
-    // println!("→ 파일명 분석 대상: {}", filename);
 
-    let re = Regex::new(r"\d{12,14}").unwrap();
+    let re = Regex::new(r"\d{8}[_-]?\d{4,6}").unwrap();
     let mut candidates = Vec::new();
 
     for mat in re.find_iter(filename) {
-        let raw = mat.as_str();
-        // println!("→ 숫자 패턴 추출됨: {}", raw);
+        let raw = mat.as_str().chars().filter(|c| c.is_ascii_digit()).collect::<String>();
 
         let padded = match raw.len() {
-            14 => raw.to_string(),          // yyyyMMddHHmmss
-            12 => format!("{}00", raw),     // yyyyMMddHHmm → 초를 00으로
+            14 => raw,
+            12 => format!("{}00", raw),
             _ => continue,
         };
 
@@ -94,20 +73,44 @@ fn parse_datetime_from_compact(s: &str) -> Result<OffsetDateTime, ()> {
 }
 
 pub fn append_creator_suffix(path: &Path) {
+    println!("→ append_creator_suffix 호출: {}", path.display());
+
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let stem = path.file_stem().unwrap().to_string_lossy();
     let ext = path.extension().unwrap_or_default().to_string_lossy();
 
-    if stem.ends_with("_SH148") {
+    if stem.ends_with("SH148") {
+        println!("이미 SH148이 붙어 있음 → 변경 없음");
         return;
     }
 
-    let new_filename = format!("{}_SH148.{}", stem, ext);
-    let new_path = parent.join(new_filename);
+    let new_name = format!("{}_SH148.{}", stem, ext);
+    let new_path = parent.join(&new_name);
 
-    if let Err(e) = fs::rename(path, &new_path) {
-        eprintln!("파일명 변경 실패: {} -> {} ({})", path.display(), new_path.display(), e);
-    } else {
-        println!("파일명 변경 완료: {}", new_path.display());
+    println!("→ 파일명 변경: {} → {}", path.display(), new_path.display());
+
+    match fs::rename(path, &new_path) {
+        Ok(_) => println!("→ 파일명 변경 성공"),
+        Err(e) => println!("→ 파일명 변경 실패: {:?}", e),
     }
+}
+
+pub fn set_exif_datetime_and_software(path: &Path, dt: &str) -> Result<(), String> {
+    let mut meta = Metadata::new_from_path(path).map_err(|e| format!("{:?}", e))?;
+
+    meta.set_tag_string("Exif.Photo.DateTimeOriginal", dt)
+        .map_err(|e| format!("{:?}", e))?;
+
+    let suffix = format!("SH148 EXIF TAG CREATOR v{}", env!("CARGO_PKG_VERSION"));
+    let new_software = match meta.get_tag_string("Exif.Image.Software") {
+        Ok(orig) => format!("{orig} (+{suffix})"),
+        Err(_) => suffix,
+    };
+
+    meta.set_tag_string("Exif.Image.Software", &new_software)
+        .map_err(|e| format!("{:?}", e))?;
+
+    meta.save_to_file(path).map_err(|e| format!("{:?}", e))?;
+
+    Ok(())
 }
