@@ -114,3 +114,44 @@ pub fn set_exif_datetime_and_software(path: &Path, dt: &str) -> Result<(), Strin
 
     Ok(())
 }
+
+pub fn check_datetime_tags(path: &Path) -> Result<(), String> {
+    let mut meta = Metadata::new_from_path(path).map_err(|e| format!("{:?}", e))?;
+
+    let orig = meta.get_tag_string("Exif.Photo.DateTimeOriginal").ok();
+    let dt = meta.get_tag_string("Exif.Image.DateTime").ok();
+    let dig = meta.get_tag_string("Exif.Photo.DateTimeDigitized").ok();
+
+    if orig.is_some() && dt.is_none() && dig.is_none() {
+        return Ok(());
+    }
+
+    let mut dates = Vec::new();
+    for tag in [&orig, &dt, &dig] {
+        if let Some(s) = tag {
+            if let Ok(p) = time::PrimitiveDateTime::parse(s, &time::format_description::parse("[year]:[month]:[day] [hour]:[minute]:[second]").unwrap()) {
+                dates.push(p);
+            }
+        }
+    }
+
+    let earliest = dates.into_iter().min().ok_or("날짜 태그 파싱 실패")?;
+
+    let fmt = time::macros::format_description!("[year]:[month]:[day] [hour]:[minute]:[second]");
+    let value = earliest.format(&fmt).map_err(|e| format!("{:?}", e))?;
+
+    meta.set_tag_string("Exif.Photo.DateTimeOriginal", &value)
+        .map_err(|e| format!("{:?}", e))?;
+
+    if dt.is_some() {
+        meta.set_tag_string("Exif.Image.DateTime", &value).ok();
+    }
+
+    if dig.is_some() {
+        meta.set_tag_string("Exif.Photo.DateTimeDigitized", &value).ok();
+    }
+
+    meta.save_to_file(path).map_err(|e| format!("{:?}", e))?;
+
+    Ok(())
+}
