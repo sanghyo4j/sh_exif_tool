@@ -3,7 +3,7 @@ mod exif_tag;
 use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use exif_tag::{get_date_taken, extract_datetime_from_filename, append_creator_suffix, set_exif_datetime_and_software};
+use exif_tag::{get_date_taken, extract_datetime_from_filename, append_creator_suffix, set_exif_datetime_and_software, check_datetime_tags};
 
 use unicode_width::UnicodeWidthStr;
 use image::{DynamicImage, ImageFormat, io::Reader as ImageReader};
@@ -34,7 +34,8 @@ fn main() {
     }
 
     let mut jpeg_files = Vec::new();
-    let mut missing_date_files = Vec::new();
+    let mut updated_files = Vec::new();
+    let mut failed_files = Vec::new();
 
     for file in input_files {
         let ext = file.extension().unwrap_or_default().to_string_lossy().to_lowercase();
@@ -55,25 +56,29 @@ fn main() {
     }
 
     for file in &jpeg_files {
-        let date = get_date_taken(file);
-
-        match date {
-            Some(d) => println!("{} → {}", file.display(), d),
-            None => {
-                println!("{} → N/A", file.display());
-                missing_date_files.push(file.clone());
+        match check_datetime_tags(file) {
+            Ok(()) => {
+                println!("{} → OK", file.display());
+                updated_files.push(file.clone());
+            }
+            Err(e) => {
+                println!("{} → 날짜 없음 또는 점검 실패: {}", file.display(), e);
+                match try_update_date_from_filename(file) {
+                    Ok(dt) => {
+                        println!("→ EXIF 작성 완료: {} ({})", file.display(), dt);
+                        updated_files.push(file.clone());
+                    }
+                    Err(e) => {
+                        println!("→ EXIF 작성 실패: {} → {}", file.display(), e);
+                        failed_files.push(file.clone());
+                    }
+                }
             }
         }
     }
 
-    println!("→ missing_date_files 개수: {}", missing_date_files.len());
-
-    for file in &missing_date_files {
-        match try_update_date_from_filename(file) {
-            Ok(dt) => println!("→ EXIF 작성 완료: {} ({})", file.display(), dt),
-            Err(e) => println!("→ EXIF 작성 실패: {} → {}", file.display(), e),
-        }
-    }
+    println!("→ EXIF 처리 완료: {}개", updated_files.len());
+    println!("→ 실패한 파일: {}개", failed_files.len());
 }
 
 fn list_image_files(dir: &Path) -> Vec<PathBuf> {

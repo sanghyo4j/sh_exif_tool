@@ -4,6 +4,8 @@ use std::time::SystemTime;
 use regex::Regex;
 use rexiv2::Metadata;
 use time::{OffsetDateTime, PrimitiveDateTime, Date, Time};
+use time::format_description::FormatItem;
+use time::format_description::parse;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -137,7 +139,7 @@ pub fn check_datetime_tags(path: &Path) -> Result<(), String> {
 
     let earliest = dates.into_iter().min().ok_or("날짜 태그 파싱 실패")?;
 
-    let fmt = time::macros::format_description!("[year]:[month]:[day] [hour]:[minute]:[second]");
+    let fmt = parse("[year]:[month]:[day] [hour]:[minute]:[second]").unwrap();
     let value = earliest.format(&fmt).map_err(|e| format!("{:?}", e))?;
 
     meta.set_tag_string("Exif.Photo.DateTimeOriginal", &value)
