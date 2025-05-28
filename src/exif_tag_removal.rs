@@ -15,12 +15,22 @@
 //     if let Some(path_str) = path.to_str() {
 //         let mut meta = Metadata::new_from_path(path_str).unwrap();
 
-//         meta.clear_tag("Exif.Photo.DateTimeOriginal");
+//         if meta.get_tag_string("Exif.Photo.DateTimeOriginal").is_ok() {
+//             meta.clear_tag("Exif.Photo.DateTimeOriginal");
+//         }
 
 //         if let Ok(software) = meta.get_tag_string("Exif.Image.Software") {
 //             if software.contains("SH148") {
 //                 meta.clear_tag("Exif.Image.Software");
 //             }
+//         }
+
+//         if meta.get_tag_string("Exif.Image.DateTime").is_ok() {
+//             meta.clear_tag("Exif.Image.DateTime");
+//         }
+
+//         if meta.get_tag_string("Exif.Photo.DateTimeDigitized").is_ok() {
+//             meta.clear_tag("Exif.Photo.DateTimeDigitized");
 //         }
 
 //         meta.save_to_file(path_str).unwrap();
