@@ -1,6 +1,4 @@
-mod cli;
-mod gui;
-mod utils;
+use exif_tool_gui::{cli, gui};
 
 use std::env;
 

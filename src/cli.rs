@@ -1,9 +1,7 @@
-mod exif_tag;
-
 use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use exif_tag::{get_date_taken, extract_datetime_from_filename, append_creator_suffix, set_exif_datetime_and_software, check_datetime_tags};
+use crate::exif_tag::{get_date_taken, extract_datetime_from_filename, append_creator_suffix, set_exif_datetime_and_software, check_datetime_tags};
 
 use unicode_width::UnicodeWidthStr;
 use image::{DynamicImage, ImageFormat, io::Reader as ImageReader};
@@ -81,7 +79,7 @@ pub fn run_cli(args: &[String]) {
     println!("→ 실패한 파일: {}개", failed_files.len());
 }
 
-fn list_image_files(dir: &Path) -> Vec<PathBuf> {
+pub fn list_image_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
     if let Ok(entries) = fs::read_dir(dir) {

@@ -1,5 +1,5 @@
 use fltk::{app, browser::Browser, prelude::*, window::Window};
-use crate::utils::list_image_files;
+use crate::cli::list_image_files;
 use std::env;
 
 pub fn run_gui() {
