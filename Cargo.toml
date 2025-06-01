@@ -1,9 +1,10 @@
 [package]
-name = "exif_tool"
-version = "0.1.4"
+name = "exif_tool_gui"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
+fltk = "1.4"
 regex = "1.7"
 rexiv2 = "0.10.0"
 image = "0.24.6"
