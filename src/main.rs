@@ -1,5 +1,5 @@
 mod gui;
 
 fn main() {
-    gui::run_app();
+    gui::launch_gui();
 }

@@ -1,34 +1,44 @@
 use fltk::{
-    app,
-    button::Button,
-    frame::Frame,
-    input::Input,
     prelude::*,
+    input::Input,
+    tree::Tree,
+    browser::HoldBrowser,
+    group::{Flex, FlexType},
     window::Window,
 };
 
+#[derive(Clone)]
 pub struct UiWidgets {
-    pub input_path: Input,
-    pub btn_browse: Button,
-    pub btn_process: Button,
-    pub output: Frame,
+    pub path_display: Input,
+    pub file_tree: Tree,
+    pub file_list: HoldBrowser,
 }
 
 pub fn build_ui() -> (Window, UiWidgets) {
-    let mut wind = Window::new(100, 100, 400, 200, "EXIF Tool");
+    let mut wind = Window::new(100, 100, 800, 600, "");
+    let mut root = Flex::default_fill().column();
 
-    let input_path = Input::new(20, 20, 260, 30, "Directory:");
-    let btn_browse = Button::new(290, 20, 90, 30, "Browse");
-    let btn_process = Button::new(20, 70, 360, 40, "Start Processing");
-    let output = Frame::new(20, 130, 360, 30, "");
+    let path_display = Input::default().with_size(0, 30);
+    let mut bottom = Flex::default().row();
+
+    let file_tree = Tree::default().with_size(0, 0);
+    let file_list = HoldBrowser::default().with_size(0, 0);
+    let file_info = HoldBrowser::default().with_size(0, 0);
+
+    bottom.set_size(&file_tree, 160);
+    bottom.set_size(&file_list, 320);
+    bottom.end();
+
+    root.set_size(&path_display, 30);
+    root.end();
 
     wind.end();
+    wind.resizable(&root);
 
     let widgets = UiWidgets {
-        input_path,
-        btn_browse,
-        btn_process,
-        output,
+        path_display,
+        file_tree,
+        file_list,
     };
 
     (wind, widgets)
