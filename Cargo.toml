@@ -1,12 +1,8 @@
 [package]
-name = "exif_tool_gui"
-version = "0.2.0"
+name = "egui_hello"
+version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-fltk = "1.4"
-regex = "1.7"
-rexiv2 = "0.10.0"
-image = "0.24.6"
-unicode-width = "0.1"
-time = { version = "0.3", features = ["macros", "formatting", "parsing"] }
+eframe = "0.27"
+chrono = "0.4"
