@@ -1,8 +1,17 @@
 [package]
-name = "egui_hello"
+name = "sh_exif_tool"
 version = "0.1.0"
 edition = "2021"
 
+#[dependencies]
+#eframe = "0.27"
+#regex = "1.7"
+#rexiv2 = "0.10.0"
+#image = "0.24.6"
+#unicode-width = "0.1"
+#time = { version = "0.3", features = ["macros", "formatting", "parsing"] }
+
 [dependencies]
-eframe = "0.27"
+eframe = "0.30"
+egui_extras = "0.30"
 chrono = "0.4"
