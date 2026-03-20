@@ -1,0 +1,62 @@
+import { VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
+
+export struct FileEntry {
+    name: string,
+    size: string,
+    modified: string,
+    created: string,
+    is_dir: bool,
+}
+
+export component MainWindow inherits Window {
+    // 속성 선언 끝에 ; 필수
+    in-out property <string> current_path;
+    in-out property <[FileEntry]> files;
+    in-out property <int> selected_index;
+
+    // 콜백 선언 끝에 ; 필수
+    callback open_dir(int);
+    callback reload();
+    callback go_parent();
+
+    VerticalBox {
+        Text { 
+            text: current_path; // 속성 설정 끝에 ; 필수
+        }
+
+        ListView {
+            for entry[i] in files : Rectangle {
+                width: parent.width;
+                height: 30px;
+                background: i == selected_index ? #3498db33 : transparent;
+
+                // Slint에서 'states'는 보통 복잡한 애니메이션에 사용됩니다. 
+                // 단순 배경색 변경은 위와 같이 삼항 연산자를 사용하는 것이 훨씬 간결합니다.
+
+                HorizontalBox {
+                    // Slint에서 기본 요소들은 anchors를 지원하지만 
+                    // Layout 내부에 있을 때는 Layout의 규칙을 따르는 것이 좋습니다.
+                    
+                    Text { text: entry.name; width: 400px; }
+                    Text { text: entry.size; width: 100px; }
+                    Text { text: entry.modified; width: 200px; }
+                }
+
+                TouchArea {
+                    // Rectangle 전체를 덮도록 설정
+                    width: parent.width;
+                    height: parent.height;
+                    
+                    clicked => { 
+                        selected_index = i; 
+                    }
+                    double-clicked => { 
+                        if (entry.is_dir) { 
+                            root.open_dir(i); 
+                        } 
+                    }
+                }
+            }
+        }
+    }
+}

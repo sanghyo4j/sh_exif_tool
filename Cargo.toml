@@ -12,6 +12,18 @@ edition = "2021"
 #time = { version = "0.3", features = ["macros", "formatting", "parsing"] }
 
 [dependencies]
-eframe = "0.30"
 egui_extras = "0.30"
 chrono = "0.4"
+slint = { version = "1.9", optional = true }
+eframe = { version = "0.30", optional = true }
+
+[build-dependencies]
+slint-build = "1"
+
+[features]
+default = ["gui-slint"]
+gui-slint = ["dep:slint"]
+gui-egui = ["dep:eframe"]
+
+[package.metadata.slint]
+include-path = ["src/gui_slint"]
