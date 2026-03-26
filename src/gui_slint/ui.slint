@@ -1,4 +1,4 @@
-import { VerticalBox, HorizontalBox, ListView, Button, LineEdit } from "std-widgets.slint"; // LineEdit 추가 확인
+import { VerticalBox, HorizontalBox, ListView, Button, LineEdit } from "std-widgets.slint";
 
 component HDivider inherits Rectangle {
     background: #e0e0e0;
@@ -26,7 +26,7 @@ export component MainWindow inherits Window {
     background: #ffffff;
     title: "Rust EXIF Tool";
     
-    in-out property <string> current_path;
+    in-out property <string> current_path: "C:/";
     in-out property <[FileEntry]> files;
     in-out property <int> selected_index: -1;
 
@@ -38,7 +38,7 @@ export component MainWindow inherits Window {
         padding: 0;
         spacing: 0;
 
-        // 1. 최상단 메뉴 바 (Menu Bar)
+        // 1. 최상단 메뉴 바
         Rectangle {
             height: 25px;
             background: #ffffff;
@@ -52,94 +52,61 @@ export component MainWindow inherits Window {
                 Text { text: "도움말(H)"; font-size: 12px; color: #333333; vertical-alignment: center; }
             }
         }
+        HDivider {}
 
-        // 2. 도구 모음 및 경로 표시줄 부분
+// 2. 경로 표시줄 (초기 텍스트 출력 방식)
         Rectangle {
-            height: 45px;
+            height: 40px; 
             background: #fcfcfc;
+            
             HorizontalBox {
-                padding: 8px;
-                spacing: 12px;
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 10px;
                 alignment: start;
 
-                Text { text: "경로"; vertical-alignment: center; color: #666666; font-weight: 700; }
+                Text { 
+                    text: "경로:"; 
+                    vertical-alignment: center; 
+                    color: #666666; 
+                    font-weight: 700;
+                }
                 
-                Rectangle {
-                    width: 800px;
-                    height: 28px;
-                    background: #ffffff;
-                    border-width: 1px;
-                    border-color: #cccccc;
-                    border-radius: 2px;
-
-                    LineEdit {
-                        width: 100%;
-                        height: 100%;
-                        // 단방향(:)이 아닌 양방향(<=>) 바인딩 사용
-                        text <=> current_path; 
-                        font-size: 13px;
-                        
-                        accepted => {
-                            // 엔터 쳤을 때 바로 로드
-                            root.reload();
-                        }
-                    }
+                // 단순 텍스트 출력
+                Text {
+                    text: current_path;
+                    vertical-alignment: center;
+                    font-size: 13px;
+                    color: #333333;
                 }
             }
-            HDivider { y: 44px; }
+            HDivider { y: 39px; }
         }
+        HDivider {}
 
         // 3. 메인 콘텐츠
         HorizontalBox {
             padding: 0;
             spacing: 0;
 
-            // [좌측] 탐색기
+            // [좌측] 탐색기 영역
             VerticalBox {
                 width: 750px;
                 padding: 0;
                 spacing: 0;
 
-                // 2. 도구 모음 아래의 헤더 영역
+                // 리스트 헤더
                 Rectangle {
                     height: 30px;
                     background: #f5f5f5;
-                    width: 100%; // <-- 이 줄이 누락되면 내부 내용이 안 보일 수 있습니다.
-                    
-                    // 개별 텍스트들의 위치를 고정
-                    Text { 
-                        x: 15px; 
-                        width: 380px; 
-                        text: "파일명"; 
-                        font-weight: 700; 
-                        color: #666666; 
-                        vertical-alignment: center; 
-                        height: 100%; // 부모 Rectangle 높이를 꽉 채우도록 설정
-                    }
-                    Text { 
-                        x: 410px; 
-                        width: 80px; 
-                        text: "크기"; 
-                        font-weight: 700; 
-                        color: #666666; 
-                        horizontal-alignment: right; 
-                        vertical-alignment: center; 
-                        height: 100%;
-                    }
-                    Text { 
-                        x: 510px; 
-                        text: "수정일"; 
-                        font-weight: 700; 
-                        color: #666666; 
-                        vertical-alignment: center; 
-                        height: 100%;
-                    }
-                    
+                    Text { x: 15px; width: 380px; text: "파일명"; font-weight: 700; color: #666666; vertical-alignment: center; height: 100%; }
+                    Text { x: 410px; width: 80px; text: "크기"; font-weight: 700; color: #666666; horizontal-alignment: right; vertical-alignment: center; height: 100%; }
+                    Text { x: 510px; text: "수정일"; font-weight: 700; color: #666666; vertical-alignment: center; height: 100%; }
                     HDivider { y: 29px; }
                 }
 
+                // 파일 리스트
                 ListView {
-                    // 리스트 아이템 부분
                     for entry[i] in files : Rectangle {
                         height: 32px;
                         background: i == selected_index ? #e3f2fd : #ffffff;
@@ -152,31 +119,25 @@ export component MainWindow inherits Window {
                                 else if (entry.is_dir) { root.open_dir(i); } 
                             }
 
-                            // 레이아웃을 위해 Rectangle 사용 (Box 대신)
                             Rectangle {
-                                // 파일명
-                                Text {
-                                    x: 15px; // 왼쪽 여백
-                                    width: 380px;
+                                Text { 
+                                    x: 15px; width: 380px; 
                                     text: entry.is_dir ? (entry.name == "[..]" ? "⬅ " + entry.name : "📁 " + entry.name) : "📄 " + entry.name;
                                     color: i == selected_index ? #1976d2 : #212121;
-                                    vertical-alignment: center;
+                                    vertical-alignment: center; height: 100%;
                                 }
-                                // 크기
-                                Text {
-                                    x: 410px; // 파일명 시작(15) + 파일명 너비(380) + 간격(15)
-                                    width: 80px;
-                                    text: entry.size;
-                                    horizontal-alignment: right;
-                                    color: #666666;
-                                    vertical-alignment: center;
+                                Text { 
+                                    x: 410px; width: 80px; 
+                                    text: entry.size; 
+                                    horizontal-alignment: right; 
+                                    color: #666666; 
+                                    vertical-alignment: center; height: 100%;
                                 }
-                                // 수정일
-                                Text {
-                                    x: 510px; // 이전 너비 합산
-                                    text: entry.modified;
-                                    color: #666666;
-                                    vertical-alignment: center;
+                                Text { 
+                                    x: 510px; 
+                                    text: entry.modified; 
+                                    color: #666666; 
+                                    vertical-alignment: center; height: 100%;
                                 }
                             }
                         }
@@ -184,16 +145,40 @@ export component MainWindow inherits Window {
                 }
             }
 
-            VDivider { }
+            VDivider {}
 
-            // [우측] 상세 정보
+            // [우측] 상세 정보 영역
             Rectangle {
                 background: #ffffff;
                 VerticalBox {
                     padding: 30px;
                     spacing: 20px;
                     alignment: start;
-                    // ... (이전과 동일) ...
+
+                    Text {
+                        text: "파일 정보";
+                        font-size: 18px;
+                        font-weight: 800;
+                        color: #333333;
+                    }
+
+                    if selected_index >= 0 : VerticalBox {
+                        padding: 0;
+                        spacing: 10px;
+                        Text { text: "파일명: " + files[selected_index].name; font-size: 14px; }
+                        Text { text: "크기: " + files[selected_index].size; font-size: 14px; }
+                        Text { text: "수정일: " + files[selected_index].modified; font-size: 14px; }
+                        
+                        Rectangle { height: 20px; } 
+                        Text { text: "EXIF 데이터"; font-weight: 700; color: #666666; }
+                        Text { text: "촬영 날짜: -"; color: #888888; }
+                        Text { text: "카메라: -"; color: #888888; }
+                    }
+
+                    if selected_index < 0 : Text {
+                        text: "파일을 선택하면 상세 정보가 표시됩니다.";
+                        color: #999999;
+                    }
                 }
             }
         }
