@@ -35,9 +35,14 @@ impl SlintApp {
 
     pub fn load_folder(&mut self) {
         self.files.clear();
-        if let Ok(read_dir) = std::fs::read_dir(&self.current_path) {
+        
+        // 디버깅용 출력 (터미널에서 확인해 보세요)
+        println!("Loading folder: {}", self.current_path);
+
+        let path = std::path::Path::new(&self.current_path);
+        if let Ok(read_dir) = std::fs::read_dir(path) {
             let mut entries: Vec<LocalFileData> = read_dir
-                .flatten()
+                .filter_map(|res| res.ok()) // flatten() 대신 명시적으로 ok() 처리
                 .filter_map(|entry| {
                     let meta = entry.metadata().ok()?;
                     Some(LocalFileData {
@@ -50,28 +55,46 @@ impl SlintApp {
                 })
                 .collect();
 
-            // 디렉토리가 위로 오도록 정렬 (선택 사항)
+            // 디버깅용: 읽어온 파일 개수 확인
+            println!("Found {} entries", entries.len());
+
             entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.path.cmp(&b.path)));
             self.files = entries;
+        } else {
+            eprintln!("Failed to read directory: {}", self.current_path);
         }
     }
 
     pub fn get_ui_model(&self) -> ModelRc<UiFileEntry> {
-        let items: Vec<UiFileEntry> = self.files.iter().map(|f| {
-            let name = f.path.file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
+        let mut ui_items: Vec<UiFileEntry> = Vec::new();
+
+        // 1. 상위 폴더 아이템 추가 (필드 명칭: name, size, modified, created, is_dir)
+        ui_items.push(UiFileEntry {
+            name: "[..]".into(), // Slint의 SharedString으로 자동 변환됨
+            size: "-".into(),
+            modified: "-".into(),
+            created: "-".into(),
+            is_dir: true,
+        });
+
+        // 2. 실제 파일 목록 추가
+        for f in &self.files {
+            let name_str = f.path.file_name()
+                .map(|os_str| os_str.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
             
-            UiFileEntry {
-                name: SharedString::from(if f.is_dir { format!("[{}]", name) } else { name }),
-                size: SharedString::from(if f.is_dir { "-".into() } else { format!("{} KB", (f.size + 1023) / 1024) }),
-                modified: SharedString::from(f.modified.map(format_time).unwrap_or_else(|| "-".into())),
-                created: SharedString::from(f.created.map(format_time).unwrap_or_else(|| "-".into())),
+            println!("DEBUG: Mapping file name -> '{}'", name_str);
+
+            ui_items.push(UiFileEntry {
+                name: name_str.into(),
+                size: if f.is_dir { "-".into() } else { format!("{} KB", (f.size + 1023) / 1024).into() },
+                modified: f.modified.map(format_time).unwrap_or_else(|| "-".into()).into(),
+                created: f.created.map(format_time).unwrap_or_else(|| "-".into()).into(),
                 is_dir: f.is_dir,
-            }
-        }).collect();
-        
-        ModelRc::new(VecModel::from(items))
+            });
+        }
+
+        ModelRc::new(VecModel::from(ui_items))
     }
 }
 

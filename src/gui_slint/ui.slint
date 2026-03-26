@@ -1,4 +1,16 @@
-import { VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ListView, Button } from "std-widgets.slint";
+
+component HDivider inherits Rectangle {
+    background: #e0e0e0;
+    height: 1px;
+    width: 100%;
+}
+
+component VDivider inherits Rectangle {
+    background: #e0e0e0;
+    width: 1px;
+    height: 100%;
+}
 
 export struct FileEntry {
     name: string,
@@ -9,52 +21,124 @@ export struct FileEntry {
 }
 
 export component MainWindow inherits Window {
-    // 속성 선언 끝에 ; 필수
+    width: 1200px;
+    height: 800px;
+    background: #ffffff;
+    title: "Rust EXIF Tool";
+    
     in-out property <string> current_path;
     in-out property <[FileEntry]> files;
-    in-out property <int> selected_index;
+    in-out property <int> selected_index: -1;
 
-    // 콜백 선언 끝에 ; 필수
     callback open_dir(int);
     callback reload();
     callback go_parent();
 
     VerticalBox {
-        Text { 
-            text: current_path; // 속성 설정 끝에 ; 필수
+        padding: 0;
+        spacing: 0;
+
+        // 1. 최상단 메뉴 바 (Menu Bar)
+        Rectangle {
+            height: 25px;
+            background: #ffffff;
+            HorizontalBox {
+                padding-left: 10px;
+                spacing: 15px;
+                alignment: start;
+                Text { text: "파일(F)"; font-size: 12px; color: #333333; vertical-alignment: center; }
+                Text { text: "보기(V)"; font-size: 12px; color: #333333; vertical-alignment: center; }
+                Text { text: "도구(T)"; font-size: 12px; color: #333333; vertical-alignment: center; }
+                Text { text: "도움말(H)"; font-size: 12px; color: #333333; vertical-alignment: center; }
+            }
         }
 
-        ListView {
-            for entry[i] in files : Rectangle {
-                width: parent.width;
-                height: 30px;
-                background: i == selected_index ? #3498db33 : transparent;
+        // 2. 도구 모음 및 경로 표시줄
+        Rectangle {
+            height: 45px;
+            background: #fcfcfc;
+            HorizontalBox {
+                padding: 8px;
+                spacing: 15px;
+                alignment: start;
+                Button { text: "↻ 새로고침"; clicked => { root.reload(); } }
+                Text { text: current_path; vertical-alignment: center; color: #333333; font-weight: 500; }
+            }
+            HDivider { y: 44px; }
+        }
 
-                // Slint에서 'states'는 보통 복잡한 애니메이션에 사용됩니다. 
-                // 단순 배경색 변경은 위와 같이 삼항 연산자를 사용하는 것이 훨씬 간결합니다.
+        // 3. 메인 콘텐츠
+        HorizontalBox {
+            padding: 0;
+            spacing: 0;
 
-                HorizontalBox {
-                    // Slint에서 기본 요소들은 anchors를 지원하지만 
-                    // Layout 내부에 있을 때는 Layout의 규칙을 따르는 것이 좋습니다.
-                    
-                    Text { text: entry.name; width: 400px; }
-                    Text { text: entry.size; width: 100px; }
-                    Text { text: entry.modified; width: 200px; }
+            // [좌측] 탐색기
+            VerticalBox {
+                width: 750px;
+                padding: 0;
+                spacing: 0;
+
+                // 헤더
+                Rectangle {
+                    height: 30px;
+                    background: #f5f5f5;
+                    HorizontalBox {
+                        padding-left: 15px;
+                        spacing: 0;
+                        Text { text: "파일명"; width: 380px; font-weight: 700; color: #666666; vertical-alignment: center; }
+                        Text { text: "크기"; width: 80px; font-weight: 700; color: #666666; vertical-alignment: center; }
+                        Text { text: "수정일"; font-weight: 700; color: #666666; vertical-alignment: center; }
+                    }
+                    HDivider { y: 29px; }
                 }
 
-                TouchArea {
-                    // Rectangle 전체를 덮도록 설정
-                    width: parent.width;
-                    height: parent.height;
-                    
-                    clicked => { 
-                        selected_index = i; 
+                ListView {
+                    for entry[i] in files : Rectangle {
+                        height: 28px;
+                        background: i == selected_index ? #e3f2fd : #ffffff;
+                        
+                        // ui.slint 내부 ListView 안쪽 수정
+                        HorizontalBox {
+                            padding-left: 15px;
+                            spacing: 10px; // 간격을 조금 줍니다
+
+                            Text { 
+                                // 아이콘 + 이름 조합 (최대한 단순하게)
+                                text: entry.is_dir ? "📁 " + entry.name : "📄 " + entry.name;
+                                
+                                // 복잡한 설정 없이 기본 출력
+                                color: i == selected_index ? #1976d2 : #212121;
+                                vertical-alignment: center;
+                            }
+
+                            Text { text: entry.size; width: 80px; color: #666666; vertical-alignment: center; }
+                            Text { text: entry.modified; color: #666666; vertical-alignment: center; }
+                        }
+
+                        TouchArea {
+                            clicked => { selected_index = i; }
+                            double-clicked => { 
+                                if (entry.name == "[..]") {
+                                    root.go_parent();
+                                } else if (entry.is_dir) { 
+                                    root.open_dir(i); 
+                                } 
+                            }
+                        }
                     }
-                    double-clicked => { 
-                        if (entry.is_dir) { 
-                            root.open_dir(i); 
-                        } 
-                    }
+                }
+            }
+
+            VDivider { }
+
+            // [우측] 상세 정보
+            Rectangle {
+                background: #ffffff;
+                VerticalBox {
+                    padding: 30px;
+                    spacing: 20px;
+                    alignment: start;
+                    // ... (이전과 동일) ...
                 }
             }
         }
