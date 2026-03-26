@@ -1,4 +1,4 @@
-import { VerticalBox, HorizontalBox, ListView, Button } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ListView, Button, LineEdit } from "std-widgets.slint"; // LineEdit 추가 확인
 
 component HDivider inherits Rectangle {
     background: #e0e0e0;
@@ -53,16 +53,38 @@ export component MainWindow inherits Window {
             }
         }
 
-        // 2. 도구 모음 및 경로 표시줄
+        // 2. 도구 모음 및 경로 표시줄 부분
         Rectangle {
             height: 45px;
             background: #fcfcfc;
             HorizontalBox {
                 padding: 8px;
-                spacing: 15px;
+                spacing: 12px;
                 alignment: start;
-                Button { text: "↻ 새로고침"; clicked => { root.reload(); } }
-                Text { text: current_path; vertical-alignment: center; color: #333333; font-weight: 500; }
+
+                Text { text: "경로"; vertical-alignment: center; color: #666666; font-weight: 700; }
+                
+                Rectangle {
+                    width: 800px;
+                    height: 28px;
+                    background: #ffffff;
+                    border-width: 1px;
+                    border-color: #cccccc;
+                    border-radius: 2px;
+
+                    LineEdit {
+                        width: 100%;
+                        height: 100%;
+                        // 단방향(:)이 아닌 양방향(<=>) 바인딩 사용
+                        text <=> current_path; 
+                        font-size: 13px;
+                        
+                        accepted => {
+                            // 엔터 쳤을 때 바로 로드
+                            root.reload();
+                        }
+                    }
+                }
             }
             HDivider { y: 44px; }
         }
@@ -78,51 +100,84 @@ export component MainWindow inherits Window {
                 padding: 0;
                 spacing: 0;
 
-                // 헤더
+                // 2. 도구 모음 아래의 헤더 영역
                 Rectangle {
                     height: 30px;
                     background: #f5f5f5;
-                    HorizontalBox {
-                        padding-left: 15px;
-                        spacing: 0;
-                        Text { text: "파일명"; width: 380px; font-weight: 700; color: #666666; vertical-alignment: center; }
-                        Text { text: "크기"; width: 80px; font-weight: 700; color: #666666; vertical-alignment: center; }
-                        Text { text: "수정일"; font-weight: 700; color: #666666; vertical-alignment: center; }
+                    width: 100%; // <-- 이 줄이 누락되면 내부 내용이 안 보일 수 있습니다.
+                    
+                    // 개별 텍스트들의 위치를 고정
+                    Text { 
+                        x: 15px; 
+                        width: 380px; 
+                        text: "파일명"; 
+                        font-weight: 700; 
+                        color: #666666; 
+                        vertical-alignment: center; 
+                        height: 100%; // 부모 Rectangle 높이를 꽉 채우도록 설정
                     }
+                    Text { 
+                        x: 410px; 
+                        width: 80px; 
+                        text: "크기"; 
+                        font-weight: 700; 
+                        color: #666666; 
+                        horizontal-alignment: right; 
+                        vertical-alignment: center; 
+                        height: 100%;
+                    }
+                    Text { 
+                        x: 510px; 
+                        text: "수정일"; 
+                        font-weight: 700; 
+                        color: #666666; 
+                        vertical-alignment: center; 
+                        height: 100%;
+                    }
+                    
                     HDivider { y: 29px; }
                 }
 
                 ListView {
+                    // 리스트 아이템 부분
                     for entry[i] in files : Rectangle {
-                        height: 28px;
+                        height: 32px;
                         background: i == selected_index ? #e3f2fd : #ffffff;
-                        
-                        // ui.slint 내부 ListView 안쪽 수정
-                        HorizontalBox {
-                            padding-left: 15px;
-                            spacing: 10px; // 간격을 조금 줍니다
-
-                            Text { 
-                                // 아이콘 + 이름 조합 (최대한 단순하게)
-                                text: entry.is_dir ? "📁 " + entry.name : "📄 " + entry.name;
-                                
-                                // 복잡한 설정 없이 기본 출력
-                                color: i == selected_index ? #1976d2 : #212121;
-                                vertical-alignment: center;
-                            }
-
-                            Text { text: entry.size; width: 80px; color: #666666; vertical-alignment: center; }
-                            Text { text: entry.modified; color: #666666; vertical-alignment: center; }
-                        }
 
                         TouchArea {
+                            width: 100%; height: 100%;
                             clicked => { selected_index = i; }
                             double-clicked => { 
-                                if (entry.name == "[..]") {
-                                    root.go_parent();
-                                } else if (entry.is_dir) { 
-                                    root.open_dir(i); 
-                                } 
+                                if (entry.name == "[..]") { root.go_parent(); } 
+                                else if (entry.is_dir) { root.open_dir(i); } 
+                            }
+
+                            // 레이아웃을 위해 Rectangle 사용 (Box 대신)
+                            Rectangle {
+                                // 파일명
+                                Text {
+                                    x: 15px; // 왼쪽 여백
+                                    width: 380px;
+                                    text: entry.is_dir ? (entry.name == "[..]" ? "⬅ " + entry.name : "📁 " + entry.name) : "📄 " + entry.name;
+                                    color: i == selected_index ? #1976d2 : #212121;
+                                    vertical-alignment: center;
+                                }
+                                // 크기
+                                Text {
+                                    x: 410px; // 파일명 시작(15) + 파일명 너비(380) + 간격(15)
+                                    width: 80px;
+                                    text: entry.size;
+                                    horizontal-alignment: right;
+                                    color: #666666;
+                                    vertical-alignment: center;
+                                }
+                                // 수정일
+                                Text {
+                                    x: 510px; // 이전 너비 합산
+                                    text: entry.modified;
+                                    color: #666666;
+                                    vertical-alignment: center;
+                                }
                             }
                         }
                     }

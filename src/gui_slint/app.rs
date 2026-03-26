@@ -83,8 +83,6 @@ impl SlintApp {
                 .map(|os_str| os_str.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
             
-            println!("DEBUG: Mapping file name -> '{}'", name_str);
-
             ui_items.push(UiFileEntry {
                 name: name_str.into(),
                 size: if f.is_dir { "-".into() } else { format!("{} KB", (f.size + 1023) / 1024).into() },
