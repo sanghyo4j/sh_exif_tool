@@ -29,73 +29,49 @@ export component MainWindow inherits Window {
     in-out property <string> current_path: "C:/";
     in-out property <[FileEntry]> files;
     in-out property <int> selected_index: -1;
+    in-out property <bool> editing_path: false;
 
     callback open_dir(int);
     callback reload();
     callback go_parent();
 
+    // 1. [가장 아래 레이어] 메인 UI 구조
     VerticalBox {
         padding: 0;
         spacing: 0;
 
-        // 1. 최상단 메뉴 바
+        // 최상단 메뉴 바
         Rectangle {
-            height: 25px;
+            height: 32px;
             background: #ffffff;
             HorizontalBox {
                 padding-left: 10px;
-                spacing: 15px;
-                alignment: start;
-                Text { text: "파일(F)"; font-size: 12px; color: #333333; vertical-alignment: center; }
-                Text { text: "보기(V)"; font-size: 12px; color: #333333; vertical-alignment: center; }
-                Text { text: "도구(T)"; font-size: 12px; color: #333333; vertical-alignment: center; }
-                Text { text: "도움말(H)"; font-size: 12px; color: #333333; vertical-alignment: center; }
-            }
-        }
-        HDivider {}
-
-// 2. 경로 표시줄 (초기 텍스트 출력 방식)
-        Rectangle {
-            height: 40px; 
-            background: #fcfcfc;
-            
-            HorizontalBox {
-                padding-left: 10px;
                 padding-right: 10px;
-                spacing: 10px;
+                spacing: 20px;
                 alignment: start;
-
-                Text { 
-                    text: "경로:"; 
-                    vertical-alignment: center; 
-                    color: #666666; 
-                    font-weight: 700;
-                }
-                
-                // 단순 텍스트 출력
-                Text {
-                    text: current_path;
-                    vertical-alignment: center;
-                    font-size: 13px;
-                    color: #333333;
-                }
+                Text { text: "파일(F)"; font-size: 13px; color: #333333; vertical-alignment: center; }
+                Text { text: "보기(V)"; font-size: 13px; color: #333333; vertical-alignment: center; }
+                Text { text: "도구(T)"; font-size: 13px; color: #333333; vertical-alignment: center; }
+                Text { text: "도움말(H)"; font-size: 13px; color: #333333; vertical-alignment: center; }
             }
-            HDivider { y: 39px; }
         }
         HDivider {}
 
-        // 3. 메인 콘텐츠
+        // 경로 표시줄이 들어갈 '빈 자리' (레이어 3에서 이 자리를 덮습니다)
+        Rectangle {
+            height: 40px;
+        }
+
+        // 메인 콘텐츠 영역
         HorizontalBox {
             padding: 0;
             spacing: 0;
 
-            // [좌측] 탐색기 영역
             VerticalBox {
                 width: 750px;
                 padding: 0;
                 spacing: 0;
 
-                // 리스트 헤더
                 Rectangle {
                     height: 30px;
                     background: #f5f5f5;
@@ -105,12 +81,10 @@ export component MainWindow inherits Window {
                     HDivider { y: 29px; }
                 }
 
-                // 파일 리스트
                 ListView {
                     for entry[i] in files : Rectangle {
                         height: 32px;
                         background: i == selected_index ? #e3f2fd : #ffffff;
-
                         TouchArea {
                             width: 100%; height: 100%;
                             clicked => { selected_index = i; }
@@ -118,7 +92,6 @@ export component MainWindow inherits Window {
                                 if (entry.name == "[..]") { root.go_parent(); } 
                                 else if (entry.is_dir) { root.open_dir(i); } 
                             }
-
                             Rectangle {
                                 Text { 
                                     x: 15px; width: 380px; 
@@ -147,34 +120,23 @@ export component MainWindow inherits Window {
 
             VDivider {}
 
-            // [우측] 상세 정보 영역
             Rectangle {
                 background: #ffffff;
                 VerticalBox {
                     padding: 30px;
                     spacing: 20px;
                     alignment: start;
-
-                    Text {
-                        text: "파일 정보";
-                        font-size: 18px;
-                        font-weight: 800;
-                        color: #333333;
-                    }
-
+                    Text { text: "파일 정보"; font-size: 18px; font-weight: 800; color: #333333; }
                     if selected_index >= 0 : VerticalBox {
-                        padding: 0;
-                        spacing: 10px;
+                        padding: 0; spacing: 10px;
                         Text { text: "파일명: " + files[selected_index].name; font-size: 14px; }
                         Text { text: "크기: " + files[selected_index].size; font-size: 14px; }
                         Text { text: "수정일: " + files[selected_index].modified; font-size: 14px; }
-                        
                         Rectangle { height: 20px; } 
                         Text { text: "EXIF 데이터"; font-weight: 700; color: #666666; }
                         Text { text: "촬영 날짜: -"; color: #888888; }
                         Text { text: "카메라: -"; color: #888888; }
                     }
-
                     if selected_index < 0 : Text {
                         text: "파일을 선택하면 상세 정보가 표시됩니다.";
                         color: #999999;
@@ -182,5 +144,77 @@ export component MainWindow inherits Window {
                 }
             }
         }
+    }
+
+    // 2. [중간 레이어] 바깥 클릭 감지 가림막 (Z-index 역할)
+    if (editing_path) : TouchArea {
+        clicked => {
+            editing_path = false;
+        }
+    }
+
+    // 3. [최상단 레이어] 경로 표시줄
+    // 메인 UI의 빈 자리에 딱 맞도록 y 좌표를 수동으로 지정합니다.
+    Rectangle {
+        y: 33px; 
+        height: 40px;
+        background: #fcfcfc;
+        
+        HorizontalBox {
+            padding-left: 10px;
+            padding-right: 10px;
+            spacing: 10px;
+
+            Text { 
+                text: "경로:"; 
+                vertical-alignment: center; 
+                color: #666666; 
+                font-weight: 700;
+                width: 40px;
+            }
+            
+            Rectangle {
+                horizontal-stretch: 1;
+
+                // 보기 모드
+                if !editing_path : TouchArea {
+                    width: 100%; height: 100%;
+                    clicked => { 
+                        editing_path = true;
+                    }
+                    Text {
+                        // 핵심 1: Text 위젯 자체를 부모 너비만큼 꽉 채웁니다.
+                        width: 100%; 
+                        height: 100%;
+                        
+                        // 핵심 2: 넓어진 너비 안에서 왼쪽 정렬을 수행합니다.
+                        horizontal-alignment: left;
+                        vertical-alignment: center;
+                        
+                        text: current_path;
+                        font-size: 13px;
+                        color: #333333;
+                        
+                        // 핵심 3: "경로:" 글자와 너무 붙지 않게 왼쪽 여백을 줍니다.
+                        x: 5px; 
+                    }
+                }
+
+                // 편집 모드 (LineEdit은 기본적으로 왼쪽 정렬이므로 그대로 둡니다)
+                if editing_path : LineEdit {
+                    width: 100%;
+                    height: 30px;
+                    y: (parent.height - self.height) / 2;
+                    text: current_path;
+                    font-size: 13px;
+                    init => { self.focus(); }
+                    accepted(new_path) => {
+                        current_path = new_path;
+                        editing_path = false;
+                    }
+                }
+            }
+        }
+        HDivider { y: 39px; }
     }
 }
