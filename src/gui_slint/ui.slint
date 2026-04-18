@@ -1,5 +1,6 @@
 import { VerticalBox, HorizontalBox, ScrollView, ListView, Button, LineEdit } from "std-widgets.slint";
 
+// --- 공용 컴포넌트 ---
 component HDivider inherits Rectangle {
     background: #e0e0e0;
     height: 1px;
@@ -7,9 +8,83 @@ component HDivider inherits Rectangle {
 }
 
 component VDivider inherits Rectangle {
-    background: #e0e0e0;
+    background: #d0d0d0;
     width: 1px;
     height: 100%;
+}
+
+// 섹션 헤더 (그룹 구분용)
+component SectionHeader inherits Rectangle {
+    in property <string> title;
+    height: 35px;
+    background: #f9f9f9; // 아주 살짝만 변화를 준 헤더 배경
+    HorizontalBox {
+        padding-left: 12px;
+        Text {
+            text: title;
+            font-size: 12px;
+            font-weight: 800;
+            color: #555555; // 헤더는 약간 차분하게
+            vertical-alignment: center;
+        }
+    }
+    HDivider { y: parent.height - 1px; }
+}
+
+// 정보 행 (Key-Value 쌍)
+component InfoRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    height: 28px;
+    HorizontalBox {
+        padding-left: 15px;
+        padding-right: 15px;
+        spacing: 10px;
+        Text {
+            text: label;
+            width: 110px; // 라벨 영역 너비 고정
+            color: #777777;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: value;
+            horizontal-stretch: 1;
+            color: #222222;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    Rectangle { // 행 하단 구분선
+        y: parent.height - 1px;
+        height: 1px;
+        background: #f0f0f0;
+    }
+}
+
+component EditableInfoRow inherits Rectangle {
+    in property <string> label;
+    in-out property <string> value;
+    height: 38px;
+    background: #ffffff;
+    HorizontalBox {
+        padding-left: 15px; padding-right: 15px; spacing: 10px;
+        Text {
+            text: label;
+            width: 100px;
+            color: #333333; // 화이트 배경에서 잘 보이는 진한 회색
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+        LineEdit {
+            text: value;
+            horizontal-stretch: 1;
+            font-size: 13px;
+            // LineEdit 내부 텍스트 색상은 Slint 기본(검정 계열)을 따름
+        }
+    }
+    HDivider { y: parent.height - 1px; background: #f0f0f0; } // 행 간의 아주 연한 구분선
 }
 
 export struct FileEntry {
@@ -31,17 +106,22 @@ export component MainWindow inherits Window {
     in-out property <int> selected_index: -1;
     in-out property <bool> editing_path: false;
 
+    // EXIF 관련 상태 (임시)
+    in property <bool> has_exif: selected_index >= 0 ? true : false; 
+
     callback open_dir(int);
     callback reload();
     callback go_parent();
     callback change_dir(string);
+    callback apply_changes();
+    callback cancel_changes();
 
-    // 1. [가장 아래 레이어] 메인 UI 구조
+    // 1. [메인 레이어]
     VerticalBox {
         padding: 0;
         spacing: 0;
 
-        // 최상단 메뉴 바
+        // 메뉴 바
         Rectangle {
             height: 32px;
             background: #ffffff;
@@ -58,16 +138,15 @@ export component MainWindow inherits Window {
         }
         HDivider {}
 
-        // 경로 표시줄이 들어갈 '빈 자리' (레이어 3에서 이 자리를 덮습니다)
-        Rectangle {
-            height: 40px;
-        }
+        // 경로바 공간 확보
+        Rectangle { height: 40px; }
 
-        // 메인 콘텐츠 영역
+        // 콘텐츠 영역
         HorizontalBox {
             padding: 0;
             spacing: 0;
 
+            // 왼쪽: 파일 리스트
             VerticalBox {
                 width: 750px;
                 padding: 0;
@@ -93,69 +172,107 @@ export component MainWindow inherits Window {
                                 if (entry.name == "[..]") { root.go_parent(); } 
                                 else if (entry.is_dir) { root.open_dir(i); } 
                             }
-                            Rectangle {
-                                Text { 
-                                    x: 15px; width: 380px; 
-                                    text: entry.is_dir ? (entry.name == "[..]" ? "⬅ " + entry.name : "📁 " + entry.name) : "📄 " + entry.name;
-                                    color: i == selected_index ? #1976d2 : #212121;
-                                    vertical-alignment: center; height: 100%;
-                                }
-                                Text { 
-                                    x: 410px; width: 80px; 
-                                    text: entry.size; 
-                                    horizontal-alignment: right; 
-                                    color: #666666; 
-                                    vertical-alignment: center; height: 100%;
-                                }
-                                Text { 
-                                    x: 510px; 
-                                    text: entry.modified; 
-                                    color: #666666; 
-                                    vertical-alignment: center; height: 100%;
-                                }
+                            // ... 텍스트 렌더링 부분 (기존과 동일)
+                            HorizontalBox {
+                                padding-left: 15px; padding-right: 15px;
+                                Text { width: 380px; text: entry.is_dir ? (entry.name == "[..]" ? "⬅ " + entry.name : "📁 " + entry.name) : "📄 " + entry.name; vertical-alignment: center; color: i == selected_index ? #1976d2 : #212121; }
+                                Text { width: 80px; text: entry.size; horizontal-alignment: right; vertical-alignment: center; color: #666666; }
+                                Rectangle { width: 20px; } // 간격
+                                Text { text: entry.modified; vertical-alignment: center; color: #666666; }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // [구분선: 더 확실하게]
+            Rectangle {
+                width: 2px;
+                background: #d0d0d0;
+            }
+
+            // [우측: EXIF 에디터 패널]
+            Rectangle {
+                horizontal-stretch: 1;
+                background: #fcfcfc; // 리스트(흰색)와 대비되는 아주 연한 회색
+                
+                VerticalBox {
+                    padding: 0; spacing: 0;
+                    
+                    // 에디터 타이틀
+                    Rectangle {
+                        height: 50px;
+                        background: #f0f0f0;
+                        Text { 
+                            x: 20px; 
+                            text: selected_index >= 0 ? "태그 편집: " + files[selected_index].name : "파일을 선택하세요";
+                            font-size: 14px; font-weight: 800; vertical-alignment: center; 
+                        }
+                        HDivider { y: parent.height - 1px; }
+                    }
+
+                    ScrollView {
+                        VerticalBox {
+                            padding: 10px; spacing: 0; alignment: start;
+                            
+                            if (selected_index >= 0) : VerticalBox {
+                                padding: 0; spacing: 5px;
+
+                                SectionHeader { title: "파일 기본 정보"; }
+                                EditableInfoRow { label: "파일명"; value: files[selected_index].name; }
+                                EditableInfoRow { label: "만든 날짜"; value: files[selected_index].created; }
+                                EditableInfoRow { label: "수정한 날짜"; value: files[selected_index].modified; }
+
+                                SectionHeader { title: "핵심 EXIF 태그"; }
+                                EditableInfoRow { label: "촬영 날짜"; value: "-"; }
+                                EditableInfoRow { label: "카메라 모델"; value: "-"; }
+                                EditableInfoRow { label: "렌즈 모델"; value: "-"; }
+                                EditableInfoRow { label: "작가(Artist)"; value: "-"; }
+                                EditableInfoRow { label: "소프트웨어"; value: "-"; }
+
+                                SectionHeader { title: "촬영 파라미터"; }
+                                EditableInfoRow { label: "노출 시간"; value: "-"; }
+                                EditableInfoRow { label: "조리개"; value: "-"; }
+                                EditableInfoRow { label: "ISO"; value: "-"; }
+                                EditableInfoRow { label: "초점 거리"; value: "-"; }
+                            }
+                        }
+                    }
+
+                    // [하단 액션 버튼 영역]
+                    if (selected_index >= 0) : Rectangle {
+                        height: 60px;
+                        background: #f0f0f0;
+
+                        HorizontalBox {
+                            padding: 15px;
+                            spacing: 15px;
+                            alignment: end;
+                            Button {
+                                text: "변경내용 취소";
+                                clicked => { root.cancel_changes(); }
+                            }
+                            Button {
+                                text: "변경내용 적용";
+                                primary: true; // Slint 기본 테마에서 강조됨
+                                clicked => { root.apply_changes(); }
                             }
                         }
                     }
                 }
             }
 
-            VDivider {}
-
-            Rectangle {
-                background: #ffffff;
-                VerticalBox {
-                    padding: 30px;
-                    spacing: 20px;
-                    alignment: start;
-                    Text { text: "파일 정보"; font-size: 18px; font-weight: 800; color: #333333; }
-                    if selected_index >= 0 : VerticalBox {
-                        padding: 0; spacing: 10px;
-                        Text { text: "파일명: " + files[selected_index].name; font-size: 14px; }
-                        Text { text: "크기: " + files[selected_index].size; font-size: 14px; }
-                        Text { text: "수정일: " + files[selected_index].modified; font-size: 14px; }
-                        Rectangle { height: 20px; } 
-                        Text { text: "EXIF 데이터"; font-weight: 700; color: #666666; }
-                        Text { text: "촬영 날짜: -"; color: #888888; }
-                        Text { text: "카메라: -"; color: #888888; }
-                    }
-                    if selected_index < 0 : Text {
-                        text: "파일을 선택하면 상세 정보가 표시됩니다.";
-                        color: #999999;
-                    }
-                }
-            }
         }
     }
 
-    // 2. [중간 레이어] 바깥 클릭 감지 가림막 (Z-index 역할)
+    // 2. [가림막] (생략 - 기존과 동일)
     if (editing_path) : TouchArea {
         clicked => {
             editing_path = false;
         }
     }
 
-    // 3. [최상단 레이어] 경로 표시줄
-    // 메인 UI의 빈 자리에 딱 맞도록 y 좌표를 수동으로 지정합니다.
+    // 3. [상단 경로바] (생략 - 기존과 동일)
     Rectangle {
         y: 33px; 
         height: 40px;
@@ -218,6 +335,6 @@ export component MainWindow inherits Window {
                 }
             }
         }
-        HDivider { y: 39px; }
+        HDivider { y: parent.height - self.height; }
     }
 }
