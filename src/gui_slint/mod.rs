@@ -36,7 +36,7 @@ impl GuiRunner for SlintRunner {
         // 초기 실행
         refresh_ui();
 
-        // 2. 경로 입력 및 새로고침 핸들러
+        // 2. 새로고침 핸들러 (버튼 등)
         let app_handle = app.clone();
         let ui_handle = ui.as_weak();
         let refresh = refresh_ui.clone();
@@ -44,13 +44,23 @@ impl GuiRunner for SlintRunner {
             if let Some(ui) = ui_handle.upgrade() {
                 {
                     let mut app = app_handle.borrow_mut();
-                    // UI의 LineEdit에 입력된 경로를 Rust app에 동기화
                     app.current_path = ui.get_current_path().to_string();
                     app.load_folder();
                 }
                 refresh();
-                // 로드 완료 후 편집 모드 해제는 ui.slint 내부(accepted)에서 처리됨
             }
+        });
+
+        // [추가] 2.5. 경로 직접 입력 핸들러 (엔터 입력 시)
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
+        ui.on_change_dir(move |new_path| {
+            {
+                let mut app = app_handle.borrow_mut();
+                app.current_path = new_path.to_string();
+                app.load_folder();
+            }
+            refresh();
         });
 
         // 3. 폴더 진입 핸들러 (더블클릭)
@@ -81,7 +91,7 @@ impl GuiRunner for SlintRunner {
             }
         });
 
-        // 4. 상위 폴더 이동 핸들러 (버튼 등에서 호출 시)
+        // 4. 상위 폴더 이동 핸들러
         let app_handle = app.clone();
         let refresh = refresh_ui.clone();
         ui.on_go_parent(move || {
@@ -94,10 +104,6 @@ impl GuiRunner for SlintRunner {
             }
             refresh();
         });
-
-        // 5. [추가] 항목 선택 시 로직 (선택 사항)
-        // 리스트에서 클릭만 했을 때 Rust 쪽에서 추가 작업(예: EXIF 미리 읽기)이 필요하다면 여기에 작성합니다.
-        // 현재는 ui.slint 내부에서 selected_index를 관리하므로 비워두어도 무방합니다.
 
         ui.run()?;
         Ok(())

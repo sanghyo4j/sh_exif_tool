@@ -1,4 +1,4 @@
-import { VerticalBox, HorizontalBox, ListView, Button, LineEdit } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ScrollView, ListView, Button, LineEdit } from "std-widgets.slint";
 
 component HDivider inherits Rectangle {
     background: #e0e0e0;
@@ -34,6 +34,7 @@ export component MainWindow inherits Window {
     callback open_dir(int);
     callback reload();
     callback go_parent();
+    callback change_dir(string);
 
     // 1. [가장 아래 레이어] 메인 UI 구조
     VerticalBox {
@@ -208,9 +209,11 @@ export component MainWindow inherits Window {
                     text: current_path;
                     font-size: 13px;
                     init => { self.focus(); }
+
                     accepted(new_path) => {
-                        current_path = new_path;
-                        editing_path = false;
+                        current_path = new_path; // 1. UI 내부 경로 값 업데이트
+                        editing_path = false;    // 2. 편집 모드 종료
+                        root.change_dir(new_path); // 3. ★ 핵심: Rust 백엔드에 변경 알림
                     }
                 }
             }
