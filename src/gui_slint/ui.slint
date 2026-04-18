@@ -28,13 +28,13 @@ component StrongVDivider inherits Rectangle {
 // 섹션 헤더 (그룹 구분용)
 component SectionHeader inherits Rectangle {
     in property <string> title;
-    height: 35px;
+    height: 36px;
     background: #f9f9f9; // 아주 살짝만 변화를 준 헤더 배경
     HorizontalBox {
-        padding-left: 12px;
+        padding-left: 10px;
         Text {
             text: title;
-            font-size: 12px;
+            font-size: 14px;
             font-weight: 800;
             color: #555555; // 헤더는 약간 차분하게
             vertical-alignment: center;
@@ -78,41 +78,41 @@ component InfoRow inherits Rectangle {
 component EditableInfoRow inherits Rectangle {
     in property <string> label;
     in-out property <string> value; 
-    height: 38px;
+    height: 36px;
     background: #ffffff;
 
     HorizontalBox {
         padding-left: 15px;
         padding-right: 15px;
-        spacing: 10px;
+        spacing: 12px;
 
         Text {
             text: label;
             width: 100px;
             color: #333333; // 진한 회색으로 가독성 확보 [cite: 199, 200]
-            font-size: 12px;
+            font-size: 14px;
             vertical-alignment: center;
         }
 
         Rectangle {
             horizontal-stretch: 1;
-            background: #f9f9f9; // 입력 영역임을 알리는 배경색 
+            background: #fdfdfd; // 입력 영역임을 알리는 배경색 
             border-width: 1px;
-            border-color: #e0e0e0;
+            border-color: #e8e8e8;
             border-radius: 4px;
 
             TextInput {
-                width: 100%;
+                x: 8px;
+                width: parent.width - 16px;
                 height: 100%;
                 text: root.value; // 상위 프로퍼티 명시적 참조 [cite: 150, 181]
-                font-size: 13px;
+                font-size: 14px;
                 vertical-alignment: center;
                 single-line: true;
                 color: #222222; // 텍스트 색상을 검정 계열로 강제 
 
-                // 해결 방법: TextInput의 edited 콜백은 인자를 받지 않습니다.
                 edited => {
-                    root.value = self.text; // 현재 위젯의 text 값을 직접 할당
+                    root.value = self.text;
                 }
             }
         }
@@ -229,50 +229,46 @@ export component MainWindow inherits Window {
             // [우측: EXIF 에디터 패널]
             Rectangle {
                 horizontal-stretch: 1;
-                background: #fcfcfc; // 리스트(흰색)와 대비되는 아주 연한 회색
+                background: #fcfcfc;
                 
                 VerticalBox {
                     padding: 0; spacing: 0;
                     
-                    // 에디터 타이틀 섹션 개선
+                    // 1. 에디터 타이틀 섹션
                     Rectangle {
-                        height: 60px; // 높이를 조금 더 주어 여유를 만듦
-                        background: #ffffff; // 배경을 본문과 통일하거나 아주 연한 회색(#fcfcfc)
-
+                        height: 60px;
+                        background: #ffffff;
                         VerticalBox {
                             padding-left: 20px;
                             alignment: center;
                             spacing: 2px;
-
                             Text { 
                                 text: selected_index >= 0 ? files[selected_index].name : "No File Selected";
-                                font-size: 16px; 
-                                font-weight: 700; 
-                                color: #1a1a1a;
+                                font-size: 16px; font-weight: 700; color: #1a1a1a;
                             }
-                            
                             if (selected_index >= 0) : Text {
-                                text: "Image Metadata Information"; // 편집 대신 '정보'임을 명시
-                                font-size: 11px;
-                                color: #888888;
-                                font-weight: 500;
+                                text: "Image Metadata Information";
+                                font-size: 11px; color: #888888; font-weight: 500;
                             }
                         }
-                        
-                        // 하단 구분선을 아주 연하게
-                        Rectangle {
-                            y: parent.height - 1px;
-                            height: 1px;
-                            background: #eeeeee;
-                        }
+                        Rectangle { y: parent.height - 1px; height: 1px; background: #eeeeee; }
                     }
 
-                    ScrollView {
-                        VerticalBox {
-                            padding: 10px; spacing: 0; alignment: start;
-                            
-                            if (selected_index >= 0) : VerticalBox {
-                                padding: 0; spacing: 5px;
+                    // 2. 스크롤 가능한 본문 영역
+                    Rectangle {
+                        vertical-stretch: 1;
+                        // 스크롤 트랙 가이드
+                        Rectangle {
+                            x: parent.width - 12px; width: 12px; height: 100%;
+                            background: #f1f1f1; border-width: 0.5px; border-color: #e0e0e0;
+                        }
+
+                        ScrollView {
+                            width: 100%; height: 100%;
+                            viewport-height: info_container.preferred-height;
+                    
+                            info_container := VerticalLayout {
+                                padding: 5px; padding-right: 10px; spacing: 2px;
 
                                 SectionHeader { title: "파일 기본 정보"; }
                                 EditableInfoRow { label: "파일명"; value: files[selected_index].name; }
@@ -293,31 +289,20 @@ export component MainWindow inherits Window {
                                 EditableInfoRow { label: "초점 거리"; value: "N/A"; }
                             }
                         }
-                    }
+                    } // <--- 스크롤 영역 Rectangle 닫기
 
-                    // [하단 액션 버튼 영역]
+                    // 3. [하단 액션 버튼 영역] - VerticalBox의 마지막 자식으로 배치
                     if (selected_index >= 0) : Rectangle {
                         height: 60px;
                         background: #f0f0f0;
-
                         HorizontalBox {
-                            padding: 15px;
-                            spacing: 15px;
-                            alignment: end;
-                            Button {
-                                text: "변경내용 취소";
-                                clicked => { root.cancel_changes(); }
-                            }
-                            Button {
-                                text: "변경내용 적용";
-                                primary: true; // Slint 기본 테마에서 강조됨
-                                clicked => { root.apply_changes(); }
-                            }
+                            padding: 15px; spacing: 15px; alignment: end;
+                            Button { text: "변경내용 취소"; clicked => { root.cancel_changes(); } }
+                            Button { text: "변경내용 적용"; primary: true; clicked => { root.apply_changes(); } }
                         }
                     }
-                }
-            }
-
+                } // <--- 우측 패널 VerticalBox 닫기
+            } // <--- 전체 에디터 패널 Rectangle 닫기
         }
     }
 
