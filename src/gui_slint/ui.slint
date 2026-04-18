@@ -13,6 +13,18 @@ component VDivider inherits Rectangle {
     height: 100%;
 }
 
+// 두꺼운 세로 구분선 컴포넌트
+component StrongVDivider inherits Rectangle {
+    width: 6px; // 구분선 두께 조절
+    background: #f5f5f5; // 구분선 자체 배경색 (아주 연한 회색)
+    Rectangle {
+        x: 2px; // 안쪽에 실선을 하나 더 넣어 디테일 살림
+        width: 1px;
+        height: 100%;
+        background: #e0e0e0;
+    }
+}
+
 // 섹션 헤더 (그룹 구분용)
 component SectionHeader inherits Rectangle {
     in property <string> title;
@@ -65,26 +77,52 @@ component InfoRow inherits Rectangle {
 
 component EditableInfoRow inherits Rectangle {
     in property <string> label;
-    in-out property <string> value;
+    in-out property <string> value; 
     height: 38px;
     background: #ffffff;
+
     HorizontalBox {
-        padding-left: 15px; padding-right: 15px; spacing: 10px;
+        padding-left: 15px;
+        padding-right: 15px;
+        spacing: 10px;
+
         Text {
             text: label;
             width: 100px;
-            color: #333333; // 화이트 배경에서 잘 보이는 진한 회색
+            color: #333333; // 진한 회색으로 가독성 확보 [cite: 199, 200]
             font-size: 12px;
             vertical-alignment: center;
         }
-        LineEdit {
-            text: value;
+
+        Rectangle {
             horizontal-stretch: 1;
-            font-size: 13px;
-            // LineEdit 내부 텍스트 색상은 Slint 기본(검정 계열)을 따름
+            background: #f9f9f9; // 입력 영역임을 알리는 배경색 
+            border-width: 1px;
+            border-color: #e0e0e0;
+            border-radius: 4px;
+
+            TextInput {
+                width: 100%;
+                height: 100%;
+                text: root.value; // 상위 프로퍼티 명시적 참조 [cite: 150, 181]
+                font-size: 13px;
+                vertical-alignment: center;
+                single-line: true;
+                color: #222222; // 텍스트 색상을 검정 계열로 강제 
+
+                // 해결 방법: TextInput의 edited 콜백은 인자를 받지 않습니다.
+                edited => {
+                    root.value = self.text; // 현재 위젯의 text 값을 직접 할당
+                }
+            }
         }
     }
-    HDivider { y: parent.height - 1px; background: #f0f0f0; } // 행 간의 아주 연한 구분선
+    
+    HDivider { 
+        y: parent.height - 1px; 
+        background: #f0f0f0; 
+        width: 100%; // 너비 명시 [cite: 113]
+    }
 }
 
 export struct FileEntry {
@@ -186,10 +224,7 @@ export component MainWindow inherits Window {
             }
             
             // [구분선: 더 확실하게]
-            Rectangle {
-                width: 2px;
-                background: #d0d0d0;
-            }
+            StrongVDivider {}
 
             // [우측: EXIF 에디터 패널]
             Rectangle {
@@ -199,16 +234,37 @@ export component MainWindow inherits Window {
                 VerticalBox {
                     padding: 0; spacing: 0;
                     
-                    // 에디터 타이틀
+                    // 에디터 타이틀 섹션 개선
                     Rectangle {
-                        height: 50px;
-                        background: #f0f0f0;
-                        Text { 
-                            x: 20px; 
-                            text: selected_index >= 0 ? "태그 편집: " + files[selected_index].name : "파일을 선택하세요";
-                            font-size: 14px; font-weight: 800; vertical-alignment: center; 
+                        height: 60px; // 높이를 조금 더 주어 여유를 만듦
+                        background: #ffffff; // 배경을 본문과 통일하거나 아주 연한 회색(#fcfcfc)
+
+                        VerticalBox {
+                            padding-left: 20px;
+                            alignment: center;
+                            spacing: 2px;
+
+                            Text { 
+                                text: selected_index >= 0 ? files[selected_index].name : "No File Selected";
+                                font-size: 16px; 
+                                font-weight: 700; 
+                                color: #1a1a1a;
+                            }
+                            
+                            if (selected_index >= 0) : Text {
+                                text: "Image Metadata Information"; // 편집 대신 '정보'임을 명시
+                                font-size: 11px;
+                                color: #888888;
+                                font-weight: 500;
+                            }
                         }
-                        HDivider { y: parent.height - 1px; }
+                        
+                        // 하단 구분선을 아주 연하게
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            background: #eeeeee;
+                        }
                     }
 
                     ScrollView {
@@ -224,17 +280,17 @@ export component MainWindow inherits Window {
                                 EditableInfoRow { label: "수정한 날짜"; value: files[selected_index].modified; }
 
                                 SectionHeader { title: "핵심 EXIF 태그"; }
-                                EditableInfoRow { label: "촬영 날짜"; value: "-"; }
-                                EditableInfoRow { label: "카메라 모델"; value: "-"; }
-                                EditableInfoRow { label: "렌즈 모델"; value: "-"; }
-                                EditableInfoRow { label: "작가(Artist)"; value: "-"; }
-                                EditableInfoRow { label: "소프트웨어"; value: "-"; }
+                                EditableInfoRow { label: "촬영 날짜"; value: "N/A"; }
+                                EditableInfoRow { label: "카메라 모델"; value: "N/A"; }
+                                EditableInfoRow { label: "렌즈 모델"; value: "N/A"; }
+                                EditableInfoRow { label: "작가(Artist)"; value: "N/A"; }
+                                EditableInfoRow { label: "소프트웨어"; value: "N/A"; }
 
                                 SectionHeader { title: "촬영 파라미터"; }
-                                EditableInfoRow { label: "노출 시간"; value: "-"; }
-                                EditableInfoRow { label: "조리개"; value: "-"; }
-                                EditableInfoRow { label: "ISO"; value: "-"; }
-                                EditableInfoRow { label: "초점 거리"; value: "-"; }
+                                EditableInfoRow { label: "노출 시간"; value: "N/A"; }
+                                EditableInfoRow { label: "조리개"; value: "N/A"; }
+                                EditableInfoRow { label: "ISO"; value: "N/A"; }
+                                EditableInfoRow { label: "초점 거리"; value: "N/A"; }
                             }
                         }
                     }
