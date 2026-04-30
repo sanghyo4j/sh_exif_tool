@@ -236,19 +236,15 @@ export component MainWindow inherits Window {
                     
                     // 1. 에디터 타이틀 섹션
                     Rectangle {
-                        height: 60px;
+                        // height: 60px;
                         background: #ffffff;
                         VerticalBox {
-                            padding-left: 20px;
+                            padding-left: 10px;
                             alignment: center;
                             spacing: 2px;
-                            Text { 
-                                text: selected_index >= 0 ? files[selected_index].name : "No File Selected";
-                                font-size: 16px; font-weight: 700; color: #1a1a1a;
-                            }
-                            if (selected_index >= 0) : Text {
-                                text: "Image Metadata Information";
-                                font-size: 11px; color: #888888; font-weight: 500;
+                            Text {
+                                text: "Image Metadata";
+                                font-size: 16px; color: #888888; font-weight: 500;
                             }
                         }
                         Rectangle { y: parent.height - 1px; height: 1px; background: #eeeeee; }
