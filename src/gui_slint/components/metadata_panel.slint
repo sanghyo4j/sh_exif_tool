@@ -45,65 +45,75 @@ export component MetadataPanel inherits Rectangle {
 
         Rectangle {
             vertical-stretch: 1;
-
-            Rectangle {
-                x: parent.width - 12px;
-                width: 12px;
-                height: 100%;
-                background: #f1f1f1;
-                border-width: 0.5px;
-                border-color: #e0e0e0;
-            }
+            background: #fcfcfc;
 
             ScrollView {
                 width: 100%;
                 height: 100%;
                 viewport-height: info_container.preferred-height;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-on;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
                 info_container := VerticalLayout {
-                    padding: 8px;
-                    padding-right: 12px;
-                    spacing: 3px;
+                    padding-top: 8px;
+                    padding-bottom: 8px;
+                    padding-left: 4px;
+                    padding-right: 14px;
+                    spacing: 0px;
 
-                    SectionHeader { title: "파일 기본 정보"; }
-                    EditableInfoRow { label: "파일명"; value: selected_name; }
-                    EditableInfoRow { label: "만든 날짜"; value: selected_created; }
-                    EditableInfoRow { label: "수정한 날짜"; value: selected_modified; }
+                    SectionHeader { title: "FILE"; }
+                    EditableInfoRow { label: "Name"; value: selected_name; }
+                    EditableInfoRow { label: "Created"; value: selected_created; }
+                    EditableInfoRow { label: "Modified"; value: selected_modified; }
 
-                    SectionHeader { title: "주요 EXIF 태그"; }
-                    EditableInfoRow { label: "촬영 날짜"; value: "N/A"; }
-                    EditableInfoRow { label: "카메라 모델"; value: "N/A"; }
-                    EditableInfoRow { label: "렌즈 모델"; value: "N/A"; }
-                    EditableInfoRow { label: "작가(Artist)"; value: "N/A"; }
-                    EditableInfoRow { label: "소프트웨어"; value: "N/A"; }
+                    SectionHeader { title: "CAMERA"; }
+                    EditableInfoRow { label: "Taken"; value: "N/A"; }
+                    EditableInfoRow { label: "Make"; value: "N/A"; }
+                    EditableInfoRow { label: "Model"; value: "N/A"; }
+                    EditableInfoRow { label: "Lens"; value: "N/A"; }
+                    EditableInfoRow { label: "Software"; value: "N/A"; }
+                    EditableInfoRow { label: "Artist"; value: "N/A"; }
 
-                    SectionHeader { title: "촬영 파라미터"; }
-                    EditableInfoRow { label: "노출 시간"; value: "N/A"; }
-                    EditableInfoRow { label: "조리개"; value: "N/A"; }
+                    SectionHeader { title: "EXPOSURE"; }
+                    EditableInfoRow { label: "Shutter"; value: "N/A"; }
+                    EditableInfoRow { label: "Aperture"; value: "N/A"; }
                     EditableInfoRow { label: "ISO"; value: "N/A"; }
-                    EditableInfoRow { label: "초점 거리"; value: "N/A"; }
+                    EditableInfoRow { label: "Focal Length"; value: "N/A"; }
+                    EditableInfoRow { label: "Flash"; value: "N/A"; }
+                    EditableInfoRow { label: "Metering"; value: "N/A"; }
+
+                    SectionHeader { title: "IMAGE"; }
+                    EditableInfoRow { label: "Width"; value: "N/A"; }
+                    EditableInfoRow { label: "Height"; value: "N/A"; }
+                    EditableInfoRow { label: "Orientation"; value: "N/A"; }
+                    EditableInfoRow { label: "Color Space"; value: "N/A"; }
+
+                    SectionHeader { title: "LOCATION"; }
+                    EditableInfoRow { label: "Latitude"; value: "N/A"; }
+                    EditableInfoRow { label: "Longitude"; value: "N/A"; }
+                    EditableInfoRow { label: "Altitude"; value: "N/A"; }
                 }
             }
         }
 
         Rectangle {
-            height: 60px;
-            background: #f0f0f0;
+            height: 56px;
+            background: #f5f5f5;
 
             HorizontalBox {
                 width: 100%;
                 height: 100%;
-                padding: 15px;
-                spacing: 15px;
+                padding: 12px;
+                spacing: 12px;
                 alignment: end;
 
                 Button {
-                    text: "변경내용 취소";
+                    text: "Cancel";
                     clicked => { root.cancel_changes(); }
                 }
 
                 Button {
-                    text: "변경내용 적용";
+                    text: "Apply";
                     primary: true;
                     clicked => { root.apply_changes(); }
                 }
