@@ -1,151 +1,27 @@
-import { VerticalBox, HorizontalBox, ScrollView, ListView, Button, LineEdit } from "std-widgets.slint";
+import { HorizontalBox } from "std-widgets.slint";
+import { FileEntry } from "types.slint";
+import { HDivider, StrongVDivider } from "components/dividers.slint";
+import { PathBar } from "components/path_bar.slint";
+import { FileList } from "components/file_list.slint";
+import { MetadataPanel } from "components/metadata_panel.slint";
 
-// --- 공용 컴포넌트 ---
-component HDivider inherits Rectangle {
-    background: #e0e0e0;
-    height: 1px;
-    width: 100%;
-}
-
-component VDivider inherits Rectangle {
-    background: #d0d0d0;
-    width: 1px;
-    height: 100%;
-}
-
-// 두꺼운 세로 구분선 컴포넌트
-component StrongVDivider inherits Rectangle {
-    width: 6px; // 구분선 두께 조절
-    background: #f5f5f5; // 구분선 자체 배경색 (아주 연한 회색)
-    Rectangle {
-        x: 2px; // 안쪽에 실선을 하나 더 넣어 디테일 살림
-        width: 1px;
-        height: 100%;
-        background: #e0e0e0;
-    }
-}
-
-// 섹션 헤더 (그룹 구분용)
-component SectionHeader inherits Rectangle {
-    in property <string> title;
-    height: 36px;
-    background: #f9f9f9; // 아주 살짝만 변화를 준 헤더 배경
-    HorizontalBox {
-        padding-left: 10px;
-        Text {
-            text: title;
-            font-size: 14px;
-            font-weight: 800;
-            color: #555555; // 헤더는 약간 차분하게
-            vertical-alignment: center;
-        }
-    }
-    HDivider { y: parent.height - 1px; }
-}
-
-// 정보 행 (Key-Value 쌍)
-component InfoRow inherits Rectangle {
-    in property <string> label;
-    in property <string> value;
-    height: 28px;
-    HorizontalBox {
-        padding-left: 15px;
-        padding-right: 15px;
-        spacing: 10px;
-        Text {
-            text: label;
-            width: 110px; // 라벨 영역 너비 고정
-            color: #777777;
-            font-size: 12px;
-            vertical-alignment: center;
-        }
-        Text {
-            text: value;
-            horizontal-stretch: 1;
-            color: #222222;
-            font-size: 12px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-    }
-    Rectangle { // 행 하단 구분선
-        y: parent.height - 1px;
-        height: 1px;
-        background: #f0f0f0;
-    }
-}
-
-component EditableInfoRow inherits Rectangle {
-    in property <string> label;
-    in-out property <string> value; 
-    height: 36px;
-    background: #ffffff;
-
-    HorizontalBox {
-        padding-left: 15px;
-        padding-right: 15px;
-        spacing: 12px;
-
-        Text {
-            text: label;
-            width: 100px;
-            color: #333333; // 진한 회색으로 가독성 확보 [cite: 199, 200]
-            font-size: 14px;
-            vertical-alignment: center;
-        }
-
-        Rectangle {
-            horizontal-stretch: 1;
-            background: #fdfdfd; // 입력 영역임을 알리는 배경색 
-            border-width: 1px;
-            border-color: #e8e8e8;
-            border-radius: 4px;
-
-            TextInput {
-                x: 8px;
-                width: parent.width - 16px;
-                height: 100%;
-                text: root.value; // 상위 프로퍼티 명시적 참조 [cite: 150, 181]
-                font-size: 14px;
-                vertical-alignment: center;
-                single-line: true;
-                color: #222222; // 텍스트 색상을 검정 계열로 강제 
-
-                edited => {
-                    root.value = self.text;
-                }
-            }
-        }
-    }
-    
-    HDivider { 
-        y: parent.height - 1px; 
-        background: #f0f0f0; 
-        width: 100%; // 너비 명시 [cite: 113]
-    }
-}
-
-export struct FileEntry {
-    name: string,
-    size: string,
-    modified: string,
-    created: string,
-    is_dir: bool,
-}
+export { FileEntry }
 
 export component MainWindow inherits Window {
     width: 1200px;
     height: 800px;
     background: #ffffff;
     title: "Rust EXIF Tool";
-    
+
     in-out property <string> current_path: "C:/";
     in-out property <[FileEntry]> files;
     in-out property <int> selected_index: -1;
     in-out property <bool> editing_path: false;
-
-    // EXIF 관련 상태 (임시)
-    in property <bool> has_exif: selected_index >= 0 ? true : false; 
+    in-out property <string> selected_name: "N/A";
+    in-out property <string> selected_created: "N/A";
+    in-out property <string> selected_modified: "N/A";
+    in-out property <bool> selected_is_dir: false;
+    in-out property <int> item_count: 0;
 
     callback open_dir(int);
     callback reload();
@@ -154,224 +30,95 @@ export component MainWindow inherits Window {
     callback apply_changes();
     callback cancel_changes();
 
-    // 1. [메인 레이어]
-    VerticalBox {
-        padding: 0;
-        spacing: 0;
+    Rectangle {
+        y: 0px;
+        width: 100%;
+        height: 32px;
+        background: #ffffff;
 
-        // 메뉴 바
-        Rectangle {
-            height: 32px;
-            background: #ffffff;
-            HorizontalBox {
-                padding-left: 10px;
-                padding-right: 10px;
-                spacing: 20px;
-                alignment: start;
-                Text { text: "파일(F)"; font-size: 13px; color: #333333; vertical-alignment: center; }
-                Text { text: "보기(V)"; font-size: 13px; color: #333333; vertical-alignment: center; }
-                Text { text: "도구(T)"; font-size: 13px; color: #333333; vertical-alignment: center; }
-                Text { text: "도움말(H)"; font-size: 13px; color: #333333; vertical-alignment: center; }
-            }
-        }
-        HDivider {}
-
-        // 경로바 공간 확보
-        Rectangle { height: 40px; }
-
-        // 콘텐츠 영역
         HorizontalBox {
-            padding: 0;
-            spacing: 0;
+            width: 100%;
+            height: 100%;
+            padding-left: 10px;
+            padding-right: 10px;
+            spacing: 20px;
+            alignment: start;
 
-            // 왼쪽: 파일 리스트
-            VerticalBox {
-                width: 750px;
-                padding: 0;
-                spacing: 0;
-
-                Rectangle {
-                    height: 30px;
-                    background: #f5f5f5;
-                    Text { x: 15px; width: 380px; text: "파일명"; font-weight: 700; color: #666666; vertical-alignment: center; height: 100%; }
-                    Text { x: 410px; width: 80px; text: "크기"; font-weight: 700; color: #666666; horizontal-alignment: right; vertical-alignment: center; height: 100%; }
-                    Text { x: 510px; text: "수정일"; font-weight: 700; color: #666666; vertical-alignment: center; height: 100%; }
-                    HDivider { y: 29px; }
-                }
-
-                ListView {
-                    for entry[i] in files : Rectangle {
-                        height: 32px;
-                        background: i == selected_index ? #e3f2fd : #ffffff;
-                        TouchArea {
-                            width: 100%; height: 100%;
-                            clicked => { selected_index = i; }
-                            double-clicked => { 
-                                if (entry.name == "[..]") { root.go_parent(); } 
-                                else if (entry.is_dir) { root.open_dir(i); } 
-                            }
-                            // ... 텍스트 렌더링 부분 (기존과 동일)
-                            HorizontalBox {
-                                padding-left: 15px; padding-right: 15px;
-                                Text { width: 380px; text: entry.is_dir ? (entry.name == "[..]" ? "⬅ " + entry.name : "📁 " + entry.name) : "📄 " + entry.name; vertical-alignment: center; color: i == selected_index ? #1976d2 : #212121; }
-                                Text { width: 80px; text: entry.size; horizontal-alignment: right; vertical-alignment: center; color: #666666; }
-                                Rectangle { width: 20px; } // 간격
-                                Text { text: entry.modified; vertical-alignment: center; color: #666666; }
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // [구분선: 더 확실하게]
-            StrongVDivider {}
-
-            // [우측: EXIF 에디터 패널]
-            Rectangle {
-                horizontal-stretch: 1;
-                background: #fcfcfc;
-                
-                VerticalBox {
-                    padding: 0; spacing: 0;
-                    
-                    // 1. 에디터 타이틀 섹션
-                    Rectangle {
-                        // height: 60px;
-                        background: #ffffff;
-                        VerticalBox {
-                            padding-left: 10px;
-                            alignment: center;
-                            spacing: 2px;
-                            Text {
-                                text: "Image Metadata";
-                                font-size: 16px; color: #888888; font-weight: 500;
-                            }
-                        }
-                        Rectangle { y: parent.height - 1px; height: 1px; background: #eeeeee; }
-                    }
-
-                    // 2. 스크롤 가능한 본문 영역
-                    Rectangle {
-                        vertical-stretch: 1;
-                        // 스크롤 트랙 가이드
-                        Rectangle {
-                            x: parent.width - 12px; width: 12px; height: 100%;
-                            background: #f1f1f1; border-width: 0.5px; border-color: #e0e0e0;
-                        }
-
-                        ScrollView {
-                            width: 100%; height: 100%;
-                            viewport-height: info_container.preferred-height;
-                    
-                            info_container := VerticalLayout {
-                                padding: 5px; padding-right: 10px; spacing: 2px;
-
-                                SectionHeader { title: "파일 기본 정보"; }
-                                EditableInfoRow { label: "파일명"; value: files[selected_index].name; }
-                                EditableInfoRow { label: "만든 날짜"; value: files[selected_index].created; }
-                                EditableInfoRow { label: "수정한 날짜"; value: files[selected_index].modified; }
-
-                                SectionHeader { title: "핵심 EXIF 태그"; }
-                                EditableInfoRow { label: "촬영 날짜"; value: "N/A"; }
-                                EditableInfoRow { label: "카메라 모델"; value: "N/A"; }
-                                EditableInfoRow { label: "렌즈 모델"; value: "N/A"; }
-                                EditableInfoRow { label: "작가(Artist)"; value: "N/A"; }
-                                EditableInfoRow { label: "소프트웨어"; value: "N/A"; }
-
-                                SectionHeader { title: "촬영 파라미터"; }
-                                EditableInfoRow { label: "노출 시간"; value: "N/A"; }
-                                EditableInfoRow { label: "조리개"; value: "N/A"; }
-                                EditableInfoRow { label: "ISO"; value: "N/A"; }
-                                EditableInfoRow { label: "초점 거리"; value: "N/A"; }
-                            }
-                        }
-                    } // <--- 스크롤 영역 Rectangle 닫기
-
-                    // 3. [하단 액션 버튼 영역] - VerticalBox의 마지막 자식으로 배치
-                    if (selected_index >= 0) : Rectangle {
-                        height: 60px;
-                        background: #f0f0f0;
-                        HorizontalBox {
-                            padding: 15px; spacing: 15px; alignment: end;
-                            Button { text: "변경내용 취소"; clicked => { root.cancel_changes(); } }
-                            Button { text: "변경내용 적용"; primary: true; clicked => { root.apply_changes(); } }
-                        }
-                    }
-                } // <--- 우측 패널 VerticalBox 닫기
-            } // <--- 전체 에디터 패널 Rectangle 닫기
+            Text { text: "파일(F)"; font-size: 13px; color: #333333; vertical-alignment: center; }
+            Text { text: "보기(V)"; font-size: 13px; color: #333333; vertical-alignment: center; }
+            Text { text: "도구(T)"; font-size: 13px; color: #333333; vertical-alignment: center; }
+            Text { text: "도움말(H)"; font-size: 13px; color: #333333; vertical-alignment: center; }
         }
     }
 
-    // 2. [가림막] (생략 - 기존과 동일)
+    HDivider { y: 32px; }
+
+    PathBar {
+        y: 33px;
+        width: 100%;
+        current_path: root.current_path;
+        editing: root.editing_path;
+        change_dir(path) => { root.change_dir(path); }
+    }
+
+    Rectangle {
+        y: 73px;
+        width: 100%;
+        height: root.height - 99px;
+
+        HorizontalBox {
+            width: 100%;
+            height: 100%;
+            padding: 0;
+            spacing: 0;
+
+            FileList {
+                files: root.files;
+                selected_index: root.selected_index;
+                open_dir(index) => { root.open_dir(index); }
+                go_parent() => { root.go_parent(); }
+                select_file(name, created, modified, is_dir) => {
+                    root.selected_name = name;
+                    root.selected_created = created;
+                    root.selected_modified = modified;
+                    root.selected_is_dir = is_dir;
+                }
+            }
+
+            StrongVDivider {}
+
+            MetadataPanel {
+                selected_name: root.selected_name;
+                selected_created: root.selected_created;
+                selected_modified: root.selected_modified;
+                apply_changes() => { root.apply_changes(); }
+                cancel_changes() => { root.cancel_changes(); }
+            }
+        }
+    }
+
+    HDivider { y: root.height - 27px; }
+
+    Rectangle {
+        y: root.height - 26px;
+        width: 100%;
+        height: 26px;
+        background: #f7f7f7;
+
+        Text {
+            x: 10px;
+            width: parent.width - 20px;
+            height: 100%;
+            text: "파일 " + item_count + "개";
+            font-size: 12px;
+            color: #666666;
+            vertical-alignment: center;
+        }
+    }
+
     if (editing_path) : TouchArea {
         clicked => {
             editing_path = false;
         }
-    }
-
-    // 3. [상단 경로바] (생략 - 기존과 동일)
-    Rectangle {
-        y: 33px; 
-        height: 40px;
-        background: #fcfcfc;
-        
-        HorizontalBox {
-            padding-left: 10px;
-            padding-right: 10px;
-            spacing: 10px;
-
-            Text { 
-                text: "경로:"; 
-                vertical-alignment: center; 
-                color: #666666; 
-                font-weight: 700;
-                width: 40px;
-            }
-            
-            Rectangle {
-                horizontal-stretch: 1;
-
-                // 보기 모드
-                if !editing_path : TouchArea {
-                    width: 100%; height: 100%;
-                    clicked => { 
-                        editing_path = true;
-                    }
-                    Text {
-                        // 핵심 1: Text 위젯 자체를 부모 너비만큼 꽉 채웁니다.
-                        width: 100%; 
-                        height: 100%;
-                        
-                        // 핵심 2: 넓어진 너비 안에서 왼쪽 정렬을 수행합니다.
-                        horizontal-alignment: left;
-                        vertical-alignment: center;
-                        
-                        text: current_path;
-                        font-size: 13px;
-                        color: #333333;
-                        
-                        // 핵심 3: "경로:" 글자와 너무 붙지 않게 왼쪽 여백을 줍니다.
-                        x: 5px; 
-                    }
-                }
-
-                // 편집 모드 (LineEdit은 기본적으로 왼쪽 정렬이므로 그대로 둡니다)
-                if editing_path : LineEdit {
-                    width: 100%;
-                    height: 30px;
-                    y: (parent.height - self.height) / 2;
-                    text: current_path;
-                    font-size: 13px;
-                    init => { self.focus(); }
-
-                    accepted(new_path) => {
-                        current_path = new_path; // 1. UI 내부 경로 값 업데이트
-                        editing_path = false;    // 2. 편집 모드 종료
-                        root.change_dir(new_path); // 3. ★ 핵심: Rust 백엔드에 변경 알림
-                    }
-                }
-            }
-        }
-        HDivider { y: parent.height - self.height; }
     }
 }

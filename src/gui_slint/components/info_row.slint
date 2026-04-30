@@ -1,0 +1,73 @@
+import { HorizontalBox } from "std-widgets.slint";
+import { HDivider } from "dividers.slint";
+
+export component SectionHeader inherits Rectangle {
+    in property <string> title;
+
+    height: 36px;
+    background: #f9f9f9;
+
+    HorizontalBox {
+        padding-left: 10px;
+
+        Text {
+            text: title;
+            font-size: 14px;
+            font-weight: 800;
+            color: #555555;
+            vertical-alignment: center;
+        }
+    }
+
+    HDivider { y: parent.height - 1px; }
+}
+
+export component EditableInfoRow inherits Rectangle {
+    in property <string> label;
+    in-out property <string> value;
+
+    height: 36px;
+    background: #ffffff;
+
+    HorizontalBox {
+        padding-left: 15px;
+        padding-right: 15px;
+        spacing: 12px;
+
+        Text {
+            text: label;
+            width: 100px;
+            color: #333333;
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            background: #fdfdfd;
+            border-width: 1px;
+            border-color: #e8e8e8;
+            border-radius: 4px;
+
+            TextInput {
+                x: 8px;
+                width: parent.width - 16px;
+                height: 100%;
+                text: root.value;
+                font-size: 14px;
+                vertical-alignment: center;
+                single-line: true;
+                color: #222222;
+
+                edited => {
+                    root.value = self.text;
+                }
+            }
+        }
+    }
+
+    HDivider {
+        y: parent.height - 1px;
+        background: #f0f0f0;
+    }
+}

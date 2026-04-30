@@ -1,0 +1,113 @@
+import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
+import { SectionHeader, EditableInfoRow } from "info_row.slint";
+
+export component MetadataPanel inherits Rectangle {
+    in-out property <string> selected_name;
+    in-out property <string> selected_created;
+    in-out property <string> selected_modified;
+
+    callback apply_changes();
+    callback cancel_changes();
+
+    horizontal-stretch: 1;
+    height: 100%;
+    background: #fcfcfc;
+
+    VerticalBox {
+        width: 100%;
+        height: 100%;
+        padding: 0;
+        spacing: 0;
+
+        Rectangle {
+            height: 42px;
+            background: #ffffff;
+
+            Text {
+                x: 16px;
+                y: 0px;
+                width: parent.width - 32px;
+                height: 100%;
+                text: "Image Metadata";
+                font-size: 15px;
+                color: #263238;
+                font-weight: 700;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: #eeeeee;
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+
+            Rectangle {
+                x: parent.width - 12px;
+                width: 12px;
+                height: 100%;
+                background: #f1f1f1;
+                border-width: 0.5px;
+                border-color: #e0e0e0;
+            }
+
+            ScrollView {
+                width: 100%;
+                height: 100%;
+                viewport-height: info_container.preferred-height;
+
+                info_container := VerticalLayout {
+                    padding: 8px;
+                    padding-right: 12px;
+                    spacing: 3px;
+
+                    SectionHeader { title: "파일 기본 정보"; }
+                    EditableInfoRow { label: "파일명"; value: selected_name; }
+                    EditableInfoRow { label: "만든 날짜"; value: selected_created; }
+                    EditableInfoRow { label: "수정한 날짜"; value: selected_modified; }
+
+                    SectionHeader { title: "주요 EXIF 태그"; }
+                    EditableInfoRow { label: "촬영 날짜"; value: "N/A"; }
+                    EditableInfoRow { label: "카메라 모델"; value: "N/A"; }
+                    EditableInfoRow { label: "렌즈 모델"; value: "N/A"; }
+                    EditableInfoRow { label: "작가(Artist)"; value: "N/A"; }
+                    EditableInfoRow { label: "소프트웨어"; value: "N/A"; }
+
+                    SectionHeader { title: "촬영 파라미터"; }
+                    EditableInfoRow { label: "노출 시간"; value: "N/A"; }
+                    EditableInfoRow { label: "조리개"; value: "N/A"; }
+                    EditableInfoRow { label: "ISO"; value: "N/A"; }
+                    EditableInfoRow { label: "초점 거리"; value: "N/A"; }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 60px;
+            background: #f0f0f0;
+
+            HorizontalBox {
+                width: 100%;
+                height: 100%;
+                padding: 15px;
+                spacing: 15px;
+                alignment: end;
+
+                Button {
+                    text: "변경내용 취소";
+                    clicked => { root.cancel_changes(); }
+                }
+
+                Button {
+                    text: "변경내용 적용";
+                    primary: true;
+                    clicked => { root.apply_changes(); }
+                }
+            }
+        }
+    }
+}

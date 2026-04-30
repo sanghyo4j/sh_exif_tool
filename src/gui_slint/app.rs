@@ -1,10 +1,8 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
-use slint::{ModelRc, VecModel, SharedString};
-// mod.rs에서 slint::include_modules!()를 통해 생성된 FileEntry를 가져옵니다.
+use slint::{ModelRc, VecModel};
 use super::FileEntry as UiFileEntry; 
 
-/// 시스템의 실제 파일 정보를 담는 로컬 구조체
 pub struct LocalFileData {
     pub path: PathBuf,
     pub size: u64,
@@ -35,14 +33,11 @@ impl SlintApp {
 
     pub fn load_folder(&mut self) {
         self.files.clear();
-        
-        // 디버깅용 출력 (터미널에서 확인해 보세요)
-        println!("Loading folder: {}", self.current_path);
 
         let path = std::path::Path::new(&self.current_path);
         if let Ok(read_dir) = std::fs::read_dir(path) {
             let mut entries: Vec<LocalFileData> = read_dir
-                .filter_map(|res| res.ok()) // flatten() 대신 명시적으로 ok() 처리
+                .filter_map(|res| res.ok())
                 .filter_map(|entry| {
                     let meta = entry.metadata().ok()?;
                     Some(LocalFileData {
@@ -55,9 +50,6 @@ impl SlintApp {
                 })
                 .collect();
 
-            // 디버깅용: 읽어온 파일 개수 확인
-            println!("Found {} entries", entries.len());
-
             entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.path.cmp(&b.path)));
             self.files = entries;
         } else {
@@ -68,16 +60,14 @@ impl SlintApp {
     pub fn get_ui_model(&self) -> ModelRc<UiFileEntry> {
         let mut ui_items: Vec<UiFileEntry> = Vec::new();
 
-        // 1. 상위 폴더 아이템 추가 (필드 명칭: name, size, modified, created, is_dir)
         ui_items.push(UiFileEntry {
-            name: "[..]".into(), // Slint의 SharedString으로 자동 변환됨
+            name: "[..]".into(),
             size: "-".into(),
             modified: "-".into(),
             created: "-".into(),
             is_dir: true,
         });
 
-        // 2. 실제 파일 목록 추가
         for f in &self.files {
             let name_str = f.path.file_name()
                 .map(|os_str| os_str.to_string_lossy().to_string())
@@ -93,6 +83,10 @@ impl SlintApp {
         }
 
         ModelRc::new(VecModel::from(ui_items))
+    }
+
+    pub fn file_count(&self) -> usize {
+        self.files.iter().filter(|entry| !entry.is_dir).count()
     }
 }
 

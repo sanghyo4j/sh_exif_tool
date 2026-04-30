@@ -27,8 +27,13 @@ impl GuiRunner for SlintRunner {
                 if let Some(ui) = ui_handle.upgrade() {
                     let app = app_handle.borrow();
                     ui.set_current_path(app.current_path.as_str().into());
+                    ui.set_item_count(app.file_count() as i32);
                     ui.set_files(app.get_ui_model());
-                    ui.set_selected_index(-1); // 폴더 이동 시 선택 초기화
+                    ui.set_selected_index(-1);
+                    ui.set_selected_name("N/A".into());
+                    ui.set_selected_created("N/A".into());
+                    ui.set_selected_modified("N/A".into());
+                    ui.set_selected_is_dir(false);
                 }
             }
         };
@@ -103,6 +108,21 @@ impl GuiRunner for SlintRunner {
                 }
             }
             refresh();
+        });
+
+        let ui_handle = ui.as_weak();
+        ui.on_cancel_changes(move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                ui.set_selected_index(-1);
+                ui.set_selected_name("N/A".into());
+                ui.set_selected_created("N/A".into());
+                ui.set_selected_modified("N/A".into());
+                ui.set_selected_is_dir(false);
+            }
+        });
+
+        ui.on_apply_changes(move || {
+            // Metadata editing is UI-only until EXIF write support is implemented.
         });
 
         ui.run()?;

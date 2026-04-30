@@ -1,0 +1,71 @@
+import { HorizontalBox, LineEdit } from "std-widgets.slint";
+import { HDivider } from "dividers.slint";
+
+export component PathBar inherits Rectangle {
+    in-out property <string> current_path;
+    in-out property <bool> editing;
+
+    callback change_dir(string);
+
+    height: 40px;
+    background: #fcfcfc;
+
+    HorizontalBox {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
+
+        Text {
+            text: "경로:";
+            vertical-alignment: center;
+            color: #666666;
+            font-weight: 700;
+            width: 40px;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+
+            if !editing : TouchArea {
+                width: 100%;
+                height: 100%;
+
+                clicked => {
+                    root.editing = true;
+                }
+
+                Text {
+                    x: 5px;
+                    width: 100%;
+                    height: 100%;
+                    text: root.current_path;
+                    font-size: 13px;
+                    color: #333333;
+                    horizontal-alignment: left;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            if editing : LineEdit {
+                width: 100%;
+                height: 30px;
+                y: (parent.height - self.height) / 2;
+                text: root.current_path;
+                font-size: 13px;
+
+                init => {
+                    self.focus();
+                }
+
+                accepted(new_path) => {
+                    root.current_path = new_path;
+                    root.editing = false;
+                    root.change_dir(new_path);
+                }
+            }
+        }
+    }
+
+    HDivider { y: parent.height - self.height; }
+}
