@@ -121,6 +121,16 @@ impl GuiRunner for SlintRunner {
             }
         });
 
+        let ui_handle = ui.as_weak();
+        ui.on_clear_changes(move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                ui.set_selected_name("N/A".into());
+                ui.set_selected_created("N/A".into());
+                ui.set_selected_modified("N/A".into());
+                ui.set_selected_is_dir(false);
+            }
+        });
+
         ui.on_apply_changes(move || {
             // Metadata editing is UI-only until EXIF write support is implemented.
         });

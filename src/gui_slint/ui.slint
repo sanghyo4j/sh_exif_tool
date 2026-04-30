@@ -29,42 +29,69 @@ export component MainWindow inherits Window {
     callback change_dir(string);
     callback apply_changes();
     callback cancel_changes();
+    callback clear_changes();
 
-    Rectangle {
-        y: 0px;
-        width: 100%;
-        height: 32px;
-        background: #ffffff;
+    MenuBar {
+        Menu {
+            title: "File";
 
-        HorizontalBox {
-            width: 100%;
-            height: 100%;
-            padding-left: 10px;
-            padding-right: 10px;
-            spacing: 20px;
-            alignment: start;
+            MenuItem { title: "Open Folder..."; activated => { root.editing_path = false; } }
+            MenuItem { title: "Reload"; activated => { root.editing_path = false; } }
+            MenuItem { title: "Go to Parent Folder"; activated => { root.editing_path = false; } }
+            MenuSeparator {}
+            MenuItem { title: "Open in Explorer"; activated => { root.editing_path = false; } }
+            MenuSeparator {}
+            MenuItem { title: "Exit"; activated => { root.editing_path = false; } }
+        }
 
-            Text { text: "파일(F)"; font-size: 13px; color: #333333; vertical-alignment: center; }
-            Text { text: "보기(V)"; font-size: 13px; color: #333333; vertical-alignment: center; }
-            Text { text: "도구(T)"; font-size: 13px; color: #333333; vertical-alignment: center; }
-            Text { text: "도움말(H)"; font-size: 13px; color: #333333; vertical-alignment: center; }
+        Menu {
+            title: "Advanced";
+
+            MenuItem { title: "Remove EXIF Tags"; activated => { root.editing_path = false; } }
+        }
+
+        Menu {
+            title: "Analyze";
+
+            MenuItem { title: "Analyze Selected"; activated => { root.editing_path = false; } }
+            MenuItem { title: "Analyze Folder"; activated => { root.editing_path = false; } }
+            MenuItem { title: "Analyze Missing Metadata"; activated => { root.editing_path = false; } }
+            MenuSeparator {}
+            MenuItem { title: "Clear Results"; activated => { root.editing_path = false; } }
+        }
+
+        Menu {
+            title: "Settings";
+
+            MenuItem { title: "Date Source Priority..."; activated => { root.editing_path = false; } }
+            MenuItem { title: "Filename Patterns..."; activated => { root.editing_path = false; } }
+            MenuSeparator {}
+            MenuItem { title: "Write Software Tag"; checkable: true; checked: true; activated => { root.editing_path = false; } }
+            MenuItem { title: "Rename With _SH148 Suffix"; checkable: true; activated => { root.editing_path = false; } }
+            MenuItem { title: "Backup Before Changes"; checkable: true; checked: true; activated => { root.editing_path = false; } }
+        }
+
+        Menu {
+            title: "Help";
+
+            MenuItem { title: "About"; activated => { root.editing_path = false; } }
         }
     }
 
-    HDivider { y: 32px; }
+    HDivider { y: 0px; }
 
     PathBar {
-        y: 33px;
+        y: 1px;
         width: 100%;
         current_path: root.current_path;
-        editing: root.editing_path;
+        editing <=> root.editing_path;
         change_dir(path) => { root.change_dir(path); }
     }
 
     Rectangle {
-        y: 73px;
+        y: 41px;
         width: 100%;
-        height: root.height - 99px;
+        height: root.height - 67px;
 
         HorizontalBox {
             width: 100%;
@@ -78,6 +105,7 @@ export component MainWindow inherits Window {
                 open_dir(index) => { root.open_dir(index); }
                 go_parent() => { root.go_parent(); }
                 select_file(name, created, modified, is_dir) => {
+                    root.editing_path = false;
                     root.selected_name = name;
                     root.selected_created = created;
                     root.selected_modified = modified;
@@ -91,8 +119,18 @@ export component MainWindow inherits Window {
                 selected_name: root.selected_name;
                 selected_created: root.selected_created;
                 selected_modified: root.selected_modified;
-                apply_changes() => { root.apply_changes(); }
-                cancel_changes() => { root.cancel_changes(); }
+                apply_changes() => {
+                    root.editing_path = false;
+                    root.apply_changes();
+                }
+                cancel_changes() => {
+                    root.editing_path = false;
+                    root.cancel_changes();
+                }
+                clear_changes() => {
+                    root.editing_path = false;
+                    root.clear_changes();
+                }
             }
         }
     }

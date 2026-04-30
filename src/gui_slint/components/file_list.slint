@@ -55,58 +55,133 @@ export component FileList inherits VerticalBox {
         HDivider { y: 29px; }
     }
 
-    ListView {
-        for entry[i] in files : Rectangle {
-            height: 32px;
-            background: i == root.selected_index ? #e3f2fd : #ffffff;
+    Rectangle {
+        vertical-stretch: 1;
+
+        file_scroll := ListView {
+            width: parent.width - 12px;
+            height: 100%;
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+            for entry[i] in files : Rectangle {
+                height: 32px;
+                background: i == root.selected_index ? #e3f2fd : #ffffff;
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+
+                    clicked => {
+                        root.selected_index = i;
+                        root.select_file(entry.name, entry.created, entry.modified, entry.is_dir);
+                    }
+
+                    double-clicked => {
+                        if (entry.name == "[..]") {
+                            root.go_parent();
+                        } else if (entry.is_dir) {
+                            root.open_dir(i);
+                        }
+                    }
+
+                    HorizontalBox {
+                        width: 100%;
+                        height: 100%;
+                        padding-left: 15px;
+                        padding-right: 15px;
+
+                        Text {
+                            width: 380px;
+                            text: entry.is_dir ? (entry.name == "[..]" ? "[..]" : "[" + entry.name + "]") : entry.name;
+                            vertical-alignment: center;
+                            color: i == root.selected_index ? #1976d2 : #212121;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            width: 80px;
+                            text: entry.size;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                            color: #666666;
+                        }
+
+                        Rectangle { width: 20px; }
+
+                        Text {
+                            text: entry.modified;
+                            vertical-alignment: center;
+                            color: #666666;
+                        }
+                    }
+                }
+            }
+        }
+
+        file_rail := Rectangle {
+            x: parent.width - 12px;
+            y: 0px;
+            width: 12px;
+            height: parent.height;
+            background: #eef2f5;
 
             TouchArea {
                 width: 100%;
                 height: 100%;
 
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                        if (file_scroll.viewport-height > file_scroll.visible-height) {
+                            file_scroll.viewport-y = -max(
+                                0px,
+                                min(
+                                    file_scroll.viewport-height - file_scroll.visible-height,
+                                    self.mouse-y * file_scroll.viewport-height / parent.height - file_scroll.visible-height / 2
+                                )
+                            );
+                        }
+                    }
+                }
+
+                moved => {
+                    if (self.pressed && file_scroll.viewport-height > file_scroll.visible-height) {
+                        file_scroll.viewport-y = -max(
+                            0px,
+                            min(
+                                file_scroll.viewport-height - file_scroll.visible-height,
+                                self.mouse-y * file_scroll.viewport-height / parent.height - file_scroll.visible-height / 2
+                            )
+                        );
+                    }
+                }
+
                 clicked => {
-                    root.selected_index = i;
-                    root.select_file(entry.name, entry.created, entry.modified, entry.is_dir);
-                }
-
-                double-clicked => {
-                    if (entry.name == "[..]") {
-                        root.go_parent();
-                    } else if (entry.is_dir) {
-                        root.open_dir(i);
+                    if (file_scroll.viewport-height > file_scroll.visible-height) {
+                        file_scroll.viewport-y = -max(
+                            0px,
+                            min(
+                                file_scroll.viewport-height - file_scroll.visible-height,
+                                self.mouse-y * file_scroll.viewport-height / parent.height - file_scroll.visible-height / 2
+                            )
+                        );
                     }
                 }
+            }
 
-                HorizontalBox {
-                    width: 100%;
-                    height: 100%;
-                    padding-left: 15px;
-                    padding-right: 15px;
-
-                    Text {
-                        width: 380px;
-                        text: entry.is_dir ? (entry.name == "[..]" ? "[..]" : "[" + entry.name + "]") : entry.name;
-                        vertical-alignment: center;
-                        color: i == root.selected_index ? #1976d2 : #212121;
-                        overflow: elide;
-                    }
-
-                    Text {
-                        width: 80px;
-                        text: entry.size;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                        color: #666666;
-                    }
-
-                    Rectangle { width: 20px; }
-
-                    Text {
-                        text: entry.modified;
-                        vertical-alignment: center;
-                        color: #666666;
-                    }
-                }
+            file_thumb := Rectangle {
+                x: 2px;
+                y: file_scroll.viewport-height <= file_scroll.visible-height
+                    ? 4px
+                    : 4px + (-file_scroll.viewport-y)
+                        * (parent.height - 8px - self.height)
+                        / (file_scroll.viewport-height - file_scroll.visible-height);
+                width: 8px;
+                height: file_scroll.viewport-height <= file_scroll.visible-height
+                    ? parent.height - 8px
+                    : max(28px, (parent.height - 8px) * file_scroll.visible-height / file_scroll.viewport-height);
+                border-radius: 4px;
+                background: #9aa8b2;
             }
         }
     }

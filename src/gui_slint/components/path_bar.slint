@@ -8,23 +8,32 @@ export component PathBar inherits Rectangle {
     callback change_dir(string);
 
     height: 40px;
-    background: #fcfcfc;
+    background: #f8fafc;
 
     HorizontalBox {
-        padding-left: 10px;
-        padding-right: 10px;
-        spacing: 10px;
+        width: 100%;
+        height: 100%;
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
 
         Text {
-            text: "경로:";
+            text: "경로";
             vertical-alignment: center;
-            color: #666666;
+            color: #5f6b75;
             font-weight: 700;
-            width: 40px;
+            font-size: 12px;
+            width: 42px;
         }
 
         Rectangle {
             horizontal-stretch: 1;
+            height: 28px;
+            y: (parent.height - self.height) / 2;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: root.editing ? #7aa7d9 : #d7dde2;
+            border-radius: 4px;
 
             if !editing : TouchArea {
                 width: 100%;
@@ -35,12 +44,12 @@ export component PathBar inherits Rectangle {
                 }
 
                 Text {
-                    x: 5px;
-                    width: 100%;
+                    x: 9px;
+                    width: parent.width - 18px;
                     height: 100%;
                     text: root.current_path;
                     font-size: 13px;
-                    color: #333333;
+                    color: #263238;
                     horizontal-alignment: left;
                     vertical-alignment: center;
                     overflow: elide;
@@ -48,14 +57,21 @@ export component PathBar inherits Rectangle {
             }
 
             if editing : LineEdit {
-                width: 100%;
-                height: 30px;
-                y: (parent.height - self.height) / 2;
+                x: 4px;
+                y: 2px;
+                width: parent.width - 8px;
+                height: parent.height - 4px;
                 text: root.current_path;
                 font-size: 13px;
 
                 init => {
                     self.focus();
+                }
+
+                changed has-focus => {
+                    if (!self.has-focus) {
+                        root.editing = false;
+                    }
                 }
 
                 accepted(new_path) => {

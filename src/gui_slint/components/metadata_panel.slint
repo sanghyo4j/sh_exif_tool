@@ -1,5 +1,40 @@
-import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
 import { SectionHeader, EditableInfoRow } from "info_row.slint";
+
+component FooterButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary;
+
+    callback clicked();
+
+    width: 76px;
+    height: 32px;
+    background: button_touch.pressed
+        ? (primary ? #155a9c : #d8dee4)
+        : button_touch.has-hover
+            ? (primary ? #1f73bf : #eef2f5)
+            : (primary ? #1976d2 : #ffffff);
+    border-width: 1px;
+    border-color: primary ? #1565c0 : #cfd8dc;
+    border-radius: 4px;
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.text;
+        font-size: 12px;
+        font-weight: 600;
+        color: root.primary ? #ffffff : #263238;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    button_touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
 
 export component MetadataPanel inherits Rectangle {
     in-out property <string> selected_name;
@@ -8,6 +43,7 @@ export component MetadataPanel inherits Rectangle {
 
     callback apply_changes();
     callback cancel_changes();
+    callback clear_changes();
 
     horizontal-stretch: 1;
     height: 100%;
@@ -47,51 +83,119 @@ export component MetadataPanel inherits Rectangle {
             vertical-stretch: 1;
             background: #fcfcfc;
 
-            ScrollView {
-                width: 100%;
+            metadata_scroll := ScrollView {
+                width: parent.width - 12px;
                 height: 100%;
+                viewport-width: self.width - 4px;
                 viewport-height: info_container.preferred-height;
-                vertical-scrollbar-policy: ScrollBarPolicy.always-on;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                 horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
                 info_container := VerticalLayout {
+                    width: parent.viewport-width;
                     padding-top: 8px;
                     padding-bottom: 8px;
                     padding-left: 4px;
-                    padding-right: 14px;
+                    padding-right: 8px;
                     spacing: 0px;
 
                     SectionHeader { title: "FILE"; }
-                    EditableInfoRow { label: "Name"; value: selected_name; }
-                    EditableInfoRow { label: "Created"; value: selected_created; }
-                    EditableInfoRow { label: "Modified"; value: selected_modified; }
+                    EditableInfoRow { label: "File Name"; value: selected_name; }
+                    EditableInfoRow { label: "File Created"; value: selected_created; }
+                    EditableInfoRow { label: "File Modified"; value: selected_modified; }
 
                     SectionHeader { title: "CAMERA"; }
-                    EditableInfoRow { label: "Taken"; value: "N/A"; }
-                    EditableInfoRow { label: "Make"; value: "N/A"; }
-                    EditableInfoRow { label: "Model"; value: "N/A"; }
-                    EditableInfoRow { label: "Lens"; value: "N/A"; }
+                    EditableInfoRow { label: "Taken Date"; value: "N/A"; }
+                    EditableInfoRow { label: "Camera Make"; value: "N/A"; }
+                    EditableInfoRow { label: "Camera Model"; value: "N/A"; }
+                    EditableInfoRow { label: "Lens Model"; value: "N/A"; }
                     EditableInfoRow { label: "Software"; value: "N/A"; }
                     EditableInfoRow { label: "Artist"; value: "N/A"; }
 
                     SectionHeader { title: "EXPOSURE"; }
-                    EditableInfoRow { label: "Shutter"; value: "N/A"; }
+                    EditableInfoRow { label: "Shutter Speed"; value: "N/A"; }
                     EditableInfoRow { label: "Aperture"; value: "N/A"; }
-                    EditableInfoRow { label: "ISO"; value: "N/A"; }
+                    EditableInfoRow { label: "ISO Speed"; value: "N/A"; }
                     EditableInfoRow { label: "Focal Length"; value: "N/A"; }
-                    EditableInfoRow { label: "Flash"; value: "N/A"; }
-                    EditableInfoRow { label: "Metering"; value: "N/A"; }
+                    EditableInfoRow { label: "Flash Fired"; value: "N/A"; }
+                    EditableInfoRow { label: "Metering Mode"; value: "N/A"; }
 
                     SectionHeader { title: "IMAGE"; }
-                    EditableInfoRow { label: "Width"; value: "N/A"; }
-                    EditableInfoRow { label: "Height"; value: "N/A"; }
+                    EditableInfoRow { label: "Image Width"; value: "N/A"; }
+                    EditableInfoRow { label: "Image Height"; value: "N/A"; }
                     EditableInfoRow { label: "Orientation"; value: "N/A"; }
                     EditableInfoRow { label: "Color Space"; value: "N/A"; }
 
                     SectionHeader { title: "LOCATION"; }
-                    EditableInfoRow { label: "Latitude"; value: "N/A"; }
-                    EditableInfoRow { label: "Longitude"; value: "N/A"; }
-                    EditableInfoRow { label: "Altitude"; value: "N/A"; }
+                    EditableInfoRow { label: "GPS Latitude"; value: "N/A"; }
+                    EditableInfoRow { label: "GPS Longitude"; value: "N/A"; }
+                    EditableInfoRow { label: "GPS Altitude"; value: "N/A"; }
+                }
+            }
+
+            metadata_rail := Rectangle {
+                x: parent.width - 12px;
+                y: 0px;
+                width: 12px;
+                height: parent.height;
+                background: #eef2f5;
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+
+                    pointer-event(event) => {
+                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                            if (metadata_scroll.viewport-height > metadata_scroll.visible-height) {
+                                metadata_scroll.viewport-y = -max(
+                                    0px,
+                                    min(
+                                        metadata_scroll.viewport-height - metadata_scroll.visible-height,
+                                        self.mouse-y * metadata_scroll.viewport-height / parent.height - metadata_scroll.visible-height / 2
+                                    )
+                                );
+                            }
+                        }
+                    }
+
+                    moved => {
+                        if (self.pressed && metadata_scroll.viewport-height > metadata_scroll.visible-height) {
+                            metadata_scroll.viewport-y = -max(
+                                0px,
+                                min(
+                                    metadata_scroll.viewport-height - metadata_scroll.visible-height,
+                                    self.mouse-y * metadata_scroll.viewport-height / parent.height - metadata_scroll.visible-height / 2
+                                )
+                            );
+                        }
+                    }
+
+                    clicked => {
+                        if (metadata_scroll.viewport-height > metadata_scroll.visible-height) {
+                            metadata_scroll.viewport-y = -max(
+                                0px,
+                                min(
+                                    metadata_scroll.viewport-height - metadata_scroll.visible-height,
+                                    self.mouse-y * metadata_scroll.viewport-height / parent.height - metadata_scroll.visible-height / 2
+                                )
+                            );
+                        }
+                    }
+                }
+
+                metadata_thumb := Rectangle {
+                    x: 2px;
+                    y: metadata_scroll.viewport-height <= metadata_scroll.visible-height
+                        ? 4px
+                        : 4px + (-metadata_scroll.viewport-y)
+                            * (parent.height - 8px - self.height)
+                            / (metadata_scroll.viewport-height - metadata_scroll.visible-height);
+                    width: 8px;
+                    height: metadata_scroll.viewport-height <= metadata_scroll.visible-height
+                        ? parent.height - 8px
+                        : max(28px, (parent.height - 8px) * metadata_scroll.visible-height / metadata_scroll.viewport-height);
+                    border-radius: 4px;
+                    background: #9aa8b2;
                 }
             }
         }
@@ -107,12 +211,17 @@ export component MetadataPanel inherits Rectangle {
                 spacing: 12px;
                 alignment: end;
 
-                Button {
+                FooterButton {
+                    text: "Clear";
+                    clicked => { root.clear_changes(); }
+                }
+
+                FooterButton {
                     text: "Cancel";
                     clicked => { root.cancel_changes(); }
                 }
 
-                Button {
+                FooterButton {
                     text: "Apply";
                     primary: true;
                     clicked => { root.apply_changes(); }
