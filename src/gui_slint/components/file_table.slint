@@ -1,0 +1,31 @@
+import { StandardTableView } from "std-widgets.slint";
+
+export component FileTable inherits Rectangle {
+    in property <[[StandardListViewItem]]> rows;
+    in-out property <int> selected_index;
+
+    callback row_selected(int);
+
+    width: 750px;
+    height: 100%;
+    background: #ffffff;
+
+    table := StandardTableView {
+        width: 100%;
+        height: 100%;
+        rows: root.rows;
+        current-row <=> root.selected_index;
+        vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+        horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+        columns: [
+            { title: "File Name", min_width: 260px, width: 380px, horizontal_stretch: 1 },
+            { title: "Size", min_width: 84px, width: 100px },
+            { title: "Modified", min_width: 150px, width: 180px },
+        ];
+
+        current-row-changed(row) => {
+            root.selected_index = row;
+            root.row_selected(row);
+        }
+    }
+}

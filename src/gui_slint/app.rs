@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
-use slint::{ModelRc, VecModel};
+use slint::{ModelRc, StandardListViewItem, VecModel};
 use super::FileEntry as UiFileEntry; 
 
 pub struct LocalFileData {
@@ -83,6 +83,41 @@ impl SlintApp {
         }
 
         ModelRc::new(VecModel::from(ui_items))
+    }
+
+    pub fn get_table_model(&self) -> ModelRc<ModelRc<StandardListViewItem>> {
+        let mut rows: Vec<ModelRc<StandardListViewItem>> = Vec::new();
+
+        rows.push(ModelRc::new(VecModel::from(vec![
+            StandardListViewItem::from("[..]"),
+            StandardListViewItem::from("-"),
+            StandardListViewItem::from("-"),
+        ])));
+
+        for f in &self.files {
+            let name = f.path.file_name()
+                .map(|os_str| os_str.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+            let display_name = if f.is_dir {
+                format!("[{}]", name)
+            } else {
+                name
+            };
+            let size = if f.is_dir {
+                "-".to_string()
+            } else {
+                format!("{} KB", (f.size + 1023) / 1024)
+            };
+            let modified = f.modified.map(format_time).unwrap_or_else(|| "-".to_string());
+
+            rows.push(ModelRc::new(VecModel::from(vec![
+                StandardListViewItem::from(display_name.as_str()),
+                StandardListViewItem::from(size.as_str()),
+                StandardListViewItem::from(modified.as_str()),
+            ])));
+        }
+
+        ModelRc::new(VecModel::from(rows))
     }
 
     pub fn file_count(&self) -> usize {

@@ -1,6 +1,6 @@
 pub mod app;
 
-use slint::ComponentHandle;
+use slint::{language::ColorScheme, ComponentHandle};
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -14,6 +14,7 @@ pub struct SlintRunner;
 impl GuiRunner for SlintRunner {
     fn run() -> Result<(), Box<dyn std::error::Error>> {
         let ui = MainWindow::new()?;
+        ui.global::<Palette>().set_color_scheme(ColorScheme::Light);
         let app = Rc::new(RefCell::new(SlintApp::new()));
 
         // 1. 초기 데이터 로드
@@ -29,6 +30,7 @@ impl GuiRunner for SlintRunner {
                     ui.set_current_path(app.current_path.as_str().into());
                     ui.set_item_count(app.file_count() as i32);
                     ui.set_files(app.get_ui_model());
+                    ui.set_table_rows(app.get_table_model());
                     ui.set_selected_index(-1);
                     ui.set_selected_name("N/A".into());
                     ui.set_selected_created("N/A".into());

@@ -1,11 +1,11 @@
-import { HorizontalBox } from "std-widgets.slint";
+import { HorizontalBox, Palette } from "std-widgets.slint";
 import { FileEntry } from "types.slint";
 import { HDivider, StrongVDivider } from "components/dividers.slint";
 import { PathBar } from "components/path_bar.slint";
-import { FileList } from "components/file_list.slint";
+import { FileTable } from "components/file_table.slint";
 import { MetadataPanel } from "components/metadata_panel.slint";
 
-export { FileEntry }
+export { FileEntry, Palette }
 
 export component MainWindow inherits Window {
     width: 1200px;
@@ -15,6 +15,7 @@ export component MainWindow inherits Window {
 
     in-out property <string> current_path: "C:/";
     in-out property <[FileEntry]> files;
+    in-out property <[[StandardListViewItem]]> table_rows;
     in-out property <int> selected_index: -1;
     in-out property <bool> editing_path: false;
     in-out property <string> selected_name: "N/A";
@@ -99,23 +100,24 @@ export component MainWindow inherits Window {
             padding: 0;
             spacing: 0;
 
-            FileList {
-                files: root.files;
-                selected_index: root.selected_index;
-                open_dir(index) => { root.open_dir(index); }
-                go_parent() => { root.go_parent(); }
-                select_file(name, created, modified, is_dir) => {
+            FileTable {
+                rows: root.table_rows;
+                selected_index <=> root.selected_index;
+                row_selected(index) => {
                     root.editing_path = false;
-                    root.selected_name = name;
-                    root.selected_created = created;
-                    root.selected_modified = modified;
-                    root.selected_is_dir = is_dir;
+                    if (index >= 0 && index < root.files.length) {
+                        root.selected_name = root.files[index].name;
+                        root.selected_created = root.files[index].created;
+                        root.selected_modified = root.files[index].modified;
+                        root.selected_is_dir = root.files[index].is_dir;
+                    }
                 }
             }
 
             StrongVDivider {}
 
             MetadataPanel {
+                width: max(320px, root.width - 756px);
                 selected_name: root.selected_name;
                 selected_created: root.selected_created;
                 selected_modified: root.selected_modified;
@@ -147,7 +149,7 @@ export component MainWindow inherits Window {
             x: 10px;
             width: parent.width - 20px;
             height: 100%;
-            text: "파일 " + item_count + "개";
+            text: "Files: " + item_count;
             font-size: 12px;
             color: #666666;
             vertical-alignment: center;
