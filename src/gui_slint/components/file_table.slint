@@ -5,6 +5,7 @@ export component FileTable inherits Rectangle {
     in-out property <int> selected_index;
 
     callback row_selected(int);
+    callback row_clicked(int);
 
     width: 750px;
     height: 100%;
@@ -26,6 +27,12 @@ export component FileTable inherits Rectangle {
         current-row-changed(row) => {
             root.selected_index = row;
             root.row_selected(row);
+        }
+
+        row-pointer-event(row, event, position) => {
+            if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
+                root.row_clicked(row);
+            }
         }
     }
 }

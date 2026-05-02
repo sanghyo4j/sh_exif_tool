@@ -4,6 +4,7 @@ use slint::{language::ColorScheme, ComponentHandle};
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use self::app::SlintApp;
 use crate::GuiRunner;
 
@@ -99,6 +100,52 @@ impl GuiRunner for SlintRunner {
         });
 
         // 4. 상위 폴더 이동 핸들러
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
+        let last_table_click: Rc<RefCell<Option<(i32, Instant)>>> = Rc::new(RefCell::new(None));
+        let last_table_click_handle = last_table_click.clone();
+        ui.on_table_row_clicked(move |index| {
+            let now = Instant::now();
+            let is_double_click = {
+                let mut last = last_table_click_handle.borrow_mut();
+                let is_double = last
+                    .map(|(last_index, last_time)| {
+                        last_index == index && now.duration_since(last_time) <= Duration::from_millis(500)
+                    })
+                    .unwrap_or(false);
+                *last = Some((index, now));
+                is_double
+            };
+
+            if !is_double_click {
+                return;
+            }
+
+            let mut changed = false;
+            {
+                let mut app = app_handle.borrow_mut();
+                let idx = index as usize;
+
+                if idx == 0 {
+                    if let Some(parent) = PathBuf::from(&app.current_path).parent() {
+                        app.current_path = parent.to_string_lossy().to_string();
+                        app.load_folder();
+                        changed = true;
+                    }
+                } else if let Some(entry) = app.files.get(idx - 1) {
+                    if entry.is_dir {
+                        app.current_path = entry.path.to_string_lossy().to_string();
+                        app.load_folder();
+                        changed = true;
+                    }
+                }
+            }
+
+            if changed {
+                refresh();
+            }
+        });
+
         let app_handle = app.clone();
         let refresh = refresh_ui.clone();
         ui.on_go_parent(move || {

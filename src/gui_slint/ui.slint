@@ -31,6 +31,7 @@ export component MainWindow inherits Window {
     callback apply_changes();
     callback cancel_changes();
     callback clear_changes();
+    callback table_row_clicked(int);
 
     MenuBar {
         Menu {
@@ -112,6 +113,9 @@ export component MainWindow inherits Window {
                         root.selected_is_dir = root.files[index].is_dir;
                     }
                 }
+                row_clicked(index) => {
+                    root.table_row_clicked(index);
+                }
             }
 
             StrongVDivider {}
@@ -156,9 +160,4 @@ export component MainWindow inherits Window {
         }
     }
 
-    if (editing_path) : TouchArea {
-        clicked => {
-            editing_path = false;
-        }
-    }
 }
