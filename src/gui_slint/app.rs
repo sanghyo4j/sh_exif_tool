@@ -132,6 +132,27 @@ impl SlintApp {
 
         self.files.get(idx - 1).map(|entry| entry.path.clone())
     }
+
+    pub fn ui_details_for_index(&self, index: i32) -> Option<(String, String, String, bool)> {
+        let idx = usize::try_from(index).ok()?;
+        if idx == 0 {
+            return Some((
+                "[..]".to_string(),
+                "-".to_string(),
+                "-".to_string(),
+                true,
+            ));
+        }
+
+        let entry = self.files.get(idx - 1)?;
+        let name = entry.path.file_name()
+            .map(|os_str| os_str.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+        let modified = entry.modified.map(format_time).unwrap_or_else(|| "-".to_string());
+        let created = entry.created.map(format_time).unwrap_or_else(|| "-".to_string());
+
+        Some((name, created, modified, entry.is_dir))
+    }
 }
 
 fn format_time(t: SystemTime) -> String {

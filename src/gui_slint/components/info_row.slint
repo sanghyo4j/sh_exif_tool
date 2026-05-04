@@ -1,4 +1,4 @@
-import { HorizontalBox } from "std-widgets.slint";
+import { CheckBox, HorizontalBox } from "std-widgets.slint";
 import { HDivider } from "dividers.slint";
 
 export component SectionHeader inherits Rectangle {
@@ -65,16 +65,55 @@ export component EditableInfoRow inherits Rectangle {
                 x: 8px;
                 width: parent.width - 16px;
                 height: 100%;
-                text: root.value;
+                text <=> root.value;
                 font-size: 12px;
                 vertical-alignment: center;
                 single-line: true;
                 color: #1f2933;
 
                 edited => {
-                    root.value = self.text;
                     root.value_edited();
                 }
+            }
+        }
+    }
+
+    HDivider {
+        y: parent.height - 1px;
+        background: #f3f5f6;
+    }
+}
+
+export component ReadOnlyCheckRow inherits Rectangle {
+    in property <string> label;
+    in property <bool> checked;
+
+    height: 34px;
+    background: #ffffff;
+
+    HorizontalBox {
+        width: 100%;
+        height: 100%;
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 12px;
+
+        Text {
+            text: label;
+            width: 126px;
+            color: #455a64;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        HorizontalBox {
+            horizontal-stretch: 1;
+            spacing: 8px;
+
+            CheckBox {
+                checked: root.checked;
+                enabled: false;
             }
         }
     }

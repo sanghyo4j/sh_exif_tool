@@ -3,6 +3,7 @@ use std::path::Path;
 
 #[derive(Clone, Debug)]
 pub struct ExifMetadata {
+    pub has_exif: bool,
     pub taken_date: String,
     pub camera_make: String,
     pub camera_model: String,
@@ -27,25 +28,26 @@ pub struct ExifMetadata {
 impl Default for ExifMetadata {
     fn default() -> Self {
         Self {
-            taken_date: n_a(),
-            camera_make: n_a(),
-            camera_model: n_a(),
-            lens_model: n_a(),
-            software: n_a(),
-            artist: n_a(),
-            shutter_speed: n_a(),
-            aperture: n_a(),
-            iso_speed: n_a(),
-            focal_length: n_a(),
-            flash_fired: n_a(),
-            metering_mode: n_a(),
-            image_width: n_a(),
-            image_height: n_a(),
-            orientation: n_a(),
-            color_space: n_a(),
-            gps_latitude: n_a(),
-            gps_longitude: n_a(),
-            gps_altitude: n_a(),
+            has_exif: false,
+            taken_date: empty_value(),
+            camera_make: empty_value(),
+            camera_model: empty_value(),
+            lens_model: empty_value(),
+            software: empty_value(),
+            artist: empty_value(),
+            shutter_speed: empty_value(),
+            aperture: empty_value(),
+            iso_speed: empty_value(),
+            focal_length: empty_value(),
+            flash_fired: empty_value(),
+            metering_mode: empty_value(),
+            image_width: empty_value(),
+            image_height: empty_value(),
+            orientation: empty_value(),
+            color_space: empty_value(),
+            gps_latitude: empty_value(),
+            gps_longitude: empty_value(),
+            gps_altitude: empty_value(),
         }
     }
 }
@@ -95,21 +97,22 @@ fn parse_tiff(data: &[u8]) -> Option<ExifMetadata> {
 
     let ifd0_offset = read_u32(data, 4, endian)? as usize;
     let mut meta = ExifMetadata::default();
+    meta.has_exif = true;
     let mut exif_ifd = None;
     let mut gps_ifd = None;
 
     for entry in read_ifd_entries(data, ifd0_offset, endian)? {
         match entry.tag {
-            0x010f => meta.camera_make = entry.as_ascii().unwrap_or_else(n_a),
-            0x0110 => meta.camera_model = entry.as_ascii().unwrap_or_else(n_a),
-            0x0112 => meta.orientation = entry.as_short().map(format_orientation).unwrap_or_else(n_a),
-            0x0131 => meta.software = entry.as_ascii().unwrap_or_else(n_a),
+            0x010f => meta.camera_make = entry.as_ascii().unwrap_or_else(empty_value),
+            0x0110 => meta.camera_model = entry.as_ascii().unwrap_or_else(empty_value),
+            0x0112 => meta.orientation = entry.as_short().map(format_orientation).unwrap_or_else(empty_value),
+            0x0131 => meta.software = entry.as_ascii().unwrap_or_else(empty_value),
             0x0132 => {
-                if meta.taken_date == "N/A" {
-                    meta.taken_date = entry.as_ascii().unwrap_or_else(n_a);
+                if meta.taken_date.is_empty() {
+                    meta.taken_date = entry.as_ascii().unwrap_or_else(empty_value);
                 }
             }
-            0x013b => meta.artist = entry.as_ascii().unwrap_or_else(n_a),
+            0x013b => meta.artist = entry.as_ascii().unwrap_or_else(empty_value),
             0x8769 => exif_ifd = entry.as_long().map(|v| v as usize),
             0x8825 => gps_ifd = entry.as_long().map(|v| v as usize),
             _ => {}
@@ -134,22 +137,22 @@ fn parse_exif_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMet
 
     for entry in entries {
         match entry.tag {
-            0x829a => meta.shutter_speed = entry.as_rational().map(format_shutter).unwrap_or_else(n_a),
-            0x829d => meta.aperture = entry.as_rational().map(format_aperture).unwrap_or_else(n_a),
-            0x8827 => meta.iso_speed = entry.as_short().map(|v| v.to_string()).unwrap_or_else(n_a),
-            0x9003 => meta.taken_date = entry.as_ascii().unwrap_or_else(n_a),
+            0x829a => meta.shutter_speed = entry.as_rational().map(format_shutter).unwrap_or_else(empty_value),
+            0x829d => meta.aperture = entry.as_rational().map(format_aperture).unwrap_or_else(empty_value),
+            0x8827 => meta.iso_speed = entry.as_short().map(|v| v.to_string()).unwrap_or_else(empty_value),
+            0x9003 => meta.taken_date = entry.as_ascii().unwrap_or_else(empty_value),
             0x9004 => {
-                if meta.taken_date == "N/A" {
-                    meta.taken_date = entry.as_ascii().unwrap_or_else(n_a);
+                if meta.taken_date.is_empty() {
+                    meta.taken_date = entry.as_ascii().unwrap_or_else(empty_value);
                 }
             }
-            0x9207 => meta.metering_mode = entry.as_short().map(format_metering).unwrap_or_else(n_a),
-            0x9209 => meta.flash_fired = entry.as_short().map(format_flash).unwrap_or_else(n_a),
-            0x920a => meta.focal_length = entry.as_rational().map(format_focal_length).unwrap_or_else(n_a),
-            0xa001 => meta.color_space = entry.as_short().map(format_color_space).unwrap_or_else(n_a),
-            0xa002 => meta.image_width = entry.as_number().map(|v| v.to_string()).unwrap_or_else(n_a),
-            0xa003 => meta.image_height = entry.as_number().map(|v| v.to_string()).unwrap_or_else(n_a),
-            0xa434 => meta.lens_model = entry.as_ascii().unwrap_or_else(n_a),
+            0x9207 => meta.metering_mode = entry.as_short().map(format_metering).unwrap_or_else(empty_value),
+            0x9209 => meta.flash_fired = entry.as_short().map(format_flash).unwrap_or_else(empty_value),
+            0x920a => meta.focal_length = entry.as_rational().map(format_focal_length).unwrap_or_else(empty_value),
+            0xa001 => meta.color_space = entry.as_short().map(format_color_space).unwrap_or_else(empty_value),
+            0xa002 => meta.image_width = entry.as_number().map(|v| v.to_string()).unwrap_or_else(empty_value),
+            0xa003 => meta.image_height = entry.as_number().map(|v| v.to_string()).unwrap_or_else(empty_value),
+            0xa434 => meta.lens_model = entry.as_ascii().unwrap_or_else(empty_value),
             _ => {}
         }
     }
@@ -434,6 +437,6 @@ fn format_gps_coord(reference: &str, parts: [(u32, u32); 3]) -> String {
     format!("{decimal:.6}")
 }
 
-fn n_a() -> String {
-    "N/A".to_string()
+fn empty_value() -> String {
+    String::new()
 }

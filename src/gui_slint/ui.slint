@@ -23,25 +23,26 @@ export component MainWindow inherits Window {
     in-out property <string> selected_modified: "N/A";
     in-out property <bool> selected_is_dir: false;
     in-out property <int> item_count: 0;
-    in-out property <string> taken_date: "N/A";
-    in-out property <string> camera_make: "N/A";
-    in-out property <string> camera_model: "N/A";
-    in-out property <string> lens_model: "N/A";
-    in-out property <string> software: "N/A";
-    in-out property <string> artist: "N/A";
-    in-out property <string> shutter_speed: "N/A";
-    in-out property <string> aperture: "N/A";
-    in-out property <string> iso_speed: "N/A";
-    in-out property <string> focal_length: "N/A";
-    in-out property <string> flash_fired: "N/A";
-    in-out property <string> metering_mode: "N/A";
-    in-out property <string> image_width: "N/A";
-    in-out property <string> image_height: "N/A";
-    in-out property <string> orientation: "N/A";
-    in-out property <string> color_space: "N/A";
-    in-out property <string> gps_latitude: "N/A";
-    in-out property <string> gps_longitude: "N/A";
-    in-out property <string> gps_altitude: "N/A";
+    in-out property <string> taken_date: "";
+    in-out property <string> camera_make: "";
+    in-out property <string> camera_model: "";
+    in-out property <string> lens_model: "";
+    in-out property <string> software: "";
+    in-out property <string> artist: "";
+    in-out property <string> shutter_speed: "";
+    in-out property <string> aperture: "";
+    in-out property <string> iso_speed: "";
+    in-out property <string> focal_length: "";
+    in-out property <string> flash_fired: "";
+    in-out property <string> metering_mode: "";
+    in-out property <string> image_width: "";
+    in-out property <string> image_height: "";
+    in-out property <string> orientation: "";
+    in-out property <string> color_space: "";
+    in-out property <string> gps_latitude: "";
+    in-out property <string> gps_longitude: "";
+    in-out property <string> gps_altitude: "";
+    in-out property <bool> exif_available: false;
     in-out property <bool> metadata_dirty: false;
 
     callback open_dir(int);
@@ -49,8 +50,8 @@ export component MainWindow inherits Window {
     callback go_parent();
     callback change_dir(string);
     callback apply_changes();
-    callback cancel_changes();
-    callback clear_changes();
+    callback revert_changes();
+    callback remove_exif_tags();
     callback table_row_clicked(int);
     callback table_row_selected(int);
 
@@ -70,7 +71,13 @@ export component MainWindow inherits Window {
         Menu {
             title: "Advanced";
 
-            MenuItem { title: "Remove EXIF Tags"; activated => { root.editing_path = false; } }
+            MenuItem {
+                title: "Remove EXIF Tags";
+                activated => {
+                    root.editing_path = false;
+                    root.remove_exif_tags();
+                }
+            }
         }
 
         Menu {
@@ -145,43 +152,39 @@ export component MainWindow inherits Window {
 
             MetadataPanel {
                 width: max(320px, root.width - 756px);
-                selected_name: root.selected_name;
-                selected_created: root.selected_created;
-                selected_modified: root.selected_modified;
-                taken_date: root.taken_date;
-                camera_make: root.camera_make;
-                camera_model: root.camera_model;
-                lens_model: root.lens_model;
-                software: root.software;
-                artist: root.artist;
-                shutter_speed: root.shutter_speed;
-                aperture: root.aperture;
-                iso_speed: root.iso_speed;
-                focal_length: root.focal_length;
-                flash_fired: root.flash_fired;
-                metering_mode: root.metering_mode;
-                image_width: root.image_width;
-                image_height: root.image_height;
-                orientation: root.orientation;
-                color_space: root.color_space;
-                gps_latitude: root.gps_latitude;
-                gps_longitude: root.gps_longitude;
-                gps_altitude: root.gps_altitude;
+                selected_name <=> root.selected_name;
+                selected_created <=> root.selected_created;
+                selected_modified <=> root.selected_modified;
+                taken_date <=> root.taken_date;
+                camera_make <=> root.camera_make;
+                camera_model <=> root.camera_model;
+                lens_model <=> root.lens_model;
+                software <=> root.software;
+                artist <=> root.artist;
+                shutter_speed <=> root.shutter_speed;
+                aperture <=> root.aperture;
+                iso_speed <=> root.iso_speed;
+                focal_length <=> root.focal_length;
+                flash_fired <=> root.flash_fired;
+                metering_mode <=> root.metering_mode;
+                image_width <=> root.image_width;
+                image_height <=> root.image_height;
+                orientation <=> root.orientation;
+                color_space <=> root.color_space;
+                gps_latitude <=> root.gps_latitude;
+                gps_longitude <=> root.gps_longitude;
+                gps_altitude <=> root.gps_altitude;
+                exif_available <=> root.exif_available;
                 has_pending_changes <=> root.metadata_dirty;
                 apply_changes() => {
                     root.editing_path = false;
                     root.metadata_dirty = false;
                     root.apply_changes();
                 }
-                cancel_changes() => {
+                revert_changes() => {
                     root.editing_path = false;
+                    root.revert_changes();
                     root.metadata_dirty = false;
-                    root.cancel_changes();
-                }
-                clear_changes() => {
-                    root.editing_path = false;
-                    root.metadata_dirty = false;
-                    root.clear_changes();
                 }
             }
         }

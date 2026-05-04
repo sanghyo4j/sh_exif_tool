@@ -182,27 +182,41 @@ impl GuiRunner for SlintRunner {
         });
 
         let ui_handle = ui.as_weak();
-        ui.on_cancel_changes(move || {
+        ui.on_remove_exif_tags(move || {
             if let Some(ui) = ui_handle.upgrade() {
-                ui.set_selected_index(-1);
-                ui.set_selected_name("N/A".into());
-                ui.set_selected_created("N/A".into());
-                ui.set_selected_modified("N/A".into());
-                ui.set_selected_is_dir(false);
-                ui.set_metadata_dirty(false);
-                set_exif_metadata(&ui, ExifMetadata::default());
+                if ui.get_selected_index() >= 0 && !ui.get_selected_is_dir() {
+                    ui.set_metadata_dirty(true);
+                    set_exif_metadata(&ui, ExifMetadata::default());
+                }
             }
         });
 
+        let app_handle = app.clone();
         let ui_handle = ui.as_weak();
-        ui.on_clear_changes(move || {
+        ui.on_revert_changes(move || {
             if let Some(ui) = ui_handle.upgrade() {
-                ui.set_selected_name("N/A".into());
-                ui.set_selected_created("N/A".into());
-                ui.set_selected_modified("N/A".into());
-                ui.set_selected_is_dir(false);
+                let metadata = {
+                    let app = app_handle.borrow();
+                    let index = ui.get_selected_index();
+
+                    if let Some((name, created, modified, is_dir)) = app.ui_details_for_index(index) {
+                        ui.set_selected_name(name.into());
+                        ui.set_selected_created(created.into());
+                        ui.set_selected_modified(modified.into());
+                        ui.set_selected_is_dir(is_dir);
+                    }
+
+                    let Some(path) = app.path_for_ui_index(index) else {
+                        return set_exif_metadata(&ui, ExifMetadata::default());
+                    };
+                    if path.is_file() {
+                        read_exif_metadata(&path)
+                    } else {
+                        ExifMetadata::default()
+                    }
+                };
+                set_exif_metadata(&ui, metadata);
                 ui.set_metadata_dirty(false);
-                set_exif_metadata(&ui, ExifMetadata::default());
             }
         });
 
@@ -216,6 +230,7 @@ impl GuiRunner for SlintRunner {
 }
 
 fn set_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
+    ui.set_exif_available(metadata.has_exif);
     ui.set_taken_date(metadata.taken_date.into());
     ui.set_camera_make(metadata.camera_make.into());
     ui.set_camera_model(metadata.camera_model.into());
