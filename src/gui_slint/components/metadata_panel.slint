@@ -26,9 +26,32 @@ export component MetadataPanel inherits Rectangle {
     in-out property <string> gps_altitude;
     in-out property <bool> exif_available: false;
     in-out property <bool> has_pending_changes: false;
+    in-out property <bool> selected_name_dirty: false;
+    in-out property <bool> selected_created_dirty: false;
+    in-out property <bool> selected_modified_dirty: false;
+    in-out property <bool> taken_date_dirty: false;
+    in-out property <bool> camera_make_dirty: false;
+    in-out property <bool> camera_model_dirty: false;
+    in-out property <bool> lens_model_dirty: false;
+    in-out property <bool> software_dirty: false;
+    in-out property <bool> artist_dirty: false;
+    in-out property <bool> shutter_speed_dirty: false;
+    in-out property <bool> aperture_dirty: false;
+    in-out property <bool> iso_speed_dirty: false;
+    in-out property <bool> focal_length_dirty: false;
+    in-out property <bool> flash_fired_dirty: false;
+    in-out property <bool> metering_mode_dirty: false;
+    in-out property <bool> image_width_dirty: false;
+    in-out property <bool> image_height_dirty: false;
+    in-out property <bool> orientation_dirty: false;
+    in-out property <bool> color_space_dirty: false;
+    in-out property <bool> gps_latitude_dirty: false;
+    in-out property <bool> gps_longitude_dirty: false;
+    in-out property <bool> gps_altitude_dirty: false;
 
     callback apply_changes();
     callback revert_changes();
+    callback metadata_edited();
 
     horizontal-stretch: 1;
     height: 100%;
@@ -102,37 +125,37 @@ export component MetadataPanel inherits Rectangle {
                     spacing: 0px;
 
                     SectionHeader { title: "FILE"; }
-                    EditableInfoRow { label: "File Name"; value <=> root.selected_name; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "File Created"; value <=> root.selected_created; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "File Modified"; value <=> root.selected_modified; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "File Name"; value <=> root.selected_name; dirty <=> root.selected_name_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "File Created"; value <=> root.selected_created; dirty <=> root.selected_created_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "File Modified"; value <=> root.selected_modified; dirty <=> root.selected_modified_dirty; value_edited => { root.metadata_edited(); } }
                     ReadOnlyCheckRow { label: "EXIF Tag Available"; checked: root.exif_available; }
 
                     SectionHeader { title: "CAMERA"; }
-                    EditableInfoRow { label: "Taken Date"; value <=> root.taken_date; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "Camera Make"; value <=> root.camera_make; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "Camera Model"; value <=> root.camera_model; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "Lens Model"; value <=> root.lens_model; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "Software"; value <=> root.software; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "Artist"; value <=> root.artist; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Taken Date"; value <=> root.taken_date; dirty <=> root.taken_date_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "Camera Make"; value <=> root.camera_make; dirty <=> root.camera_make_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "Camera Model"; value <=> root.camera_model; dirty <=> root.camera_model_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "Lens Model"; value <=> root.lens_model; dirty <=> root.lens_model_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "Software"; value <=> root.software; dirty <=> root.software_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "Artist"; value <=> root.artist; dirty <=> root.artist_dirty; value_edited => { root.metadata_edited(); } }
 
                     SectionHeader { title: "EXPOSURE"; }
-                    EditableInfoRow { label: "Shutter Speed"; value <=> root.shutter_speed; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "Aperture"; value <=> root.aperture; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "ISO Speed"; value <=> root.iso_speed; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "Focal Length"; value <=> root.focal_length; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "Flash Fired"; value <=> root.flash_fired; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "Metering Mode"; value <=> root.metering_mode; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Shutter Speed"; value <=> root.shutter_speed; dirty <=> root.shutter_speed_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "Aperture"; value <=> root.aperture; dirty <=> root.aperture_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "ISO Speed"; value <=> root.iso_speed; dirty <=> root.iso_speed_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "Focal Length"; value <=> root.focal_length; dirty <=> root.focal_length_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "Flash Fired"; value <=> root.flash_fired; dirty <=> root.flash_fired_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "Metering Mode"; value <=> root.metering_mode; dirty <=> root.metering_mode_dirty; value_edited => { root.metadata_edited(); } }
 
                     SectionHeader { title: "IMAGE"; }
-                    EditableInfoRow { label: "Image Width"; value <=> root.image_width; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "Image Height"; value <=> root.image_height; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "Orientation"; value <=> root.orientation; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "Color Space"; value <=> root.color_space; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Image Width"; value <=> root.image_width; dirty <=> root.image_width_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "Image Height"; value <=> root.image_height; dirty <=> root.image_height_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "Orientation"; value <=> root.orientation; dirty <=> root.orientation_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "Color Space"; value <=> root.color_space; dirty <=> root.color_space_dirty; value_edited => { root.metadata_edited(); } }
 
                     SectionHeader { title: "LOCATION"; }
-                    EditableInfoRow { label: "GPS Latitude"; value <=> root.gps_latitude; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "GPS Longitude"; value <=> root.gps_longitude; value_edited => { root.has_pending_changes = true; } }
-                    EditableInfoRow { label: "GPS Altitude"; value <=> root.gps_altitude; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "GPS Latitude"; value <=> root.gps_latitude; dirty <=> root.gps_latitude_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "GPS Longitude"; value <=> root.gps_longitude; dirty <=> root.gps_longitude_dirty; value_edited => { root.metadata_edited(); } }
+                    EditableInfoRow { label: "GPS Altitude"; value <=> root.gps_altitude; dirty <=> root.gps_altitude_dirty; value_edited => { root.metadata_edited(); } }
                 }
             }
 

@@ -3,6 +3,9 @@ import { StandardTableView } from "std-widgets.slint";
 export component FileTable inherits Rectangle {
     in property <[[StandardListViewItem]]> rows;
     in-out property <int> selected_index;
+    property <length> header_height: 42px;
+    property <length> selected_row_height: rows.length > 0 ? table.viewport-height / rows.length : 0px;
+    property <length> selected_row_y: header_height + table.viewport-y + selected_index * selected_row_height;
 
     callback row_selected(int);
     callback row_clicked(int);
@@ -34,5 +37,26 @@ export component FileTable inherits Rectangle {
                 root.row_clicked(row);
             }
         }
+    }
+
+    if selected_index >= 0 && selected_index < rows.length
+        && selected_row_y + selected_row_height >= header_height
+        && selected_row_y <= root.height : Rectangle {
+        x: 0px;
+        y: max(root.header_height, root.selected_row_y);
+        width: root.width;
+        height: min(root.selected_row_height, root.height - self.y);
+        background: #dbeafe66;
+    }
+
+    if selected_index >= 0 && selected_index < rows.length
+        && selected_row_y + selected_row_height >= header_height
+        && selected_row_y <= root.height : Rectangle {
+        x: 0px;
+        y: max(root.header_height, root.selected_row_y + 4px);
+        width: 4px;
+        height: max(0px, min(root.selected_row_height - 8px, root.height - self.y));
+        background: #2563eb;
+        border-radius: 2px;
     }
 }

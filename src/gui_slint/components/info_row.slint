@@ -32,6 +32,7 @@ export component SectionHeader inherits Rectangle {
 
 export component EditableInfoRow inherits Rectangle {
     in property <string> label;
+    in property <bool> dirty: false;
     in-out property <string> value;
     callback value_edited();
 
@@ -56,9 +57,9 @@ export component EditableInfoRow inherits Rectangle {
 
         Rectangle {
             horizontal-stretch: 1;
-            background: #ffffff;
+            background: root.dirty ? #fff7d6 : #ffffff;
             border-width: 1px;
-            border-color: #edf0f2;
+            border-color: root.dirty ? #e5c85d : #edf0f2;
             border-radius: 3px;
 
             TextInput {

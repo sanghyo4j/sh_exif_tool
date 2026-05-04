@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use chrono::{NaiveDate, NaiveDateTime};
 
 #[derive(Clone, Debug)]
 pub struct ExifMetadata {
@@ -78,6 +79,76 @@ pub fn read_exif_metadata(path: &Path) -> ExifMetadata {
     };
 
     parse_tiff(tiff).unwrap_or_default()
+}
+
+pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
+    let filename = path.file_stem()?.to_str()?;
+    let chars: Vec<char> = filename.chars().collect();
+    let mut candidates = Vec::new();
+
+    for start in 0..chars.len() {
+        let mut digits = String::new();
+        let mut candidate_10 = None;
+        let mut candidate_12 = None;
+
+        for ch in chars.iter().skip(start) {
+            if ch.is_ascii_digit() {
+                digits.push(*ch);
+            } else if (*ch == '_' || *ch == '-') && digits.len() == 8 {
+                continue;
+            } else {
+                break;
+            }
+
+            if digits.len() == 10 {
+                candidate_10 = parse_compact_filename_datetime(&digits);
+            } else if digits.len() == 12 {
+                candidate_12 = parse_compact_filename_datetime(&digits);
+                candidate_10 = None;
+            } else if digits.len() == 14 {
+                if let Some(parsed) = parse_compact_filename_datetime(&digits) {
+                    candidates.push(parsed);
+                }
+                candidate_10 = None;
+                candidate_12 = None;
+            }
+
+            if digits.len() >= 14 {
+                break;
+            }
+        }
+
+        if let Some(parsed) = candidate_12 {
+            candidates.push(parsed);
+        } else if let Some(parsed) = candidate_10 {
+            candidates.push(parsed);
+        }
+    }
+
+    let earliest = candidates.into_iter().min()?;
+    Some(earliest.format("%Y:%m:%d %H:%M:%S").to_string())
+}
+
+fn parse_compact_filename_datetime(value: &str) -> Option<NaiveDateTime> {
+    let padded = match value.len() {
+        14 => value.to_string(),
+        12 => format!("{value}00"),
+        10 => {
+            let yy = value[0..2].parse::<i32>().ok()?;
+            let year = if yy <= 79 { 2000 + yy } else { 1900 + yy };
+            format!("{year:04}{}00", &value[2..])
+        }
+        _ => return None,
+    };
+
+    let year = padded[0..4].parse().ok()?;
+    let month = padded[4..6].parse().ok()?;
+    let day = padded[6..8].parse().ok()?;
+    let hour = padded[8..10].parse().ok()?;
+    let minute = padded[10..12].parse().ok()?;
+    let second = padded[12..14].parse().ok()?;
+
+    NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, second)
 }
 
 fn parse_tiff(data: &[u8]) -> Option<ExifMetadata> {

@@ -1,4 +1,4 @@
-import { HorizontalBox, Palette } from "std-widgets.slint";
+import { Button, HorizontalBox, Palette } from "std-widgets.slint";
 import { FileEntry } from "types.slint";
 import { HDivider, StrongVDivider } from "components/dividers.slint";
 import { PathBar } from "components/path_bar.slint";
@@ -11,6 +11,7 @@ export component MainWindow inherits Window {
     width: 1200px;
     height: 800px;
     background: #ffffff;
+    default-font-family: "Segoe UI";
     title: "Rust EXIF Tool";
 
     in-out property <string> current_path: "C:/";
@@ -42,8 +43,54 @@ export component MainWindow inherits Window {
     in-out property <string> gps_latitude: "";
     in-out property <string> gps_longitude: "";
     in-out property <string> gps_altitude: "";
+    in-out property <string> original_selected_name: "N/A";
+    in-out property <string> original_selected_created: "N/A";
+    in-out property <string> original_selected_modified: "N/A";
+    in-out property <string> original_taken_date: "";
+    in-out property <string> original_camera_make: "";
+    in-out property <string> original_camera_model: "";
+    in-out property <string> original_lens_model: "";
+    in-out property <string> original_software: "";
+    in-out property <string> original_artist: "";
+    in-out property <string> original_shutter_speed: "";
+    in-out property <string> original_aperture: "";
+    in-out property <string> original_iso_speed: "";
+    in-out property <string> original_focal_length: "";
+    in-out property <string> original_flash_fired: "";
+    in-out property <string> original_metering_mode: "";
+    in-out property <string> original_image_width: "";
+    in-out property <string> original_image_height: "";
+    in-out property <string> original_orientation: "";
+    in-out property <string> original_color_space: "";
+    in-out property <string> original_gps_latitude: "";
+    in-out property <string> original_gps_longitude: "";
+    in-out property <string> original_gps_altitude: "";
     in-out property <bool> exif_available: false;
     in-out property <bool> metadata_dirty: false;
+    in-out property <bool> selected_name_dirty: false;
+    in-out property <bool> selected_created_dirty: false;
+    in-out property <bool> selected_modified_dirty: false;
+    in-out property <bool> taken_date_dirty: false;
+    in-out property <bool> camera_make_dirty: false;
+    in-out property <bool> camera_model_dirty: false;
+    in-out property <bool> lens_model_dirty: false;
+    in-out property <bool> software_dirty: false;
+    in-out property <bool> artist_dirty: false;
+    in-out property <bool> shutter_speed_dirty: false;
+    in-out property <bool> aperture_dirty: false;
+    in-out property <bool> iso_speed_dirty: false;
+    in-out property <bool> focal_length_dirty: false;
+    in-out property <bool> flash_fired_dirty: false;
+    in-out property <bool> metering_mode_dirty: false;
+    in-out property <bool> image_width_dirty: false;
+    in-out property <bool> image_height_dirty: false;
+    in-out property <bool> orientation_dirty: false;
+    in-out property <bool> color_space_dirty: false;
+    in-out property <bool> gps_latitude_dirty: false;
+    in-out property <bool> gps_longitude_dirty: false;
+    in-out property <bool> gps_altitude_dirty: false;
+    in-out property <bool> message_visible: false;
+    in-out property <string> message_text: "";
 
     callback open_dir(int);
     callback reload();
@@ -52,6 +99,8 @@ export component MainWindow inherits Window {
     callback apply_changes();
     callback revert_changes();
     callback remove_exif_tags();
+    callback fill_taken_date_from_filename();
+    callback metadata_value_edited();
     callback table_row_clicked(int);
     callback table_row_selected(int);
 
@@ -71,6 +120,13 @@ export component MainWindow inherits Window {
         Menu {
             title: "Advanced";
 
+            MenuItem {
+                title: "Fill Taken date from Filename";
+                activated => {
+                    root.editing_path = false;
+                    root.fill_taken_date_from_filename();
+                }
+            }
             MenuItem {
                 title: "Remove EXIF Tags";
                 activated => {
@@ -135,10 +191,35 @@ export component MainWindow inherits Window {
                 row_selected(index) => {
                     root.editing_path = false;
                     root.metadata_dirty = false;
+                    root.selected_name_dirty = false;
+                    root.selected_created_dirty = false;
+                    root.selected_modified_dirty = false;
+                    root.taken_date_dirty = false;
+                    root.camera_make_dirty = false;
+                    root.camera_model_dirty = false;
+                    root.lens_model_dirty = false;
+                    root.software_dirty = false;
+                    root.artist_dirty = false;
+                    root.shutter_speed_dirty = false;
+                    root.aperture_dirty = false;
+                    root.iso_speed_dirty = false;
+                    root.focal_length_dirty = false;
+                    root.flash_fired_dirty = false;
+                    root.metering_mode_dirty = false;
+                    root.image_width_dirty = false;
+                    root.image_height_dirty = false;
+                    root.orientation_dirty = false;
+                    root.color_space_dirty = false;
+                    root.gps_latitude_dirty = false;
+                    root.gps_longitude_dirty = false;
+                    root.gps_altitude_dirty = false;
                     if (index >= 0 && index < root.files.length) {
                         root.selected_name = root.files[index].name;
                         root.selected_created = root.files[index].created;
                         root.selected_modified = root.files[index].modified;
+                        root.original_selected_name = root.files[index].name;
+                        root.original_selected_created = root.files[index].created;
+                        root.original_selected_modified = root.files[index].modified;
                         root.selected_is_dir = root.files[index].is_dir;
                     }
                     root.table_row_selected(index);
@@ -176,15 +257,141 @@ export component MainWindow inherits Window {
                 gps_altitude <=> root.gps_altitude;
                 exif_available <=> root.exif_available;
                 has_pending_changes <=> root.metadata_dirty;
+                selected_name_dirty <=> root.selected_name_dirty;
+                selected_created_dirty <=> root.selected_created_dirty;
+                selected_modified_dirty <=> root.selected_modified_dirty;
+                taken_date_dirty <=> root.taken_date_dirty;
+                camera_make_dirty <=> root.camera_make_dirty;
+                camera_model_dirty <=> root.camera_model_dirty;
+                lens_model_dirty <=> root.lens_model_dirty;
+                software_dirty <=> root.software_dirty;
+                artist_dirty <=> root.artist_dirty;
+                shutter_speed_dirty <=> root.shutter_speed_dirty;
+                aperture_dirty <=> root.aperture_dirty;
+                iso_speed_dirty <=> root.iso_speed_dirty;
+                focal_length_dirty <=> root.focal_length_dirty;
+                flash_fired_dirty <=> root.flash_fired_dirty;
+                metering_mode_dirty <=> root.metering_mode_dirty;
+                image_width_dirty <=> root.image_width_dirty;
+                image_height_dirty <=> root.image_height_dirty;
+                orientation_dirty <=> root.orientation_dirty;
+                color_space_dirty <=> root.color_space_dirty;
+                gps_latitude_dirty <=> root.gps_latitude_dirty;
+                gps_longitude_dirty <=> root.gps_longitude_dirty;
+                gps_altitude_dirty <=> root.gps_altitude_dirty;
                 apply_changes() => {
                     root.editing_path = false;
                     root.metadata_dirty = false;
+                    root.selected_name_dirty = false;
+                    root.selected_created_dirty = false;
+                    root.selected_modified_dirty = false;
+                    root.taken_date_dirty = false;
+                    root.camera_make_dirty = false;
+                    root.camera_model_dirty = false;
+                    root.lens_model_dirty = false;
+                    root.software_dirty = false;
+                    root.artist_dirty = false;
+                    root.shutter_speed_dirty = false;
+                    root.aperture_dirty = false;
+                    root.iso_speed_dirty = false;
+                    root.focal_length_dirty = false;
+                    root.flash_fired_dirty = false;
+                    root.metering_mode_dirty = false;
+                    root.image_width_dirty = false;
+                    root.image_height_dirty = false;
+                    root.orientation_dirty = false;
+                    root.color_space_dirty = false;
+                    root.gps_latitude_dirty = false;
+                    root.gps_longitude_dirty = false;
+                    root.gps_altitude_dirty = false;
                     root.apply_changes();
                 }
                 revert_changes() => {
                     root.editing_path = false;
                     root.revert_changes();
                     root.metadata_dirty = false;
+                    root.selected_name_dirty = false;
+                    root.selected_created_dirty = false;
+                    root.selected_modified_dirty = false;
+                    root.taken_date_dirty = false;
+                    root.camera_make_dirty = false;
+                    root.camera_model_dirty = false;
+                    root.lens_model_dirty = false;
+                    root.software_dirty = false;
+                    root.artist_dirty = false;
+                    root.shutter_speed_dirty = false;
+                    root.aperture_dirty = false;
+                    root.iso_speed_dirty = false;
+                    root.focal_length_dirty = false;
+                    root.flash_fired_dirty = false;
+                    root.metering_mode_dirty = false;
+                    root.image_width_dirty = false;
+                    root.image_height_dirty = false;
+                    root.orientation_dirty = false;
+                    root.color_space_dirty = false;
+                    root.gps_latitude_dirty = false;
+                    root.gps_longitude_dirty = false;
+                    root.gps_altitude_dirty = false;
+                }
+                metadata_edited() => {
+                    root.metadata_value_edited();
+                }
+            }
+        }
+    }
+
+    if message_visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000066;
+
+        TouchArea {
+            width: 100%;
+            height: 100%;
+        }
+
+        Rectangle {
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            width: min(420px, root.width - 48px);
+            height: 150px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #cfd8dc;
+            border-radius: 6px;
+
+            Text {
+                x: 20px;
+                y: 18px;
+                width: parent.width - 40px;
+                height: 28px;
+                text: "Unable to Fill Taken Date";
+                color: #263238;
+                font-size: 15px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            Text {
+                x: 20px;
+                y: 56px;
+                width: parent.width - 40px;
+                height: 40px;
+                text: root.message_text;
+                color: #37474f;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            Button {
+                x: parent.width - 92px;
+                y: parent.height - 44px;
+                width: 72px;
+                height: 28px;
+                text: "OK";
+                clicked => {
+                    root.message_visible = false;
+                    root.message_text = "";
                 }
             }
         }
