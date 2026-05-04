@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use self::app::SlintApp;
+use crate::exif::{read_exif_metadata, ExifMetadata};
 use crate::GuiRunner;
 
 slint::include_modules!();
@@ -37,6 +38,8 @@ impl GuiRunner for SlintRunner {
                     ui.set_selected_created("N/A".into());
                     ui.set_selected_modified("N/A".into());
                     ui.set_selected_is_dir(false);
+                    ui.set_metadata_dirty(false);
+                    set_exif_metadata(&ui, ExifMetadata::default());
                 }
             }
         };
@@ -147,6 +150,25 @@ impl GuiRunner for SlintRunner {
         });
 
         let app_handle = app.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_table_row_selected(move |index| {
+            if let Some(ui) = ui_handle.upgrade() {
+                let metadata = {
+                    let app = app_handle.borrow();
+                    let Some(path) = app.path_for_ui_index(index) else {
+                        return set_exif_metadata(&ui, ExifMetadata::default());
+                    };
+                    if path.is_file() {
+                        read_exif_metadata(&path)
+                    } else {
+                        ExifMetadata::default()
+                    }
+                };
+                set_exif_metadata(&ui, metadata);
+            }
+        });
+
+        let app_handle = app.clone();
         let refresh = refresh_ui.clone();
         ui.on_go_parent(move || {
             {
@@ -167,6 +189,8 @@ impl GuiRunner for SlintRunner {
                 ui.set_selected_created("N/A".into());
                 ui.set_selected_modified("N/A".into());
                 ui.set_selected_is_dir(false);
+                ui.set_metadata_dirty(false);
+                set_exif_metadata(&ui, ExifMetadata::default());
             }
         });
 
@@ -177,6 +201,8 @@ impl GuiRunner for SlintRunner {
                 ui.set_selected_created("N/A".into());
                 ui.set_selected_modified("N/A".into());
                 ui.set_selected_is_dir(false);
+                ui.set_metadata_dirty(false);
+                set_exif_metadata(&ui, ExifMetadata::default());
             }
         });
 
@@ -187,4 +213,26 @@ impl GuiRunner for SlintRunner {
         ui.run()?;
         Ok(())
     }
+}
+
+fn set_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
+    ui.set_taken_date(metadata.taken_date.into());
+    ui.set_camera_make(metadata.camera_make.into());
+    ui.set_camera_model(metadata.camera_model.into());
+    ui.set_lens_model(metadata.lens_model.into());
+    ui.set_software(metadata.software.into());
+    ui.set_artist(metadata.artist.into());
+    ui.set_shutter_speed(metadata.shutter_speed.into());
+    ui.set_aperture(metadata.aperture.into());
+    ui.set_iso_speed(metadata.iso_speed.into());
+    ui.set_focal_length(metadata.focal_length.into());
+    ui.set_flash_fired(metadata.flash_fired.into());
+    ui.set_metering_mode(metadata.metering_mode.into());
+    ui.set_image_width(metadata.image_width.into());
+    ui.set_image_height(metadata.image_height.into());
+    ui.set_orientation(metadata.orientation.into());
+    ui.set_color_space(metadata.color_space.into());
+    ui.set_gps_latitude(metadata.gps_latitude.into());
+    ui.set_gps_longitude(metadata.gps_longitude.into());
+    ui.set_gps_altitude(metadata.gps_altitude.into());
 }

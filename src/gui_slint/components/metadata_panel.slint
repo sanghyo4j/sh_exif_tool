@@ -1,45 +1,30 @@
-import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ScrollView, StandardButton } from "std-widgets.slint";
 import { SectionHeader, EditableInfoRow } from "info_row.slint";
-
-component FooterButton inherits Rectangle {
-    in property <string> text;
-    in property <bool> primary;
-
-    callback clicked();
-
-    width: 76px;
-    height: 32px;
-    background: button_touch.pressed
-        ? (primary ? #155a9c : #d8dee4)
-        : button_touch.has-hover
-            ? (primary ? #1f73bf : #eef2f5)
-            : (primary ? #1976d2 : #ffffff);
-    border-width: 1px;
-    border-color: primary ? #1565c0 : #cfd8dc;
-    border-radius: 4px;
-
-    Text {
-        width: 100%;
-        height: 100%;
-        text: root.text;
-        font-size: 12px;
-        font-weight: 600;
-        color: root.primary ? #ffffff : #263238;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-
-    button_touch := TouchArea {
-        clicked => {
-            root.clicked();
-        }
-    }
-}
 
 export component MetadataPanel inherits Rectangle {
     in-out property <string> selected_name;
     in-out property <string> selected_created;
     in-out property <string> selected_modified;
+    in-out property <string> taken_date;
+    in-out property <string> camera_make;
+    in-out property <string> camera_model;
+    in-out property <string> lens_model;
+    in-out property <string> software;
+    in-out property <string> artist;
+    in-out property <string> shutter_speed;
+    in-out property <string> aperture;
+    in-out property <string> iso_speed;
+    in-out property <string> focal_length;
+    in-out property <string> flash_fired;
+    in-out property <string> metering_mode;
+    in-out property <string> image_width;
+    in-out property <string> image_height;
+    in-out property <string> orientation;
+    in-out property <string> color_space;
+    in-out property <string> gps_latitude;
+    in-out property <string> gps_longitude;
+    in-out property <string> gps_altitude;
+    in-out property <bool> has_pending_changes: false;
 
     callback apply_changes();
     callback cancel_changes();
@@ -100,36 +85,36 @@ export component MetadataPanel inherits Rectangle {
                     spacing: 0px;
 
                     SectionHeader { title: "FILE"; }
-                    EditableInfoRow { label: "File Name"; value: selected_name; }
-                    EditableInfoRow { label: "File Created"; value: selected_created; }
-                    EditableInfoRow { label: "File Modified"; value: selected_modified; }
+                    EditableInfoRow { label: "File Name"; value: selected_name; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "File Created"; value: selected_created; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "File Modified"; value: selected_modified; value_edited => { root.has_pending_changes = true; } }
 
                     SectionHeader { title: "CAMERA"; }
-                    EditableInfoRow { label: "Taken Date"; value: "N/A"; }
-                    EditableInfoRow { label: "Camera Make"; value: "N/A"; }
-                    EditableInfoRow { label: "Camera Model"; value: "N/A"; }
-                    EditableInfoRow { label: "Lens Model"; value: "N/A"; }
-                    EditableInfoRow { label: "Software"; value: "N/A"; }
-                    EditableInfoRow { label: "Artist"; value: "N/A"; }
+                    EditableInfoRow { label: "Taken Date"; value: taken_date; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Camera Make"; value: camera_make; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Camera Model"; value: camera_model; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Lens Model"; value: lens_model; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Software"; value: software; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Artist"; value: artist; value_edited => { root.has_pending_changes = true; } }
 
                     SectionHeader { title: "EXPOSURE"; }
-                    EditableInfoRow { label: "Shutter Speed"; value: "N/A"; }
-                    EditableInfoRow { label: "Aperture"; value: "N/A"; }
-                    EditableInfoRow { label: "ISO Speed"; value: "N/A"; }
-                    EditableInfoRow { label: "Focal Length"; value: "N/A"; }
-                    EditableInfoRow { label: "Flash Fired"; value: "N/A"; }
-                    EditableInfoRow { label: "Metering Mode"; value: "N/A"; }
+                    EditableInfoRow { label: "Shutter Speed"; value: shutter_speed; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Aperture"; value: aperture; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "ISO Speed"; value: iso_speed; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Focal Length"; value: focal_length; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Flash Fired"; value: flash_fired; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Metering Mode"; value: metering_mode; value_edited => { root.has_pending_changes = true; } }
 
                     SectionHeader { title: "IMAGE"; }
-                    EditableInfoRow { label: "Image Width"; value: "N/A"; }
-                    EditableInfoRow { label: "Image Height"; value: "N/A"; }
-                    EditableInfoRow { label: "Orientation"; value: "N/A"; }
-                    EditableInfoRow { label: "Color Space"; value: "N/A"; }
+                    EditableInfoRow { label: "Image Width"; value: image_width; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Image Height"; value: image_height; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Orientation"; value: orientation; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "Color Space"; value: color_space; value_edited => { root.has_pending_changes = true; } }
 
                     SectionHeader { title: "LOCATION"; }
-                    EditableInfoRow { label: "GPS Latitude"; value: "N/A"; }
-                    EditableInfoRow { label: "GPS Longitude"; value: "N/A"; }
-                    EditableInfoRow { label: "GPS Altitude"; value: "N/A"; }
+                    EditableInfoRow { label: "GPS Latitude"; value: gps_latitude; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "GPS Longitude"; value: gps_longitude; value_edited => { root.has_pending_changes = true; } }
+                    EditableInfoRow { label: "GPS Altitude"; value: gps_altitude; value_edited => { root.has_pending_changes = true; } }
                 }
             }
 
@@ -211,19 +196,19 @@ export component MetadataPanel inherits Rectangle {
                 spacing: 12px;
                 alignment: end;
 
-                FooterButton {
-                    text: "Clear";
+                StandardButton {
+                    kind: StandardButtonKind.reset;
                     clicked => { root.clear_changes(); }
                 }
 
-                FooterButton {
-                    text: "Cancel";
+                StandardButton {
+                    kind: StandardButtonKind.cancel;
                     clicked => { root.cancel_changes(); }
                 }
 
-                FooterButton {
-                    text: "Apply";
-                    primary: true;
+                StandardButton {
+                    kind: StandardButtonKind.apply;
+                    enabled: root.has_pending_changes;
                     clicked => { root.apply_changes(); }
                 }
             }

@@ -123,6 +123,15 @@ impl SlintApp {
     pub fn file_count(&self) -> usize {
         self.files.iter().filter(|entry| !entry.is_dir).count()
     }
+
+    pub fn path_for_ui_index(&self, index: i32) -> Option<PathBuf> {
+        let idx = usize::try_from(index).ok()?;
+        if idx == 0 {
+            return Some(PathBuf::from(&self.current_path).parent()?.to_path_buf());
+        }
+
+        self.files.get(idx - 1).map(|entry| entry.path.clone())
+    }
 }
 
 fn format_time(t: SystemTime) -> String {

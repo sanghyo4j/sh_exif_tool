@@ -33,6 +33,7 @@ export component SectionHeader inherits Rectangle {
 export component EditableInfoRow inherits Rectangle {
     in property <string> label;
     in-out property <string> value;
+    callback value_edited();
 
     height: 34px;
     background: #ffffff;
@@ -72,6 +73,7 @@ export component EditableInfoRow inherits Rectangle {
 
                 edited => {
                     root.value = self.text;
+                    root.value_edited();
                 }
             }
         }
