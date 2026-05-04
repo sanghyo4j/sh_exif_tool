@@ -149,6 +149,7 @@ impl GuiRunner for SlintRunner {
             }
 
             if changed {
+                *last_table_click_handle.borrow_mut() = None;
                 refresh();
             }
         });
@@ -159,6 +160,16 @@ impl GuiRunner for SlintRunner {
             if let Some(ui) = ui_handle.upgrade() {
                 let metadata = {
                     let app = app_handle.borrow();
+                    if let Some((name, created, modified, is_dir)) = app.ui_details_for_index(index) {
+                        ui.set_selected_name(name.clone().into());
+                        ui.set_selected_created(created.clone().into());
+                        ui.set_selected_modified(modified.clone().into());
+                        ui.set_original_selected_name(name.into());
+                        ui.set_original_selected_created(created.into());
+                        ui.set_original_selected_modified(modified.into());
+                        ui.set_selected_is_dir(is_dir);
+                    }
+
                     let Some(path) = app.path_for_ui_index(index) else {
                         return set_loaded_exif_metadata(&ui, ExifMetadata::default());
                     };

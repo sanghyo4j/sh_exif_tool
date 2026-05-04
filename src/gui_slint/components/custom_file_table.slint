@@ -1,0 +1,128 @@
+import { ListView } from "std-widgets.slint";
+import { FileEntry } from "../types.slint";
+import { HDivider } from "dividers.slint";
+
+export component CustomFileTable inherits Rectangle {
+    in property <[FileEntry]> files;
+    in-out property <int> selected_index;
+
+    callback row_selected(int);
+    callback row_clicked(int);
+
+    horizontal-stretch: 0;
+    height: 100%;
+    background: #ffffff;
+
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 0px;
+
+        header := Rectangle {
+            height: 28px;
+            background: #f7f9fb;
+
+            HorizontalLayout {
+                width: 100%;
+                height: 100%;
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 0px;
+
+                Text {
+                    width: parent.width - size_header.width - modified_header.width - 20px;
+                    text: "Name";
+                    color: #37474f;
+                    font-size: 12px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                size_header := Text {
+                    width: 92px;
+                    text: "Size";
+                    color: #37474f;
+                    font-size: 12px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                }
+
+                modified_header := Text {
+                    width: 156px;
+                    text: "Modified";
+                    color: #37474f;
+                    font-size: 12px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                }
+            }
+
+            HDivider { y: parent.height - 1px; }
+        }
+
+        list := ListView {
+            vertical-stretch: 1;
+            width: 100%;
+            vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+            horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+
+            for entry[i] in files : Rectangle {
+                height: 28px;
+                background: i == root.selected_index ? #dbeafe : #ffffff;
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+
+                    clicked => {
+                        root.selected_index = i;
+                        root.row_selected(i);
+                        root.row_clicked(i);
+                    }
+                }
+
+                HorizontalLayout {
+                    width: 100%;
+                    height: 100%;
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 0px;
+
+                    Text {
+                        width: parent.width - size_cell.width - modified_cell.width - 20px;
+                        text: entry.is_dir && entry.name != "[..]" ? "[" + entry.name + "]" : entry.name;
+                        color: i == root.selected_index ? #0f172a : #1f2933;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    size_cell := Text {
+                        width: 92px;
+                        text: entry.size;
+                        color: #4b5563;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                        overflow: elide;
+                    }
+
+                    modified_cell := Text {
+                        width: 156px;
+                        text: entry.modified;
+                        color: #4b5563;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                        overflow: elide;
+                    }
+                }
+
+                HDivider { y: parent.height - 1px; background: #eef2f5; }
+            }
+        }
+    }
+}
