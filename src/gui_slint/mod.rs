@@ -6,8 +6,8 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use self::app::SlintApp;
-use crate::exif::{extract_datetime_from_filename, read_exif_metadata, ExifMetadata};
-use crate::fs::{rename_entry, save_file_copy};
+use crate::exif::{extract_datetime_from_filename, read_exif_metadata, write_taken_date, ExifMetadata};
+use crate::fs::{move_file_to_recycle_bin, rename_entry, save_file_copy};
 use crate::GuiRunner;
 
 slint::include_modules!();
@@ -27,30 +27,24 @@ impl GuiRunner for SlintRunner {
         let refresh_ui = {
             let ui_handle = ui.as_weak();
             let app_handle = app.clone();
-            move || {
+            move |selected_path: Option<PathBuf>| {
                 if let Some(ui) = ui_handle.upgrade() {
                     let app = app_handle.borrow();
                     ui.set_current_path(app.current_path.as_str().into());
                     ui.set_item_count(app.file_count() as i32);
                     ui.set_files(app.get_ui_model());
                     ui.set_table_rows(app.get_table_model());
-                    ui.set_selected_index(-1);
-                    ui.set_selected_name("N/A".into());
-                    ui.set_selected_created("N/A".into());
-                    ui.set_selected_modified("N/A".into());
-                    ui.set_original_selected_name("N/A".into());
-                    ui.set_original_selected_created("N/A".into());
-                    ui.set_original_selected_modified("N/A".into());
-                    ui.set_selected_is_dir(false);
-                    ui.set_metadata_dirty(false);
-                    reset_metadata_dirty_flags(&ui);
-                    set_loaded_exif_metadata(&ui, ExifMetadata::default());
+                    let selected_index = selected_path
+                        .as_deref()
+                        .and_then(|path| app.ui_index_for_path(path))
+                        .unwrap_or(-1);
+                    set_selected_file(&ui, &app, selected_index);
                 }
             }
         };
 
         // 초기 실행
-        refresh_ui();
+        refresh_ui(None);
 
         // 2. 새로고침 핸들러 (버튼 등)
         let app_handle = app.clone();
@@ -58,12 +52,16 @@ impl GuiRunner for SlintRunner {
         let refresh = refresh_ui.clone();
         ui.on_reload(move || {
             if let Some(ui) = ui_handle.upgrade() {
+                let selected_path = {
+                    let app = app_handle.borrow();
+                    app.path_for_ui_index(ui.get_selected_index())
+                };
                 {
                     let mut app = app_handle.borrow_mut();
                     app.current_path = ui.get_current_path().to_string();
                     app.load_folder();
                 }
-                refresh();
+                refresh(selected_path);
             }
         });
 
@@ -76,7 +74,7 @@ impl GuiRunner for SlintRunner {
                 app.current_path = new_path.to_string();
                 app.load_folder();
             }
-            refresh();
+            refresh(None);
         });
 
         // 3. 폴더 진입 핸들러 (더블클릭)
@@ -103,7 +101,7 @@ impl GuiRunner for SlintRunner {
                 }
             }
             if changed {
-                refresh();
+                refresh(None);
             }
         });
 
@@ -151,7 +149,7 @@ impl GuiRunner for SlintRunner {
 
             if changed {
                 *last_table_click_handle.borrow_mut() = None;
-                refresh();
+                refresh(None);
             }
         });
 
@@ -159,28 +157,8 @@ impl GuiRunner for SlintRunner {
         let ui_handle = ui.as_weak();
         ui.on_table_row_selected(move |index| {
             if let Some(ui) = ui_handle.upgrade() {
-                let metadata = {
-                    let app = app_handle.borrow();
-                    if let Some((name, created, modified, is_dir)) = app.ui_details_for_index(index) {
-                        ui.set_selected_name(name.clone().into());
-                        ui.set_selected_created(created.clone().into());
-                        ui.set_selected_modified(modified.clone().into());
-                        ui.set_original_selected_name(name.into());
-                        ui.set_original_selected_created(created.into());
-                        ui.set_original_selected_modified(modified.into());
-                        ui.set_selected_is_dir(is_dir);
-                    }
-
-                    let Some(path) = app.path_for_ui_index(index) else {
-                        return set_loaded_exif_metadata(&ui, ExifMetadata::default());
-                    };
-                    if path.is_file() {
-                        read_exif_metadata(&path)
-                    } else {
-                        ExifMetadata::default()
-                    }
-                };
-                set_loaded_exif_metadata(&ui, metadata);
+                let app = app_handle.borrow();
+                set_selected_file(&ui, &app, index);
             }
         });
 
@@ -194,7 +172,7 @@ impl GuiRunner for SlintRunner {
                     app.load_folder();
                 }
             }
-            refresh();
+            refresh(None);
         });
 
         let ui_handle = ui.as_weak();
@@ -284,6 +262,11 @@ impl GuiRunner for SlintRunner {
                     return;
                 }
 
+                let selected_path = {
+                    let app = app_handle.borrow();
+                    app.path_for_ui_index(ui.get_selected_index())
+                };
+
                 let result = {
                     let mut app = app_handle.borrow_mut();
                     let Some(path) = app.path_for_ui_index(ui.get_selected_index()) else {
@@ -299,9 +282,38 @@ impl GuiRunner for SlintRunner {
 
                 match result {
                     Ok(_) => {
-                        refresh();
+                        refresh(selected_path);
                     }
                     Err(err) => show_message(&ui, "Save Copy Failed", &err),
+                }
+            }
+        });
+
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_delete_file(move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                if ui.get_selected_index() < 0 || ui.get_selected_is_dir() {
+                    show_message(&ui, "Delete Failed", "Select a file before deleting.");
+                    return;
+                }
+
+                let result = {
+                    let mut app = app_handle.borrow_mut();
+                    let Some(path) = app.path_for_ui_index(ui.get_selected_index()) else {
+                        show_message(&ui, "Delete Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+
+                    move_file_to_recycle_bin(&path).map(|_| {
+                        app.load_folder();
+                    })
+                };
+
+                match result {
+                    Ok(_) => refresh(None),
+                    Err(err) => show_message(&ui, "Delete Failed", &err),
                 }
             }
         });
@@ -321,34 +333,86 @@ impl GuiRunner for SlintRunner {
                             return;
                         };
 
-                        rename_entry(&current_path, &new_name).map(|_| {
+                        rename_entry(&current_path, &new_name).map(|new_path| {
                             app.load_folder();
+                            new_path
                         })
                     };
 
-                    if let Err(err) = result {
-                        show_message(&ui, "Rename Failed", &format!("{err}"));
-                        return;
+                    match result {
+                        Ok(new_path) => refresh(Some(new_path)),
+                        Err(err) => show_message(&ui, "Rename Failed", &format!("{err}")),
                     }
-
-                    refresh();
                     return;
                 }
 
-                // Metadata editing is UI-only until EXIF write support is implemented.
+                let selected_path = {
+                    let app = app_handle.borrow();
+                    app.path_for_ui_index(ui.get_selected_index())
+                };
+
+                if ui.get_taken_date_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_taken_date(path, ui.get_taken_date().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                // Other metadata fields are UI-only until their EXIF writers are implemented.
                 store_current_as_original(&ui);
                 update_metadata_dirty_state(&ui);
                 {
                     let mut app = app_handle.borrow_mut();
                     app.load_folder();
                 }
-                refresh();
+                refresh(selected_path);
             }
         });
 
         ui.run()?;
         Ok(())
     }
+}
+
+fn set_selected_file(ui: &MainWindow, app: &SlintApp, index: i32) {
+    let Some((name, created, modified, is_dir)) = app.ui_details_for_index(index) else {
+        clear_selected_file(ui);
+        return;
+    };
+
+    ui.set_selected_index(index);
+    ui.set_selected_name(name.clone().into());
+    ui.set_selected_created(created.clone().into());
+    ui.set_selected_modified(modified.clone().into());
+    ui.set_original_selected_name(name.into());
+    ui.set_original_selected_created(created.into());
+    ui.set_original_selected_modified(modified.into());
+    ui.set_selected_is_dir(is_dir);
+
+    let metadata = app
+        .path_for_ui_index(index)
+        .filter(|path| path.is_file())
+        .map(|path| read_exif_metadata(&path))
+        .unwrap_or_default();
+    set_loaded_exif_metadata(ui, metadata);
+}
+
+fn clear_selected_file(ui: &MainWindow) {
+    ui.set_selected_index(-1);
+    ui.set_selected_name("N/A".into());
+    ui.set_selected_created("N/A".into());
+    ui.set_selected_modified("N/A".into());
+    ui.set_original_selected_name("N/A".into());
+    ui.set_original_selected_created("N/A".into());
+    ui.set_original_selected_modified("N/A".into());
+    ui.set_selected_is_dir(false);
+    ui.set_metadata_dirty(false);
+    reset_metadata_dirty_flags(ui);
+    set_loaded_exif_metadata(ui, ExifMetadata::default());
 }
 
 fn set_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {

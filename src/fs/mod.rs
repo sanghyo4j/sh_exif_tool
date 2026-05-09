@@ -90,3 +90,69 @@ pub fn save_file_copy(source_path: &Path) -> Result<PathBuf, String> {
 
     Err("Could not find an available copy filename.".to_string())
 }
+
+pub fn move_file_to_recycle_bin(path: &Path) -> Result<(), String> {
+    if !path.is_file() {
+        return Err("Select a file before deleting.".to_string());
+    }
+
+    move_path_to_recycle_bin(path)
+}
+
+#[cfg(windows)]
+fn move_path_to_recycle_bin(path: &Path) -> Result<(), String> {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+
+    const FO_DELETE: u32 = 0x0003;
+    const FOF_ALLOWUNDO: u16 = 0x0040;
+    const FOF_NOCONFIRMATION: u16 = 0x0010;
+    const FOF_NOERRORUI: u16 = 0x0400;
+
+    #[repr(C)]
+    struct ShFileOpStructW {
+        hwnd: *mut c_void,
+        w_func: u32,
+        p_from: *const u16,
+        p_to: *const u16,
+        f_flags: u16,
+        f_any_operations_aborted: i32,
+        h_name_mappings: *mut c_void,
+        lpsz_progress_title: *const u16,
+    }
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn SHFileOperationW(file_op: *mut ShFileOpStructW) -> i32;
+    }
+
+    let mut from: Vec<u16> = path.as_os_str().encode_wide().collect();
+    from.push(0);
+    from.push(0);
+
+    let mut operation = ShFileOpStructW {
+        hwnd: std::ptr::null_mut(),
+        w_func: FO_DELETE,
+        p_from: from.as_ptr(),
+        p_to: std::ptr::null(),
+        f_flags: FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI,
+        f_any_operations_aborted: 0,
+        h_name_mappings: std::ptr::null_mut(),
+        lpsz_progress_title: std::ptr::null(),
+    };
+
+    let result = unsafe { SHFileOperationW(&mut operation) };
+    if result != 0 {
+        return Err(format!("Failed to move file to Recycle Bin. Error code: {result}"));
+    }
+    if operation.f_any_operations_aborted != 0 {
+        return Err("Delete operation was canceled.".to_string());
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn move_path_to_recycle_bin(path: &Path) -> Result<(), String> {
+    std::fs::remove_file(path).map_err(|err| err.to_string())
+}

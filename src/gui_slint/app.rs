@@ -111,6 +111,13 @@ impl SlintApp {
         self.files.get(idx - 1).map(|entry| entry.path.clone())
     }
 
+    pub fn ui_index_for_path(&self, path: &std::path::Path) -> Option<i32> {
+        self.files
+            .iter()
+            .position(|entry| entry.path == path)
+            .and_then(|index| i32::try_from(index + 1).ok())
+    }
+
     pub fn ui_details_for_index(&self, index: i32) -> Option<(String, String, String, bool)> {
         let idx = usize::try_from(index).ok()?;
         if idx == 0 {
@@ -136,5 +143,5 @@ impl SlintApp {
 fn format_time(t: SystemTime) -> String {
     use chrono::{DateTime, Local};
     let dt: DateTime<Local> = t.into();
-    dt.format("%Y-%m-%d %H:%M").to_string()
+    dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }

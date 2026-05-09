@@ -93,12 +93,14 @@ export component MainWindow inherits Window {
     in-out property <bool> message_visible: false;
     in-out property <string> message_title: "Operation Failed";
     in-out property <string> message_text: "";
+    in-out property <bool> confirm_delete_visible: false;
 
     callback open_dir(int);
     callback reload();
     callback go_parent();
     callback change_dir(string);
     callback save_copy();
+    callback delete_file();
     callback apply_changes();
     callback revert_changes();
     callback remove_exif_tags();
@@ -111,13 +113,31 @@ export component MainWindow inherits Window {
         Menu {
             title: "File";
 
-            MenuItem { title: "Open Folder..."; activated => { root.editing_path = false; } }
+            MenuItem { title: "Open Folder..."; activated => { root.editing_path = true; } }
+            MenuItem {
+                title: "Reload";
+                activated => {
+                    root.editing_path = false;
+                    root.reload();
+                }
+            }
+            MenuSeparator {}
             MenuItem {
                 title: "Save Copy";
                 enabled: root.selected_index >= 0 && !root.selected_is_dir;
                 activated => {
                     root.editing_path = false;
                     root.save_copy();
+                }
+            }
+            MenuItem {
+                title: "Delete File";
+                enabled: root.selected_index >= 0 && !root.selected_is_dir;
+                activated => {
+                    root.editing_path = false;
+                    root.confirm_delete_visible = true;
+                    root.message_title = "Delete File";
+                    root.message_text = "Move \"" + root.selected_name + "\" to the Recycle Bin?";
                 }
             }
             MenuSeparator {}
@@ -135,14 +155,6 @@ export component MainWindow inherits Window {
                 activated => {
                     root.editing_path = false;
                     root.revert_changes();
-                }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Reload";
-                activated => {
-                    root.editing_path = false;
-                    root.reload();
                 }
             }
             MenuSeparator {}
@@ -206,6 +218,11 @@ export component MainWindow inherits Window {
         current_path: root.current_path;
         editing <=> root.editing_path;
         change_dir(path) => { root.change_dir(path); }
+        open_folder() => { root.editing_path = true; }
+        reload() => {
+            root.editing_path = false;
+            root.reload();
+        }
     }
 
     Rectangle {
@@ -367,7 +384,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if message_visible: Rectangle {
+    if message_visible || confirm_delete_visible: Rectangle {
         width: 100%;
         height: 100%;
         background: #00000066;
@@ -410,7 +427,7 @@ export component MainWindow inherits Window {
                 wrap: word-wrap;
             }
 
-            Button {
+            if !confirm_delete_visible: Button {
                 x: parent.width - 92px;
                 y: parent.height - 44px;
                 width: 72px;
@@ -418,6 +435,33 @@ export component MainWindow inherits Window {
                 text: "OK";
                 clicked => {
                     root.message_visible = false;
+                    root.message_title = "Operation Failed";
+                    root.message_text = "";
+                }
+            }
+
+            if confirm_delete_visible: Button {
+                x: parent.width - 172px;
+                y: parent.height - 44px;
+                width: 72px;
+                height: 28px;
+                text: "No";
+                clicked => {
+                    root.confirm_delete_visible = false;
+                    root.message_title = "Operation Failed";
+                    root.message_text = "";
+                }
+            }
+
+            if confirm_delete_visible: Button {
+                x: parent.width - 92px;
+                y: parent.height - 44px;
+                width: 72px;
+                height: 28px;
+                text: "Yes";
+                clicked => {
+                    root.confirm_delete_visible = false;
+                    root.delete_file();
                     root.message_title = "Operation Failed";
                     root.message_text = "";
                 }

@@ -2,6 +2,9 @@ use std::fs;
 use std::path::Path;
 use chrono::{NaiveDate, NaiveDateTime};
 
+const DISPLAY_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+const EXIF_DATETIME_FORMAT: &str = "%Y:%m:%d %H:%M:%S";
+
 #[derive(Clone, Debug)]
 pub struct ExifMetadata {
     pub has_exif: bool,
@@ -81,6 +84,68 @@ pub fn read_exif_metadata(path: &Path) -> ExifMetadata {
     parse_tiff(tiff).unwrap_or_default()
 }
 
+pub fn write_taken_date(path: &Path, display_value: &str) -> Result<(), String> {
+    let exif_value = display_datetime_to_exif(display_value)?;
+    let mut value_bytes = exif_value.into_bytes();
+    value_bytes.push(0);
+
+    let mut bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let tiff_start = find_exif_tiff_start(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
+    let tiff = bytes
+        .get(tiff_start..)
+        .ok_or_else(|| "Invalid EXIF data offset.".to_string())?;
+    let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid TIFF header.".to_string())?;
+    let ifd0_offset = read_u32(tiff, 4, endian).ok_or_else(|| "Invalid IFD0 offset.".to_string())? as usize;
+
+    let mut ranges = Vec::new();
+    let ifd0_entries = read_ifd_entries(tiff, ifd0_offset, endian)
+        .ok_or_else(|| "Unable to read IFD0 entries.".to_string())?;
+    for entry in &ifd0_entries {
+        if entry.tag == 0x0132 {
+            if let Some(range) = writable_ascii_range(entry, value_bytes.len()) {
+                ranges.push(range);
+            }
+        }
+    }
+
+    if let Some(exif_ifd_offset) = ifd0_entries
+        .iter()
+        .find(|entry| entry.tag == 0x8769)
+        .and_then(|entry| entry.as_long())
+        .map(|offset| offset as usize)
+    {
+        if let Some(exif_entries) = read_ifd_entries(tiff, exif_ifd_offset, endian) {
+            for entry in &exif_entries {
+                if entry.tag == 0x9003 || entry.tag == 0x9004 {
+                    if let Some(range) = writable_ascii_range(entry, value_bytes.len()) {
+                        ranges.push(range);
+                    }
+                }
+            }
+        }
+    }
+
+    if ranges.is_empty() {
+        return Err("No writable Taken Date EXIF tag was found.".to_string());
+    }
+
+    for (relative_start, len) in ranges {
+        let start = tiff_start
+            .checked_add(relative_start)
+            .ok_or_else(|| "Invalid EXIF write offset.".to_string())?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| "Invalid EXIF write length.".to_string())?;
+        let target = bytes
+            .get_mut(start..end)
+            .ok_or_else(|| "EXIF write range is outside the file.".to_string())?;
+        target.fill(0);
+        target[..value_bytes.len()].copy_from_slice(&value_bytes);
+    }
+
+    fs::write(path, bytes).map_err(|err| err.to_string())
+}
+
 pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
     let filename = path.file_stem()?.to_str()?;
     let chars: Vec<char> = filename.chars().collect();
@@ -126,7 +191,19 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
     }
 
     let earliest = candidates.into_iter().min()?;
-    Some(earliest.format("%Y:%m:%d %H:%M:%S").to_string())
+    Some(format_datetime_for_display(earliest))
+}
+
+pub fn exif_datetime_to_display(value: &str) -> String {
+    parse_known_datetime(value)
+        .map(format_datetime_for_display)
+        .unwrap_or_else(|| value.to_string())
+}
+
+pub fn display_datetime_to_exif(value: &str) -> Result<String, String> {
+    parse_known_datetime(value)
+        .map(|datetime| datetime.format(EXIF_DATETIME_FORMAT).to_string())
+        .ok_or_else(|| "Expected date format: YYYY-MM-DD HH:MM:SS".to_string())
 }
 
 fn parse_compact_filename_datetime(value: &str) -> Option<NaiveDateTime> {
@@ -156,11 +233,7 @@ fn parse_tiff(data: &[u8]) -> Option<ExifMetadata> {
         return None;
     }
 
-    let endian = match &data[0..2] {
-        b"II" => Endian::Little,
-        b"MM" => Endian::Big,
-        _ => return None,
-    };
+    let endian = read_tiff_endian(data)?;
 
     if read_u16(data, 2, endian)? != 42 {
         return None;
@@ -180,7 +253,10 @@ fn parse_tiff(data: &[u8]) -> Option<ExifMetadata> {
             0x0131 => meta.software = entry.as_ascii().unwrap_or_else(empty_value),
             0x0132 => {
                 if meta.taken_date.is_empty() {
-                    meta.taken_date = entry.as_ascii().unwrap_or_else(empty_value);
+                    meta.taken_date = entry
+                        .as_ascii()
+                        .map(|value| exif_datetime_to_display(&value))
+                        .unwrap_or_else(empty_value);
                 }
             }
             0x013b => meta.artist = entry.as_ascii().unwrap_or_else(empty_value),
@@ -201,6 +277,18 @@ fn parse_tiff(data: &[u8]) -> Option<ExifMetadata> {
     Some(meta)
 }
 
+fn read_tiff_endian(data: &[u8]) -> Option<Endian> {
+    if data.len() < 2 {
+        return None;
+    }
+
+    match &data[0..2] {
+        b"II" => Some(Endian::Little),
+        b"MM" => Some(Endian::Big),
+        _ => None,
+    }
+}
+
 fn parse_exif_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMetadata) {
     let Some(entries) = read_ifd_entries(data, offset, endian) else {
         return;
@@ -211,10 +299,18 @@ fn parse_exif_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMet
             0x829a => meta.shutter_speed = entry.as_rational().map(format_shutter).unwrap_or_else(empty_value),
             0x829d => meta.aperture = entry.as_rational().map(format_aperture).unwrap_or_else(empty_value),
             0x8827 => meta.iso_speed = entry.as_short().map(|v| v.to_string()).unwrap_or_else(empty_value),
-            0x9003 => meta.taken_date = entry.as_ascii().unwrap_or_else(empty_value),
+            0x9003 => {
+                meta.taken_date = entry
+                    .as_ascii()
+                    .map(|value| exif_datetime_to_display(&value))
+                    .unwrap_or_else(empty_value)
+            }
             0x9004 => {
                 if meta.taken_date.is_empty() {
-                    meta.taken_date = entry.as_ascii().unwrap_or_else(empty_value);
+                    meta.taken_date = entry
+                        .as_ascii()
+                        .map(|value| exif_datetime_to_display(&value))
+                        .unwrap_or_else(empty_value);
                 }
             }
             0x9207 => meta.metering_mode = entry.as_short().map(format_metering).unwrap_or_else(empty_value),
@@ -270,6 +366,10 @@ fn parse_gps_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMeta
 }
 
 fn find_exif_tiff(bytes: &[u8]) -> Option<&[u8]> {
+    bytes.get(find_exif_tiff_start(bytes)?..)
+}
+
+fn find_exif_tiff_start(bytes: &[u8]) -> Option<usize> {
     if bytes.len() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8 {
         return None;
     }
@@ -294,7 +394,7 @@ fn find_exif_tiff(bytes: &[u8]) -> Option<&[u8]> {
 
         let segment = &bytes[pos + 2..pos + len];
         if marker == 0xe1 && segment.starts_with(b"Exif\0\0") {
-            return Some(&segment[6..]);
+            return Some(pos + 2 + 6);
         }
 
         pos += len;
@@ -397,6 +497,25 @@ impl<'a> Entry<'a> {
             (read_u32(bytes, 8, self.endian)?, read_u32(bytes, 12, self.endian)?),
             (read_u32(bytes, 16, self.endian)?, read_u32(bytes, 20, self.endian)?),
         ])
+    }
+}
+
+fn writable_ascii_range(entry: &Entry<'_>, value_len: usize) -> Option<(usize, usize)> {
+    if entry.field_type != 2 {
+        return None;
+    }
+
+    let len = type_size(entry.field_type)?.checked_mul(entry.count as usize)?;
+    if len < value_len {
+        return None;
+    }
+
+    if len <= 4 {
+        Some((entry.value_field, len))
+    } else {
+        let offset = read_u32(entry.data, entry.value_field, entry.endian)? as usize;
+        entry.data.get(offset..offset + len)?;
+        Some((offset, len))
     }
 }
 
@@ -508,6 +627,103 @@ fn format_gps_coord(reference: &str, parts: [(u32, u32); 3]) -> String {
     format!("{decimal:.6}")
 }
 
+fn parse_known_datetime(value: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(value, EXIF_DATETIME_FORMAT)
+        .or_else(|_| NaiveDateTime::parse_from_str(value, DISPLAY_DATETIME_FORMAT))
+        .ok()
+}
+
+fn format_datetime_for_display(datetime: NaiveDateTime) -> String {
+    datetime.format(DISPLAY_DATETIME_FORMAT).to_string()
+}
+
 fn empty_value() -> String {
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn converts_exif_datetime_to_display_datetime() {
+        assert_eq!(
+            exif_datetime_to_display("2012:08:27 00:29:55"),
+            "2012-08-27 00:29:55"
+        );
+    }
+
+    #[test]
+    fn converts_display_datetime_to_exif_datetime() {
+        assert_eq!(
+            display_datetime_to_exif("2012-08-27 00:29:55").unwrap(),
+            "2012:08:27 00:29:55"
+        );
+    }
+
+    #[test]
+    fn accepts_exif_datetime_when_converting_for_write() {
+        assert_eq!(
+            display_datetime_to_exif("2012:08:27 00:29:55").unwrap(),
+            "2012:08:27 00:29:55"
+        );
+    }
+
+    #[test]
+    fn writes_existing_taken_date_tag_in_place() {
+        let path = std::env::temp_dir().join(format!(
+            "sh_exif_tool_taken_date_test_{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, minimal_jpeg_with_datetime_original("2012:08:27 00:29:55"))
+            .unwrap();
+
+        write_taken_date(&path, "2026-05-09 12:34:56").unwrap();
+
+        let metadata = read_exif_metadata(&path);
+        assert_eq!(metadata.taken_date, "2026-05-09 12:34:56");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn minimal_jpeg_with_datetime_original(value: &str) -> Vec<u8> {
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&42u16.to_le_bytes());
+        tiff.extend_from_slice(&8u32.to_le_bytes());
+
+        let ifd0_offset = 8usize;
+        let exif_ifd_offset = 26u32;
+        let datetime_offset = 44u32;
+
+        assert_eq!(tiff.len(), ifd0_offset);
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0x8769u16.to_le_bytes());
+        tiff.extend_from_slice(&4u16.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&exif_ifd_offset.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+
+        assert_eq!(tiff.len(), exif_ifd_offset as usize);
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0x9003u16.to_le_bytes());
+        tiff.extend_from_slice(&2u16.to_le_bytes());
+        tiff.extend_from_slice(&20u32.to_le_bytes());
+        tiff.extend_from_slice(&datetime_offset.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+
+        assert_eq!(tiff.len(), datetime_offset as usize);
+        tiff.extend_from_slice(value.as_bytes());
+        tiff.push(0);
+
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend_from_slice(&tiff);
+        let segment_len = u16::try_from(payload.len() + 2).unwrap();
+
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+        jpeg.extend_from_slice(&segment_len.to_be_bytes());
+        jpeg.extend_from_slice(&payload);
+        jpeg.extend_from_slice(&[0xff, 0xd9]);
+        jpeg
+    }
 }

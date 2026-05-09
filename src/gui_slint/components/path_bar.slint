@@ -1,4 +1,4 @@
-import { HorizontalBox, LineEdit } from "std-widgets.slint";
+import { Button, HorizontalBox, LineEdit } from "std-widgets.slint";
 import { HDivider } from "dividers.slint";
 
 export component PathBar inherits Rectangle {
@@ -6,6 +6,8 @@ export component PathBar inherits Rectangle {
     in-out property <bool> editing;
 
     callback change_dir(string);
+    callback open_folder();
+    callback reload();
 
     height: 40px;
     background: #f8fafc;
@@ -18,7 +20,7 @@ export component PathBar inherits Rectangle {
         spacing: 8px;
 
         Text {
-            text: "경로";
+            text: "Path";
             vertical-alignment: center;
             color: #5f6b75;
             font-weight: 700;
@@ -79,6 +81,24 @@ export component PathBar inherits Rectangle {
                     root.editing = false;
                     root.change_dir(new_path);
                 }
+            }
+        }
+
+        Button {
+            width: 104px;
+            height: 28px;
+            text: "Open Folder";
+            clicked => {
+                root.open_folder();
+            }
+        }
+
+        Button {
+            width: 82px;
+            height: 28px;
+            text: "Refresh";
+            clicked => {
+                root.reload();
             }
         }
     }
