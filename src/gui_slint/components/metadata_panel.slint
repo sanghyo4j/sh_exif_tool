@@ -53,6 +53,10 @@ export component MetadataPanel inherits Rectangle {
     callback revert_changes();
     callback metadata_edited();
 
+    public function focus_file_name() {
+        file_name_row.focus_input();
+    }
+
     horizontal-stretch: 1;
     height: 100%;
     background: #fcfcfc;
@@ -125,7 +129,7 @@ export component MetadataPanel inherits Rectangle {
                     spacing: 0px;
 
                     SectionHeader { title: "FILE"; }
-                    EditableInfoRow { label: "File Name"; value <=> root.selected_name; dirty <=> root.selected_name_dirty; value_edited => { root.metadata_edited(); } }
+                    file_name_row := EditableInfoRow { label: "File Name"; value <=> root.selected_name; dirty <=> root.selected_name_dirty; value_edited => { root.metadata_edited(); } }
                     EditableInfoRow { label: "File Created"; value <=> root.selected_created; dirty <=> root.selected_created_dirty; value_edited => { root.metadata_edited(); } }
                     EditableInfoRow { label: "File Modified"; value <=> root.selected_modified; dirty <=> root.selected_modified_dirty; value_edited => { root.metadata_edited(); } }
                     ReadOnlyCheckRow { label: "EXIF Tag Available"; checked: root.exif_available; }

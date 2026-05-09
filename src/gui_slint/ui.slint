@@ -91,12 +91,14 @@ export component MainWindow inherits Window {
     in-out property <bool> gps_longitude_dirty: false;
     in-out property <bool> gps_altitude_dirty: false;
     in-out property <bool> message_visible: false;
+    in-out property <string> message_title: "Operation Failed";
     in-out property <string> message_text: "";
 
     callback open_dir(int);
     callback reload();
     callback go_parent();
     callback change_dir(string);
+    callback save_copy();
     callback apply_changes();
     callback revert_changes();
     callback remove_exif_tags();
@@ -110,8 +112,39 @@ export component MainWindow inherits Window {
             title: "File";
 
             MenuItem { title: "Open Folder..."; activated => { root.editing_path = false; } }
-            MenuItem { title: "Reload"; activated => { root.editing_path = false; } }
-            MenuItem { title: "Go to Parent Folder"; activated => { root.editing_path = false; } }
+            MenuItem {
+                title: "Save Copy";
+                enabled: root.selected_index >= 0 && !root.selected_is_dir;
+                activated => {
+                    root.editing_path = false;
+                    root.save_copy();
+                }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: "Apply";
+                enabled: root.metadata_dirty;
+                activated => {
+                    root.editing_path = false;
+                    root.apply_changes();
+                }
+            }
+            MenuItem {
+                title: "Revert";
+                enabled: root.metadata_dirty;
+                activated => {
+                    root.editing_path = false;
+                    root.revert_changes();
+                }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: "Reload";
+                activated => {
+                    root.editing_path = false;
+                    root.reload();
+                }
+            }
             MenuSeparator {}
             MenuItem { title: "Open in Explorer"; activated => { root.editing_path = false; } }
             MenuSeparator {}
@@ -230,6 +263,13 @@ export component MainWindow inherits Window {
                 row_clicked(index) => {
                     root.table_row_clicked(index);
                 }
+                row_activated(index) => {
+                    root.open_dir(index);
+                }
+                rename_requested(index) => {
+                    root.selected_index = index;
+                    metadata_panel.focus_file_name();
+                }
             }
         }
 
@@ -239,7 +279,7 @@ export component MainWindow inherits Window {
             height: 100%;
         }
 
-        MetadataPanel {
+        metadata_panel := MetadataPanel {
                 x: 756px;
                 y: 0px;
                 width: max(320px, root.width - 756px);
@@ -292,29 +332,6 @@ export component MainWindow inherits Window {
                 gps_altitude_dirty <=> root.gps_altitude_dirty;
                 apply_changes() => {
                     root.editing_path = false;
-                    root.metadata_dirty = false;
-                    root.selected_name_dirty = false;
-                    root.selected_created_dirty = false;
-                    root.selected_modified_dirty = false;
-                    root.taken_date_dirty = false;
-                    root.camera_make_dirty = false;
-                    root.camera_model_dirty = false;
-                    root.lens_model_dirty = false;
-                    root.software_dirty = false;
-                    root.artist_dirty = false;
-                    root.shutter_speed_dirty = false;
-                    root.aperture_dirty = false;
-                    root.iso_speed_dirty = false;
-                    root.focal_length_dirty = false;
-                    root.flash_fired_dirty = false;
-                    root.metering_mode_dirty = false;
-                    root.image_width_dirty = false;
-                    root.image_height_dirty = false;
-                    root.orientation_dirty = false;
-                    root.color_space_dirty = false;
-                    root.gps_latitude_dirty = false;
-                    root.gps_longitude_dirty = false;
-                    root.gps_altitude_dirty = false;
                     root.apply_changes();
                 }
                 revert_changes() => {
@@ -375,7 +392,7 @@ export component MainWindow inherits Window {
                 y: 18px;
                 width: parent.width - 40px;
                 height: 28px;
-                text: "Unable to Fill Taken Date";
+                text: root.message_title;
                 color: #263238;
                 font-size: 15px;
                 font-weight: 700;
@@ -401,6 +418,7 @@ export component MainWindow inherits Window {
                 text: "OK";
                 clicked => {
                     root.message_visible = false;
+                    root.message_title = "Operation Failed";
                     root.message_text = "";
                 }
             }

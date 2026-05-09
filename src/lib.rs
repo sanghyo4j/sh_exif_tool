@@ -1,5 +1,6 @@
 pub mod core;
 pub mod exif;
+pub mod fs;
 
 #[cfg(feature = "gui-egui")]
 mod gui_egui;

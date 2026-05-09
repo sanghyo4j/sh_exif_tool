@@ -8,10 +8,13 @@ export component CustomFileTable inherits Rectangle {
 
     callback row_selected(int);
     callback row_clicked(int);
+    callback row_activated(int);
+    callback rename_requested(int);
 
     horizontal-stretch: 0;
     height: 100%;
     background: #ffffff;
+    forward-focus: focus_scope;
 
     VerticalLayout {
         width: 100%;
@@ -78,6 +81,7 @@ export component CustomFileTable inherits Rectangle {
                     height: 100%;
 
                     clicked => {
+                        root.focus();
                         root.selected_index = i;
                         root.row_selected(i);
                         root.row_clicked(i);
@@ -123,6 +127,47 @@ export component CustomFileTable inherits Rectangle {
 
                 HDivider { y: parent.height - 1px; background: #eef2f5; }
             }
+        }
+    }
+
+    focus_scope := FocusScope {
+        x: 0px;
+        y: 0px;
+        width: 0px;
+        height: 0px;
+
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow) {
+                if (root.selected_index > 0) {
+                    root.selected_index -= 1;
+                    root.row_selected(root.selected_index);
+                }
+                return accept;
+            }
+
+            if (event.text == Key.DownArrow) {
+                if (root.selected_index < root.files.length - 1) {
+                    root.selected_index += 1;
+                    root.row_selected(root.selected_index);
+                }
+                return accept;
+            }
+
+            if (event.text == Key.Return) {
+                if (root.selected_index >= 0 && root.selected_index < root.files.length) {
+                    root.row_activated(root.selected_index);
+                }
+                return accept;
+            }
+
+            if (event.text == Key.F2) {
+                if (root.selected_index > 0 && root.selected_index < root.files.length) {
+                    root.rename_requested(root.selected_index);
+                }
+                return accept;
+            }
+
+            reject
         }
     }
 }

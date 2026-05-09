@@ -2,18 +2,11 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use slint::{ModelRc, StandardListViewItem, VecModel};
 use super::FileEntry as UiFileEntry; 
-
-pub struct LocalFileData {
-    pub path: PathBuf,
-    pub size: u64,
-    pub modified: Option<SystemTime>,
-    pub created: Option<SystemTime>,
-    pub is_dir: bool,
-}
+use crate::fs::{read_directory, FileSystemEntry};
 
 pub struct SlintApp {
     pub current_path: String,
-    pub files: Vec<LocalFileData>,
+    pub files: Vec<FileSystemEntry>,
 }
 
 impl SlintApp {
@@ -32,28 +25,13 @@ impl SlintApp {
     }
 
     pub fn load_folder(&mut self) {
-        self.files.clear();
-
         let path = std::path::Path::new(&self.current_path);
-        if let Ok(read_dir) = std::fs::read_dir(path) {
-            let mut entries: Vec<LocalFileData> = read_dir
-                .filter_map(|res| res.ok())
-                .filter_map(|entry| {
-                    let meta = entry.metadata().ok()?;
-                    Some(LocalFileData {
-                        path: entry.path(),
-                        size: meta.len(),
-                        modified: meta.modified().ok(),
-                        created: meta.created().ok(),
-                        is_dir: meta.is_dir(),
-                    })
-                })
-                .collect();
-
-            entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.path.cmp(&b.path)));
-            self.files = entries;
-        } else {
-            eprintln!("Failed to read directory: {}", self.current_path);
+        match read_directory(path) {
+            Ok(entries) => self.files = entries,
+            Err(err) => {
+                self.files.clear();
+                eprintln!("Failed to read directory: {} ({err})", self.current_path);
+            }
         }
     }
 

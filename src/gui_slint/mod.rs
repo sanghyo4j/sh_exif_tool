@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use self::app::SlintApp;
 use crate::exif::{extract_datetime_from_filename, read_exif_metadata, ExifMetadata};
+use crate::fs::{rename_entry, save_file_copy};
 use crate::GuiRunner;
 
 slint::include_modules!();
@@ -212,7 +213,7 @@ impl GuiRunner for SlintRunner {
         ui.on_fill_taken_date_from_filename(move || {
             if let Some(ui) = ui_handle.upgrade() {
                 if ui.get_selected_index() < 0 || ui.get_selected_is_dir() {
-                    show_message(&ui, "Select a file before filling Taken Date.");
+                    show_message(&ui, "Unable to Fill Taken Date", "Select a file before filling Taken Date.");
                     return;
                 }
 
@@ -222,12 +223,12 @@ impl GuiRunner for SlintRunner {
                 };
 
                 let Some(path) = path else {
-                    show_message(&ui, "Selected file could not be resolved.");
+                    show_message(&ui, "Unable to Fill Taken Date", "Selected file could not be resolved.");
                     return;
                 };
 
                 let Some(datetime) = extract_datetime_from_filename(&path) else {
-                    show_message(&ui, "No supported date pattern was found in the filename.");
+                    show_message(&ui, "Unable to Fill Taken Date", "No supported date pattern was found in the filename.");
                     return;
                 };
 
@@ -273,12 +274,75 @@ impl GuiRunner for SlintRunner {
             }
         });
 
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_save_copy(move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                if ui.get_selected_index() < 0 || ui.get_selected_is_dir() {
+                    show_message(&ui, "Save Copy Failed", "Select a file before saving a copy.");
+                    return;
+                }
+
+                let result = {
+                    let mut app = app_handle.borrow_mut();
+                    let Some(path) = app.path_for_ui_index(ui.get_selected_index()) else {
+                        show_message(&ui, "Save Copy Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+
+                    save_file_copy(&path).map(|target_path| {
+                        app.load_folder();
+                        target_path
+                    })
+                };
+
+                match result {
+                    Ok(_) => {
+                        refresh();
+                    }
+                    Err(err) => show_message(&ui, "Save Copy Failed", &err),
+                }
+            }
+        });
+
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
         let ui_handle = ui.as_weak();
         ui.on_apply_changes(move || {
-            // Metadata editing is UI-only until EXIF write support is implemented.
             if let Some(ui) = ui_handle.upgrade() {
+                if ui.get_selected_name_dirty() {
+                    let new_name = ui.get_selected_name().trim().to_string();
+
+                    let result = {
+                        let mut app = app_handle.borrow_mut();
+                        let Some(current_path) = app.path_for_ui_index(ui.get_selected_index()) else {
+                            show_message(&ui, "Rename Failed", "Selected file could not be resolved.");
+                            return;
+                        };
+
+                        rename_entry(&current_path, &new_name).map(|_| {
+                            app.load_folder();
+                        })
+                    };
+
+                    if let Err(err) = result {
+                        show_message(&ui, "Rename Failed", &format!("{err}"));
+                        return;
+                    }
+
+                    refresh();
+                    return;
+                }
+
+                // Metadata editing is UI-only until EXIF write support is implemented.
                 store_current_as_original(&ui);
                 update_metadata_dirty_state(&ui);
+                {
+                    let mut app = app_handle.borrow_mut();
+                    app.load_folder();
+                }
+                refresh();
             }
         });
 
@@ -335,7 +399,8 @@ fn set_loaded_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
     reset_metadata_dirty_flags(ui);
 }
 
-fn show_message(ui: &MainWindow, message: &str) {
+fn show_message(ui: &MainWindow, title: &str, message: &str) {
+    ui.set_message_title(title.into());
     ui.set_message_text(message.into());
     ui.set_message_visible(true);
 }

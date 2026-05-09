@@ -36,6 +36,11 @@ export component EditableInfoRow inherits Rectangle {
     in-out property <string> value;
     callback value_edited();
 
+    public function focus_input() {
+        input.focus();
+        input.select-all();
+    }
+
     height: 34px;
     background: #ffffff;
 
@@ -57,12 +62,12 @@ export component EditableInfoRow inherits Rectangle {
 
         Rectangle {
             horizontal-stretch: 1;
-            background: root.dirty ? #fff7d6 : #ffffff;
+            background: input.has-focus ? #eaf4ff : (root.dirty ? #fff7d6 : #ffffff);
             border-width: 1px;
-            border-color: root.dirty ? #e5c85d : #edf0f2;
+            border-color: input.has-focus ? #2563eb : (root.dirty ? #e5c85d : #edf0f2);
             border-radius: 3px;
 
-            TextInput {
+            input := TextInput {
                 x: 8px;
                 width: parent.width - 16px;
                 height: 100%;
