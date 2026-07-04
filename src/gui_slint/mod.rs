@@ -1,13 +1,32 @@
 pub mod app;
 
+use chrono::{Local, NaiveDateTime, TimeZone};
 use slint::{language::ColorScheme, ComponentHandle};
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use self::app::SlintApp;
-use crate::exif::{extract_datetime_from_filename, read_exif_metadata, write_taken_date, ExifMetadata};
-use crate::fs::{move_file_to_recycle_bin, rename_entry, save_file_copy};
+use crate::exif::{
+    extract_datetime_from_filename,
+    read_exif_metadata,
+    write_aperture,
+    write_artist,
+    write_camera_make,
+    write_camera_model,
+    write_color_space,
+    write_flash_fired,
+    write_focal_length,
+    write_lens_model,
+    write_metering_mode,
+    write_orientation,
+    write_iso_speed,
+    write_shutter_speed,
+    write_software,
+    write_taken_date,
+    ExifMetadata,
+};
+use crate::fs::{move_file_to_recycle_bin, rename_entry, save_file_copy, set_file_times};
 use crate::GuiRunner;
 
 slint::include_modules!();
@@ -362,6 +381,185 @@ impl GuiRunner for SlintRunner {
                     }
                 }
 
+                if ui.get_camera_make_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_camera_make(path, ui.get_camera_make().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                if ui.get_camera_model_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_camera_model(path, ui.get_camera_model().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                if ui.get_lens_model_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_lens_model(path, ui.get_lens_model().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                if ui.get_software_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_software(path, ui.get_software().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                if ui.get_artist_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_artist(path, ui.get_artist().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                if ui.get_shutter_speed_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_shutter_speed(path, ui.get_shutter_speed().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                if ui.get_aperture_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_aperture(path, ui.get_aperture().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                if ui.get_iso_speed_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_iso_speed(path, ui.get_iso_speed().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                if ui.get_focal_length_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_focal_length(path, ui.get_focal_length().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                if ui.get_flash_fired_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_flash_fired(path, ui.get_flash_fired().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                if ui.get_metering_mode_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_metering_mode(path, ui.get_metering_mode().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                if ui.get_orientation_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_orientation(path, ui.get_orientation().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                if ui.get_color_space_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if let Err(err) = write_color_space(path, ui.get_color_space().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
+                if ui.get_selected_created_dirty() || ui.get_selected_modified_dirty() {
+                    let Some(path) = selected_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+
+                    let created_time = if ui.get_selected_created_dirty() {
+                        match parse_timestamp(ui.get_selected_created().as_str()) {
+                            Ok(value) => Some(value),
+                            Err(err) => {
+                                show_message(&ui, "Apply Failed", &err);
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    let modified_time = if ui.get_selected_modified_dirty() {
+                        match parse_timestamp(ui.get_selected_modified().as_str()) {
+                            Ok(value) => Some(value),
+                            Err(err) => {
+                                show_message(&ui, "Apply Failed", &err);
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Err(err) = set_file_times(path, created_time, modified_time) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                }
+
                 // Other metadata fields are UI-only until their EXIF writers are implemented.
                 store_current_as_original(&ui);
                 update_metadata_dirty_state(&ui);
@@ -467,6 +665,21 @@ fn show_message(ui: &MainWindow, title: &str, message: &str) {
     ui.set_message_title(title.into());
     ui.set_message_text(message.into());
     ui.set_message_visible(true);
+}
+
+fn parse_timestamp(value: &str) -> Result<SystemTime, String> {
+    if value.trim().is_empty() || value == "N/A" || value == "-" {
+        return Err("Invalid timestamp format.".to_string());
+    }
+
+    let naive = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .map_err(|_| "Expected datetime format: YYYY-MM-DD HH:MM:SS".to_string())?;
+
+    Local
+        .from_local_datetime(&naive)
+        .single()
+        .ok_or_else(|| "Invalid or ambiguous local datetime.".to_string())
+        .map(|dt| dt.into())
 }
 
 fn reset_metadata_dirty_flags(ui: &MainWindow) {

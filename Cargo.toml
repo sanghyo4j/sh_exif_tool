@@ -14,6 +14,7 @@ edition = "2021"
 [dependencies]
 egui_extras = "0.30"
 chrono = "0.4"
+filetime = "0.2"
 slint = { version = "1.9", optional = true }
 eframe = { version = "0.30", optional = true }
 

@@ -84,11 +84,10 @@ pub fn read_exif_metadata(path: &Path) -> ExifMetadata {
     parse_tiff(tiff).unwrap_or_default()
 }
 
-pub fn write_taken_date(path: &Path, display_value: &str) -> Result<(), String> {
-    let exif_value = display_datetime_to_exif(display_value)?;
-    let mut value_bytes = exif_value.into_bytes();
-    value_bytes.push(0);
-
+fn write_exif_tag_values<F>(path: &Path, tags: &[u16], mut make_bytes: F) -> Result<(), String>
+where
+    F: FnMut(&Entry<'_>) -> Option<Vec<u8>>,
+{
     let mut bytes = fs::read(path).map_err(|err| err.to_string())?;
     let tiff_start = find_exif_tiff_start(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
     let tiff = bytes
@@ -97,13 +96,16 @@ pub fn write_taken_date(path: &Path, display_value: &str) -> Result<(), String> 
     let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid TIFF header.".to_string())?;
     let ifd0_offset = read_u32(tiff, 4, endian).ok_or_else(|| "Invalid IFD0 offset.".to_string())? as usize;
 
-    let mut ranges = Vec::new();
+    let mut writes = Vec::new();
     let ifd0_entries = read_ifd_entries(tiff, ifd0_offset, endian)
         .ok_or_else(|| "Unable to read IFD0 entries.".to_string())?;
+
     for entry in &ifd0_entries {
-        if entry.tag == 0x0132 {
-            if let Some(range) = writable_ascii_range(entry, value_bytes.len()) {
-                ranges.push(range);
+        if tags.contains(&entry.tag) {
+            if let Some(value_bytes) = make_bytes(entry) {
+                if let Some(range) = writable_entry_range(entry, value_bytes.len()) {
+                    writes.push((range, value_bytes));
+                }
             }
         }
     }
@@ -116,20 +118,25 @@ pub fn write_taken_date(path: &Path, display_value: &str) -> Result<(), String> 
     {
         if let Some(exif_entries) = read_ifd_entries(tiff, exif_ifd_offset, endian) {
             for entry in &exif_entries {
-                if entry.tag == 0x9003 || entry.tag == 0x9004 {
-                    if let Some(range) = writable_ascii_range(entry, value_bytes.len()) {
-                        ranges.push(range);
+                if tags.contains(&entry.tag) {
+                    if let Some(value_bytes) = make_bytes(entry) {
+                        if let Some(range) = writable_entry_range(entry, value_bytes.len()) {
+                            writes.push((range, value_bytes));
+                        }
                     }
                 }
             }
         }
     }
 
-    if ranges.is_empty() {
-        return Err("No writable Taken Date EXIF tag was found.".to_string());
+    if writes.is_empty() {
+        return Err(format!(
+            "No writable EXIF tag was found for tag(s) {:?}. This tool only overwrites existing EXIF entries and does not create missing tags.",
+            tags
+        ));
     }
 
-    for (relative_start, len) in ranges {
+    for ((relative_start, len), value_bytes) in writes {
         let start = tiff_start
             .checked_add(relative_start)
             .ok_or_else(|| "Invalid EXIF write offset.".to_string())?;
@@ -144,6 +151,215 @@ pub fn write_taken_date(path: &Path, display_value: &str) -> Result<(), String> 
     }
 
     fs::write(path, bytes).map_err(|err| err.to_string())
+}
+
+fn writable_entry_range(entry: &Entry<'_>, value_len: usize) -> Option<(usize, usize)> {
+    match entry.field_type {
+        2 => writable_ascii_range(entry, value_len),
+        3 if entry.count == 1 && value_len <= 2 => entry.data.get(entry.value_field..entry.value_field + 2).map(|_| (entry.value_field, 2)),
+        4 if entry.count == 1 && value_len <= 4 => entry.data.get(entry.value_field..entry.value_field + 4).map(|_| (entry.value_field, 4)),
+        5 if entry.count == 1 => {
+            let offset = read_u32(entry.data, entry.value_field, entry.endian)? as usize;
+            entry.data.get(offset..offset + 8).map(|_| (offset, 8))
+        }
+        _ => None,
+    }
+}
+
+fn write_exif_ascii_tags(path: &Path, tags: &[u16], value: &str) -> Result<(), String> {
+    let mut value_bytes = value.as_bytes().to_vec();
+    value_bytes.push(0);
+    write_exif_tag_values(path, tags, |_| Some(value_bytes.clone()))
+}
+
+fn write_exif_short_tag(path: &Path, tags: &[u16], value: u16) -> Result<(), String> {
+    write_exif_tag_values(path, tags, |entry| {
+        if entry.field_type == 3 && entry.count == 1 {
+            let bytes = match entry.endian {
+                Endian::Little => value.to_le_bytes(),
+                Endian::Big => value.to_be_bytes(),
+            };
+            Some(bytes.to_vec())
+        } else {
+            None
+        }
+    })
+}
+
+fn write_exif_long_tag(path: &Path, tags: &[u16], value: u32) -> Result<(), String> {
+    write_exif_tag_values(path, tags, |entry| {
+        if entry.field_type == 4 && entry.count == 1 {
+            let bytes = match entry.endian {
+                Endian::Little => value.to_le_bytes(),
+                Endian::Big => value.to_be_bytes(),
+            };
+            Some(bytes.to_vec())
+        } else {
+            None
+        }
+    })
+}
+
+fn write_exif_rational_tag(path: &Path, tags: &[u16], numerator: u32, denominator: u32) -> Result<(), String> {
+    write_exif_tag_values(path, tags, |entry| {
+        if entry.field_type == 5 && entry.count == 1 {
+            let mut bytes = Vec::with_capacity(8);
+            match entry.endian {
+                Endian::Little => {
+                    bytes.extend_from_slice(&numerator.to_le_bytes());
+                    bytes.extend_from_slice(&denominator.to_le_bytes());
+                }
+                Endian::Big => {
+                    bytes.extend_from_slice(&numerator.to_be_bytes());
+                    bytes.extend_from_slice(&denominator.to_be_bytes());
+                }
+            }
+            Some(bytes)
+        } else {
+            None
+        }
+    })
+}
+
+pub fn write_taken_date(path: &Path, display_value: &str) -> Result<(), String> {
+    let exif_value = display_datetime_to_exif(display_value)?;
+    write_exif_ascii_tags(path, &[0x0132, 0x9003, 0x9004], &exif_value)
+}
+
+pub fn write_camera_make(path: &Path, value: &str) -> Result<(), String> {
+    write_exif_ascii_tags(path, &[0x010f], value)
+}
+
+pub fn write_camera_model(path: &Path, value: &str) -> Result<(), String> {
+    write_exif_ascii_tags(path, &[0x0110], value)
+}
+
+pub fn write_lens_model(path: &Path, value: &str) -> Result<(), String> {
+    write_exif_ascii_tags(path, &[0xa434], value)
+}
+
+pub fn write_software(path: &Path, value: &str) -> Result<(), String> {
+    write_exif_ascii_tags(path, &[0x0131], value)
+}
+
+pub fn write_artist(path: &Path, value: &str) -> Result<(), String> {
+    write_exif_ascii_tags(path, &[0x013b], value)
+}
+
+pub fn write_shutter_speed(path: &Path, value: &str) -> Result<(), String> {
+    let (num, den) = parse_exif_rational_value(value)?;
+    write_exif_rational_tag(path, &[0x829a], num, den)
+}
+
+pub fn write_aperture(path: &Path, value: &str) -> Result<(), String> {
+    let (num, den) = parse_aperture_value(value)?;
+    write_exif_rational_tag(path, &[0x829d], num, den)
+}
+
+pub fn write_iso_speed(path: &Path, value: &str) -> Result<(), String> {
+    let iso = parse_u16_value(value)?;
+    write_exif_short_tag(path, &[0x8827], iso)
+}
+
+pub fn write_focal_length(path: &Path, value: &str) -> Result<(), String> {
+    let (num, den) = parse_exif_rational_value(value)?;
+    write_exif_rational_tag(path, &[0x920a], num, den)
+}
+
+pub fn write_flash_fired(path: &Path, value: &str) -> Result<(), String> {
+    let flash = parse_flash_value(value)?;
+    write_exif_short_tag(path, &[0x9209], flash)
+}
+
+pub fn write_metering_mode(path: &Path, value: &str) -> Result<(), String> {
+    let mode = parse_metering_mode_value(value)?;
+    write_exif_short_tag(path, &[0x9207], mode)
+}
+
+pub fn write_orientation(path: &Path, value: &str) -> Result<(), String> {
+    let orientation = parse_u16_value(value)?;
+    write_exif_short_tag(path, &[0x0112], orientation)
+}
+
+pub fn write_color_space(path: &Path, value: &str) -> Result<(), String> {
+    let color_space = parse_u16_value(value)?;
+    write_exif_short_tag(path, &[0xa001], color_space)
+}
+
+fn parse_u16_value(value: &str) -> Result<u16, String> {
+    value
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| "Expected an integer value.".to_string())
+}
+
+fn parse_exif_rational_value(value: &str) -> Result<(u32, u32), String> {
+    let value = value.trim();
+    let value = value.strip_suffix('s').unwrap_or(value).trim();
+    if let Some((num_str, den_str)) = value.split_once('/') {
+        let num = num_str.trim().parse::<u32>().map_err(|_| "Expected rational value like 1/125 or 3/2.".to_string())?;
+        let den = den_str.trim().parse::<u32>().map_err(|_| "Expected rational value like 1/125 or 3/2.".to_string())?;
+        return Ok((num, den));
+    }
+
+    let float_value = value
+        .trim_start_matches('f')
+        .trim_start_matches('/')
+        .trim_end_matches("mm")
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "Expected numeric or fraction value.".to_string())?;
+
+    if float_value <= 0.0 {
+        return Err("Expected a positive numeric value.".to_string());
+    }
+
+    let denom = 1000u32;
+    let num = (float_value * denom as f64).round() as u32;
+    Ok((num, denom))
+}
+
+fn parse_aperture_value(value: &str) -> Result<(u32, u32), String> {
+    let trimmed = value.trim();
+    let trimmed = trimmed.strip_prefix('f').unwrap_or(trimmed).trim();
+    let trimmed = trimmed.strip_prefix('/').unwrap_or(trimmed).trim();
+    let float_value = trimmed
+        .parse::<f64>()
+        .map_err(|_| "Expected aperture like f/2.8 or 2.8.".to_string())?;
+
+    if float_value <= 0.0 {
+        return Err("Expected a positive aperture value.".to_string());
+    }
+
+    let denom = 10u32;
+    let num = (float_value * denom as f64).round() as u32;
+    Ok((num, denom))
+}
+
+fn parse_flash_value(value: &str) -> Result<u16, String> {
+    let lowered = value.trim().to_lowercase();
+    if lowered == "yes" || lowered == "true" || lowered == "1" {
+        return Ok(1);
+    }
+    if lowered == "no" || lowered == "false" || lowered == "0" {
+        return Ok(0);
+    }
+    parse_u16_value(value)
+}
+
+fn parse_metering_mode_value(value: &str) -> Result<u16, String> {
+    let lowered = value.trim().to_lowercase();
+    let mode = match lowered.as_str() {
+        "average" => 1,
+        "center-weighted average" => 2,
+        "spot" => 3,
+        "multi-spot" => 4,
+        "pattern" => 5,
+        "partial" => 6,
+        "other" => 255,
+        _ => parse_u16_value(value)?,
+    };
+    Ok(mode)
 }
 
 pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
@@ -645,6 +861,111 @@ fn empty_value() -> String {
 mod tests {
     use super::*;
 
+    fn minimal_jpeg_with_camera_make(value: &str) -> Vec<u8> {
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&42u16.to_le_bytes());
+        tiff.extend_from_slice(&8u32.to_le_bytes());
+
+        let ifd0_offset = 8usize;
+        let make_offset = 32u32;
+
+        assert_eq!(tiff.len(), ifd0_offset);
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0x010fu16.to_le_bytes());
+        tiff.extend_from_slice(&2u16.to_le_bytes());
+        tiff.extend_from_slice(&((value.len() + 1) as u32).to_le_bytes());
+        tiff.extend_from_slice(&make_offset.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+
+        assert_eq!(tiff.len(), make_offset as usize);
+        tiff.extend_from_slice(value.as_bytes());
+        tiff.push(0);
+
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend_from_slice(&tiff);
+        let segment_len = u16::try_from(payload.len() + 2).unwrap();
+
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+        jpeg.extend_from_slice(&segment_len.to_be_bytes());
+        jpeg.extend_from_slice(&payload);
+        jpeg.extend_from_slice(&[0xff, 0xd9]);
+        jpeg
+    }
+
+    fn minimal_jpeg_with_camera_model(value: &str) -> Vec<u8> {
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&42u16.to_le_bytes());
+        tiff.extend_from_slice(&8u32.to_le_bytes());
+
+        let ifd0_offset = 8usize;
+        let model_offset = 32u32;
+
+        assert_eq!(tiff.len(), ifd0_offset);
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0x0110u16.to_le_bytes());
+        tiff.extend_from_slice(&2u16.to_le_bytes());
+        tiff.extend_from_slice(&((value.len() + 1) as u32).to_le_bytes());
+        tiff.extend_from_slice(&model_offset.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+
+        assert_eq!(tiff.len(), model_offset as usize);
+        tiff.extend_from_slice(value.as_bytes());
+        tiff.push(0);
+
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend_from_slice(&tiff);
+        let segment_len = u16::try_from(payload.len() + 2).unwrap();
+
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+        jpeg.extend_from_slice(&segment_len.to_be_bytes());
+        jpeg.extend_from_slice(&payload);
+        jpeg.extend_from_slice(&[0xff, 0xd9]);
+        jpeg
+    }
+
+    fn minimal_jpeg_with_lens_model(value: &str) -> Vec<u8> {
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&42u16.to_le_bytes());
+        tiff.extend_from_slice(&8u32.to_le_bytes());
+
+        let ifd0_offset = 8usize;
+        let exif_ifd_offset = 26u32;
+        let lens_offset = 44u32;
+
+        assert_eq!(tiff.len(), ifd0_offset);
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0x8769u16.to_le_bytes());
+        tiff.extend_from_slice(&4u16.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&exif_ifd_offset.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+
+        assert_eq!(tiff.len(), exif_ifd_offset as usize);
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0xa434u16.to_le_bytes());
+        tiff.extend_from_slice(&2u16.to_le_bytes());
+        tiff.extend_from_slice(&((value.len() + 1) as u32).to_le_bytes());
+        tiff.extend_from_slice(&lens_offset.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+
+        assert_eq!(tiff.len(), lens_offset as usize);
+        tiff.extend_from_slice(value.as_bytes());
+        tiff.push(0);
+
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend_from_slice(&tiff);
+        let segment_len = u16::try_from(payload.len() + 2).unwrap();
+
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+        jpeg.extend_from_slice(&segment_len.to_be_bytes());
+        jpeg.extend_from_slice(&payload);
+        jpeg.extend_from_slice(&[0xff, 0xd9]);
+        jpeg
+    }
+
     #[test]
     fn converts_exif_datetime_to_display_datetime() {
         assert_eq!(
@@ -682,6 +1003,57 @@ mod tests {
 
         let metadata = read_exif_metadata(&path);
         assert_eq!(metadata.taken_date, "2026-05-09 12:34:56");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn writes_existing_camera_make_tag_in_place() {
+        let path = std::env::temp_dir().join(format!(
+            "sh_exif_tool_camera_make_test_{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, minimal_jpeg_with_camera_make("Canon"))
+            .unwrap();
+
+        write_camera_make(&path, "Sony").unwrap();
+
+        let metadata = read_exif_metadata(&path);
+        assert_eq!(metadata.camera_make, "Sony");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn writes_existing_camera_model_tag_in_place() {
+        let path = std::env::temp_dir().join(format!(
+            "sh_exif_tool_camera_model_test_{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, minimal_jpeg_with_camera_model("Canon"))
+            .unwrap();
+
+        write_camera_model(&path, "Sony").unwrap();
+
+        let metadata = read_exif_metadata(&path);
+        assert_eq!(metadata.camera_model, "Sony");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn writes_existing_lens_model_tag_in_place() {
+        let path = std::env::temp_dir().join(format!(
+            "sh_exif_tool_lens_model_test_{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, minimal_jpeg_with_lens_model("EF24-70mm"))
+            .unwrap();
+
+        write_lens_model(&path, "RF24-70mm").unwrap();
+
+        let metadata = read_exif_metadata(&path);
+        assert_eq!(metadata.lens_model, "RF24-70mm");
 
         let _ = std::fs::remove_file(path);
     }

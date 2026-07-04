@@ -1,3 +1,4 @@
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -97,6 +98,115 @@ pub fn move_file_to_recycle_bin(path: &Path) -> Result<(), String> {
     }
 
     move_path_to_recycle_bin(path)
+}
+
+pub fn set_file_times(
+    path: &Path,
+    created: Option<SystemTime>,
+    modified: Option<SystemTime>,
+) -> Result<(), String> {
+    if created.is_none() && modified.is_none() {
+        return Ok(());
+    }
+
+    set_file_times_impl(path, created, modified)
+}
+
+#[cfg(windows)]
+fn set_file_times_impl(
+    path: &Path,
+    created: Option<SystemTime>,
+    modified: Option<SystemTime>,
+) -> Result<(), String> {
+    use std::ffi::c_void;
+    use std::os::windows::prelude::AsRawHandle;
+
+    const EPOCH_DIFFERENCE_SECONDS: u64 = 11644473600;
+
+    #[repr(C)]
+    struct FileTime {
+        dw_low_date_time: u32,
+        dw_high_date_time: u32,
+    }
+
+    extern "system" {
+        fn SetFileTime(
+            hFile: *mut c_void,
+            lpCreationTime: *const FileTime,
+            lpLastAccessTime: *const FileTime,
+            lpLastWriteTime: *const FileTime,
+        ) -> i32;
+    }
+
+    fn system_time_to_filetime(time: SystemTime) -> Result<FileTime, String> {
+        let duration = time
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|err| err.to_string())?;
+        let intervals = duration
+            .as_secs()
+            .checked_add(EPOCH_DIFFERENCE_SECONDS)
+            .ok_or_else(|| "Time value out of range.".to_string())?
+            .checked_mul(10_000_000)
+            .ok_or_else(|| "Time value out of range.".to_string())?
+            .checked_add((duration.subsec_nanos() / 100) as u64)
+            .ok_or_else(|| "Time value out of range.".to_string())?;
+        Ok(FileTime {
+            dw_low_date_time: intervals as u32,
+            dw_high_date_time: (intervals >> 32) as u32,
+        })
+    }
+
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|err| err.to_string())?;
+    let handle = file.as_raw_handle() as *mut c_void;
+
+    let creation_ptr = created
+        .map(system_time_to_filetime)
+        .transpose()
+        .map_err(|err| err.to_string())?
+        .as_ref()
+        .map_or(std::ptr::null(), |t| t as *const FileTime);
+
+    let modified_ptr = modified
+        .map(system_time_to_filetime)
+        .transpose()
+        .map_err(|err| err.to_string())?
+        .as_ref()
+        .map_or(std::ptr::null(), |t| t as *const FileTime);
+
+    let result = unsafe { SetFileTime(handle, creation_ptr, std::ptr::null(), modified_ptr) };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn set_file_times_impl(
+    path: &Path,
+    created: Option<SystemTime>,
+    modified: Option<SystemTime>,
+) -> Result<(), String> {
+    use filetime::{set_file_times, FileTime};
+
+    if created.is_some() {
+        return Err("Setting created time is not supported on this platform.".to_string());
+    }
+
+    let metadata = path.metadata().map_err(|err| err.to_string())?;
+    let accessed = metadata
+        .accessed()
+        .unwrap_or_else(|_| SystemTime::now());
+    let access_ft = FileTime::from_system_time(accessed);
+    let modified_ft = modified
+        .map(FileTime::from_system_time)
+        .unwrap_or_else(|| {
+            FileTime::from_system_time(metadata.modified().unwrap_or_else(|_| SystemTime::now()))
+        });
+    set_file_times(path, access_ft, modified_ft).map_err(|err| err.to_string())
 }
 
 #[cfg(windows)]
