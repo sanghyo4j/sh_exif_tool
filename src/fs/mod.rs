@@ -1,5 +1,6 @@
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::SystemTime;
 
 #[derive(Clone, Debug)]
@@ -98,6 +99,14 @@ pub fn move_file_to_recycle_bin(path: &Path) -> Result<(), String> {
     }
 
     move_path_to_recycle_bin(path)
+}
+
+pub fn open_in_file_manager(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err("Selected path does not exist.".to_string());
+    }
+
+    open_in_file_manager_impl(path)
 }
 
 pub fn set_file_times(
@@ -265,4 +274,50 @@ fn move_path_to_recycle_bin(path: &Path) -> Result<(), String> {
 #[cfg(not(windows))]
 fn move_path_to_recycle_bin(path: &Path) -> Result<(), String> {
     std::fs::remove_file(path).map_err(|err| err.to_string())
+}
+
+#[cfg(windows)]
+fn open_in_file_manager_impl(path: &Path) -> Result<(), String> {
+    let path = path.canonicalize().map_err(|err| err.to_string())?;
+    let target = if path.is_file() {
+        path.parent()
+            .ok_or_else(|| "Selected file parent could not be resolved.".to_string())?
+            .to_path_buf()
+    } else {
+        path
+    };
+
+    Command::new("explorer.exe")
+        .arg(target)
+        .spawn()
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_in_file_manager_impl(path: &Path) -> Result<(), String> {
+    let mut command = Command::new("open");
+    if path.is_file() {
+        command.arg("-R").arg(path);
+    } else {
+        command.arg(path);
+    }
+
+    command.spawn().map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn open_in_file_manager_impl(path: &Path) -> Result<(), String> {
+    let target = if path.is_file() {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    };
+
+    Command::new("xdg-open")
+        .arg(target)
+        .spawn()
+        .map_err(|err| err.to_string())?;
+    Ok(())
 }

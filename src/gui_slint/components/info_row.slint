@@ -35,6 +35,7 @@ export component EditableInfoRow inherits Rectangle {
     in property <bool> dirty: false;
     in-out property <string> value;
     callback value_edited();
+    callback shortcut_requested(string);
 
     public function focus_input() {
         input.focus();
@@ -79,6 +80,40 @@ export component EditableInfoRow inherits Rectangle {
 
                 edited => {
                     root.value_edited();
+                }
+
+                key-pressed(event) => {
+                    if (event.text == Key.F5) {
+                        root.shortcut_requested("refresh");
+                        return accept;
+                    }
+
+                    if ((event.text == "O" || event.text == "o") && event.modifiers.control && event.modifiers.shift) {
+                        root.shortcut_requested("open-folder");
+                        return accept;
+                    }
+
+                    if ((event.text == "S" || event.text == "s") && event.modifiers.control) {
+                        root.shortcut_requested("save");
+                        return accept;
+                    }
+
+                    if ((event.text == "R" || event.text == "r") && event.modifiers.alt && event.modifiers.shift) {
+                        root.shortcut_requested("open-explorer");
+                        return accept;
+                    }
+
+                    if ((event.text == "R" || event.text == "r") && event.modifiers.control && !event.modifiers.shift) {
+                        root.shortcut_requested("revert");
+                        return accept;
+                    }
+
+                    if ((event.text == "W" || event.text == "w") && event.modifiers.control) {
+                        root.shortcut_requested("exit");
+                        return accept;
+                    }
+
+                    reject
                 }
             }
         }

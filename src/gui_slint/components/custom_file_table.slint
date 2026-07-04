@@ -10,6 +10,12 @@ export component CustomFileTable inherits Rectangle {
     callback row_clicked(int);
     callback row_activated(int);
     callback rename_requested(int);
+    callback reload_requested();
+    callback open_folder_requested();
+    callback open_in_file_manager_requested();
+    callback apply_requested();
+    callback revert_requested();
+    callback exit_requested();
 
     horizontal-stretch: 0;
     height: 100%;
@@ -164,6 +170,36 @@ export component CustomFileTable inherits Rectangle {
                 if (root.selected_index > 0 && root.selected_index < root.files.length) {
                     root.rename_requested(root.selected_index);
                 }
+                return accept;
+            }
+
+            if (event.text == Key.F5) {
+                root.reload_requested();
+                return accept;
+            }
+
+            if ((event.text == "O" || event.text == "o") && event.modifiers.control && event.modifiers.shift) {
+                root.open_folder_requested();
+                return accept;
+            }
+
+            if ((event.text == "S" || event.text == "s") && event.modifiers.control) {
+                root.apply_requested();
+                return accept;
+            }
+
+            if ((event.text == "R" || event.text == "r") && event.modifiers.alt && event.modifiers.shift) {
+                root.open_in_file_manager_requested();
+                return accept;
+            }
+
+            if ((event.text == "R" || event.text == "r") && event.modifiers.control && !event.modifiers.shift) {
+                root.revert_requested();
+                return accept;
+            }
+
+            if ((event.text == "W" || event.text == "w") && event.modifiers.control) {
+                root.exit_requested();
                 return accept;
             }
 

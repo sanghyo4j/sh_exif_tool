@@ -284,6 +284,27 @@ pub fn rewrite_basic_exif_metadata(path: &Path, metadata: &ExifMetadata) -> Resu
     Ok(output_path)
 }
 
+pub fn rewrite_generated_basic_exif_metadata(path: &Path, metadata: &ExifMetadata) -> Result<(), String> {
+    if !is_generated_new_exif_path(path) {
+        return Err("Refusing to rewrite EXIF in place unless this is a generated _new_exif_tag file.".to_string());
+    }
+
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    if find_exif_tiff_start(&bytes).is_none() {
+        return Err("Generated EXIF file does not contain an EXIF structure.".to_string());
+    }
+
+    let exif_segment = build_basic_exif_app1(metadata)?;
+    let updated = replace_or_insert_exif_app1(&bytes, &exif_segment)?;
+    fs::write(path, updated).map_err(|err| err.to_string())
+}
+
+pub fn is_generated_new_exif_path(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .is_some_and(|stem| stem.contains("_new_exif_tag"))
+}
+
 fn parse_u16_value(value: &str) -> Result<u16, String> {
     value
         .trim()
@@ -1530,6 +1551,34 @@ mod tests {
         assert_eq!(read_exif_metadata(&path).camera_make, "Canon");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rewrites_generated_new_exif_file_in_place() {
+        let path = std::env::temp_dir().join(format!(
+            "sh_exif_tool_generated_new_exif_tag_test_{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+
+        let metadata = ExifMetadata {
+            camera_make: "Sony".to_string(),
+            camera_model: "A7C".to_string(),
+            ..ExifMetadata::default()
+        };
+        let output_path = rewrite_basic_exif_metadata(&path, &metadata).unwrap();
+        let mut updated = read_exif_metadata(&output_path);
+        updated.lens_model = "FE 24-70mm F2.8 GM II".to_string();
+
+        rewrite_generated_basic_exif_metadata(&output_path, &updated).unwrap();
+
+        let written = read_exif_metadata(&output_path);
+        assert_eq!(written.camera_make, "Sony");
+        assert_eq!(written.camera_model, "A7C");
+        assert_eq!(written.lens_model, "FE 24-70mm F2.8 GM II");
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(output_path);
     }
 
     fn minimal_jpeg_with_datetime_original(value: &str) -> Vec<u8> {

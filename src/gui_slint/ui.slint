@@ -101,6 +101,8 @@ export component MainWindow inherits Window {
     callback change_dir(string);
     callback save_copy();
     callback delete_file();
+    callback open_in_explorer();
+    callback exit_app();
     callback apply_changes();
     callback revert_changes();
     callback remove_exif_tags();
@@ -111,11 +113,11 @@ export component MainWindow inherits Window {
 
     MenuBar {
         Menu {
-            title: "File";
+            title: "&File";
 
-            MenuItem { title: "Open Folder..."; activated => { root.editing_path = true; } }
+            MenuItem { title: "&Open Folder... (Ctrl+Shift+O)"; activated => { root.editing_path = true; } }
             MenuItem {
-                title: "Reload";
+                title: "&Refresh (F5)";
                 activated => {
                     root.editing_path = false;
                     root.reload();
@@ -123,7 +125,7 @@ export component MainWindow inherits Window {
             }
             MenuSeparator {}
             MenuItem {
-                title: "Save Copy";
+                title: "&Save Copy";
                 enabled: root.selected_index >= 0 && !root.selected_is_dir;
                 activated => {
                     root.editing_path = false;
@@ -131,7 +133,7 @@ export component MainWindow inherits Window {
                 }
             }
             MenuItem {
-                title: "Delete File";
+                title: "&Delete File";
                 enabled: root.selected_index >= 0 && !root.selected_is_dir;
                 activated => {
                     root.editing_path = false;
@@ -142,7 +144,7 @@ export component MainWindow inherits Window {
             }
             MenuSeparator {}
             MenuItem {
-                title: "Apply";
+                title: "&Apply (Ctrl+S)";
                 enabled: root.metadata_dirty;
                 activated => {
                     root.editing_path = false;
@@ -150,7 +152,7 @@ export component MainWindow inherits Window {
                 }
             }
             MenuItem {
-                title: "Revert";
+                title: "&Revert (Ctrl+R)";
                 enabled: root.metadata_dirty;
                 activated => {
                     root.editing_path = false;
@@ -158,23 +160,35 @@ export component MainWindow inherits Window {
                 }
             }
             MenuSeparator {}
-            MenuItem { title: "Open in Explorer"; activated => { root.editing_path = false; } }
+            MenuItem {
+                title: "Open in Explore&r (Alt+Shift+R)";
+                activated => {
+                    root.editing_path = false;
+                    root.open_in_explorer();
+                }
+            }
             MenuSeparator {}
-            MenuItem { title: "Exit"; activated => { root.editing_path = false; } }
+            MenuItem {
+                title: "E&xit (Ctrl+W)";
+                activated => {
+                    root.editing_path = false;
+                    root.exit_app();
+                }
+            }
         }
 
         Menu {
-            title: "Advanced";
+            title: "&Advanced";
 
             MenuItem {
-                title: "Fill Taken date from Filename";
+                title: "&Fill Taken date from Filename";
                 activated => {
                     root.editing_path = false;
                     root.fill_taken_date_from_filename();
                 }
             }
             MenuItem {
-                title: "Remove EXIF Tags";
+                title: "&Remove EXIF Tags";
                 activated => {
                     root.editing_path = false;
                     root.remove_exif_tags();
@@ -183,30 +197,30 @@ export component MainWindow inherits Window {
         }
 
         Menu {
-            title: "Analyze";
+            title: "A&nalyze";
 
-            MenuItem { title: "Analyze Selected"; activated => { root.editing_path = false; } }
-            MenuItem { title: "Analyze Folder"; activated => { root.editing_path = false; } }
-            MenuItem { title: "Analyze Missing Metadata"; activated => { root.editing_path = false; } }
+            MenuItem { title: "&Analyze Selected"; activated => { root.editing_path = false; } }
+            MenuItem { title: "Analyze &Folder"; activated => { root.editing_path = false; } }
+            MenuItem { title: "Analyze &Missing Metadata"; activated => { root.editing_path = false; } }
             MenuSeparator {}
-            MenuItem { title: "Clear Results"; activated => { root.editing_path = false; } }
+            MenuItem { title: "&Clear Results"; activated => { root.editing_path = false; } }
         }
 
         Menu {
-            title: "Settings";
+            title: "&Settings";
 
-            MenuItem { title: "Date Source Priority..."; activated => { root.editing_path = false; } }
-            MenuItem { title: "Filename Patterns..."; activated => { root.editing_path = false; } }
+            MenuItem { title: "&Date Source Priority..."; activated => { root.editing_path = false; } }
+            MenuItem { title: "&Filename Patterns..."; activated => { root.editing_path = false; } }
             MenuSeparator {}
-            MenuItem { title: "Write Software Tag"; checkable: true; checked: true; activated => { root.editing_path = false; } }
-            MenuItem { title: "Rename With _SH148 Suffix"; checkable: true; activated => { root.editing_path = false; } }
-            MenuItem { title: "Backup Before Changes"; checkable: true; checked: true; activated => { root.editing_path = false; } }
+            MenuItem { title: "&Write Software Tag"; checkable: true; checked: true; activated => { root.editing_path = false; } }
+            MenuItem { title: "&Rename With _SH148 Suffix"; checkable: true; activated => { root.editing_path = false; } }
+            MenuItem { title: "&Backup Before Changes"; checkable: true; checked: true; activated => { root.editing_path = false; } }
         }
 
         Menu {
-            title: "Help";
+            title: "&Help";
 
-            MenuItem { title: "About"; activated => { root.editing_path = false; } }
+            MenuItem { title: "&About"; activated => { root.editing_path = false; } }
         }
     }
 
@@ -225,10 +239,61 @@ export component MainWindow inherits Window {
         }
     }
 
-    Rectangle {
+    content_focus := FocusScope {
         y: 41px;
         width: 100%;
         height: root.height - 67px;
+
+        init => {
+            self.focus();
+        }
+
+        key-pressed(event) => {
+            if (root.message_visible || root.confirm_delete_visible) {
+                return reject;
+            }
+
+            if (event.text == Key.F5) {
+                root.editing_path = false;
+                root.reload();
+                return accept;
+            }
+
+            if ((event.text == "O" || event.text == "o") && event.modifiers.control && event.modifiers.shift) {
+                root.editing_path = true;
+                return accept;
+            }
+
+            if ((event.text == "R" || event.text == "r") && event.modifiers.alt && event.modifiers.shift) {
+                root.editing_path = false;
+                root.open_in_explorer();
+                return accept;
+            }
+
+            if ((event.text == "S" || event.text == "s") && event.modifiers.control) {
+                root.editing_path = false;
+                root.apply_changes();
+                return accept;
+            }
+
+            if ((event.text == "R" || event.text == "r") && event.modifiers.control && !event.modifiers.shift) {
+                root.editing_path = false;
+                root.revert_changes();
+                return accept;
+            }
+
+            if ((event.text == "W" || event.text == "w") && event.modifiers.control) {
+                root.editing_path = false;
+                root.exit_app();
+                return accept;
+            }
+
+            reject
+        }
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
 
         Rectangle {
             x: 0px;
@@ -286,6 +351,29 @@ export component MainWindow inherits Window {
                 rename_requested(index) => {
                     root.selected_index = index;
                     metadata_panel.focus_file_name();
+                }
+                reload_requested() => {
+                    root.editing_path = false;
+                    root.reload();
+                }
+                open_folder_requested() => {
+                    root.editing_path = true;
+                }
+                open_in_file_manager_requested() => {
+                    root.editing_path = false;
+                    root.open_in_explorer();
+                }
+                apply_requested() => {
+                    root.editing_path = false;
+                    root.apply_changes();
+                }
+                revert_requested() => {
+                    root.editing_path = false;
+                    root.revert_changes();
+                }
+                exit_requested() => {
+                    root.editing_path = false;
+                    root.exit_app();
                 }
             }
         }
@@ -381,6 +469,27 @@ export component MainWindow inherits Window {
                 metadata_edited() => {
                     root.metadata_value_edited();
                 }
+                shortcut_requested(action) => {
+                    if (action == "refresh") {
+                        root.editing_path = false;
+                        root.reload();
+                    } else if (action == "open-folder") {
+                        root.editing_path = true;
+                    } else if (action == "open-explorer") {
+                        root.editing_path = false;
+                        root.open_in_explorer();
+                    } else if (action == "save") {
+                        root.editing_path = false;
+                        root.apply_changes();
+                    } else if (action == "revert") {
+                        root.editing_path = false;
+                        root.revert_changes();
+                    } else if (action == "exit") {
+                        root.editing_path = false;
+                        root.exit_app();
+                    }
+                }
+        }
         }
     }
 
@@ -388,6 +497,51 @@ export component MainWindow inherits Window {
         width: 100%;
         height: 100%;
         background: #00000066;
+        forward-focus: modal_focus;
+
+        init => {
+            modal_focus.focus();
+        }
+
+        modal_focus := FocusScope {
+            x: 0px;
+            y: 0px;
+            width: 0px;
+            height: 0px;
+
+            capture-key-pressed(event) => {
+                if (!root.confirm_delete_visible && (event.text == Key.Return || event.text == " ")) {
+                    root.message_visible = false;
+                    root.message_title = "Operation Failed";
+                    root.message_text = "";
+                    return accept;
+                }
+
+                if (!root.confirm_delete_visible && event.text == Key.Escape) {
+                    root.message_visible = false;
+                    root.message_title = "Operation Failed";
+                    root.message_text = "";
+                    return accept;
+                }
+
+                if (root.confirm_delete_visible && event.text == Key.Escape) {
+                    root.confirm_delete_visible = false;
+                    root.message_title = "Operation Failed";
+                    root.message_text = "";
+                    return accept;
+                }
+
+                if (root.confirm_delete_visible && event.text == Key.Return) {
+                    root.confirm_delete_visible = false;
+                    root.delete_file();
+                    root.message_title = "Operation Failed";
+                    root.message_text = "";
+                    return accept;
+                }
+
+                accept
+            }
+        }
 
         TouchArea {
             width: 100%;

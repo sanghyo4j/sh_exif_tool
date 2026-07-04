@@ -9,8 +9,10 @@ use std::time::{Duration, Instant, SystemTime};
 use self::app::SlintApp;
 use crate::exif::{
     extract_datetime_from_filename,
+    is_generated_new_exif_path,
     read_exif_metadata,
     rewrite_basic_exif_metadata,
+    rewrite_generated_basic_exif_metadata,
     write_aperture,
     write_artist,
     write_camera_make,
@@ -27,7 +29,7 @@ use crate::exif::{
     write_taken_date,
     ExifMetadata,
 };
-use crate::fs::{move_file_to_recycle_bin, rename_entry, save_file_copy, set_file_times};
+use crate::fs::{move_file_to_recycle_bin, open_in_file_manager, rename_entry, save_file_copy, set_file_times};
 use crate::GuiRunner;
 
 slint::include_modules!();
@@ -272,6 +274,13 @@ impl GuiRunner for SlintRunner {
             }
         });
 
+        let ui_handle = ui.as_weak();
+        ui.on_exit_app(move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                let _ = ui.hide();
+            }
+        });
+
         let app_handle = app.clone();
         let refresh = refresh_ui.clone();
         let ui_handle = ui.as_weak();
@@ -334,6 +343,21 @@ impl GuiRunner for SlintRunner {
                 match result {
                     Ok(_) => refresh(None),
                     Err(err) => show_message(&ui, "Delete Failed", &err),
+                }
+            }
+        });
+
+        let app_handle = app.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_open_in_explorer(move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                let path = {
+                    let app = app_handle.borrow();
+                    PathBuf::from(&app.current_path)
+                };
+
+                if let Err(err) = open_in_file_manager(&path) {
+                    show_message(&ui, "Open in Explorer Failed", &err);
                 }
             }
         });
@@ -432,6 +456,54 @@ impl GuiRunner for SlintRunner {
                             "EXIF File Created",
                             &format!("Created {}", new_path.display()),
                         );
+                        return;
+                    }
+
+                    if is_generated_new_exif_path(path) {
+                        let metadata = collect_current_exif_metadata(&ui);
+                        if let Err(err) = rewrite_generated_basic_exif_metadata(path, &metadata) {
+                            show_message(&ui, "Apply Failed", &err);
+                            return;
+                        }
+
+                        if ui.get_selected_created_dirty() || ui.get_selected_modified_dirty() {
+                            let created_time = if ui.get_selected_created_dirty() {
+                                match parse_timestamp(ui.get_selected_created().as_str()) {
+                                    Ok(value) => Some(value),
+                                    Err(err) => {
+                                        show_message(&ui, "Apply Failed", &err);
+                                        return;
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+
+                            let modified_time = if ui.get_selected_modified_dirty() {
+                                match parse_timestamp(ui.get_selected_modified().as_str()) {
+                                    Ok(value) => Some(value),
+                                    Err(err) => {
+                                        show_message(&ui, "Apply Failed", &err);
+                                        return;
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+
+                            if let Err(err) = set_file_times(path, created_time, modified_time) {
+                                show_message(&ui, "Apply Failed", &err);
+                                return;
+                            }
+                        }
+
+                        store_current_as_original(&ui);
+                        update_metadata_dirty_state(&ui);
+                        {
+                            let mut app = app_handle.borrow_mut();
+                            app.load_folder();
+                        }
+                        refresh(selected_path);
                         return;
                     }
                 }
