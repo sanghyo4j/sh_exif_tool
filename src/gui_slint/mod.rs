@@ -10,6 +10,7 @@ use self::app::SlintApp;
 use crate::exif::{
     extract_datetime_from_filename,
     read_exif_metadata,
+    rewrite_basic_exif_metadata,
     write_aperture,
     write_artist,
     write_camera_make,
@@ -17,10 +18,10 @@ use crate::exif::{
     write_color_space,
     write_flash_fired,
     write_focal_length,
+    write_iso_speed,
     write_lens_model,
     write_metering_mode,
     write_orientation,
-    write_iso_speed,
     write_shutter_speed,
     write_software,
     write_taken_date,
@@ -370,8 +371,73 @@ impl GuiRunner for SlintRunner {
                     app.path_for_ui_index(ui.get_selected_index())
                 };
 
+                let apply_path = selected_path.clone();
+                if has_exif_metadata_changes(&ui) {
+                    let Some(path) = apply_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+
+                    let current_metadata = read_exif_metadata(path);
+                    if !current_metadata.has_exif {
+                        let metadata = collect_current_exif_metadata(&ui);
+                        let new_path = match rewrite_basic_exif_metadata(path, &metadata) {
+                            Ok(path) => path,
+                            Err(err) => {
+                                show_message(&ui, "Apply Failed", &err);
+                                return;
+                            }
+                        };
+
+                        if ui.get_selected_created_dirty() || ui.get_selected_modified_dirty() {
+                            let created_time = if ui.get_selected_created_dirty() {
+                                match parse_timestamp(ui.get_selected_created().as_str()) {
+                                    Ok(value) => Some(value),
+                                    Err(err) => {
+                                        show_message(&ui, "Apply Failed", &err);
+                                        return;
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+
+                            let modified_time = if ui.get_selected_modified_dirty() {
+                                match parse_timestamp(ui.get_selected_modified().as_str()) {
+                                    Ok(value) => Some(value),
+                                    Err(err) => {
+                                        show_message(&ui, "Apply Failed", &err);
+                                        return;
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+
+                            if let Err(err) = set_file_times(&new_path, created_time, modified_time) {
+                                show_message(&ui, "Apply Failed", &err);
+                                return;
+                            }
+                        }
+
+                        store_current_as_original(&ui);
+                        update_metadata_dirty_state(&ui);
+                        {
+                            let mut app = app_handle.borrow_mut();
+                            app.load_folder();
+                        }
+                        refresh(Some(new_path.clone()));
+                        show_message(
+                            &ui,
+                            "EXIF File Created",
+                            &format!("Created {}", new_path.display()),
+                        );
+                        return;
+                    }
+                }
+
                 if ui.get_taken_date_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -382,7 +448,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_camera_make_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -393,7 +459,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_camera_model_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -404,7 +470,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_lens_model_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -415,7 +481,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_software_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -426,7 +492,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_artist_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -437,7 +503,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_shutter_speed_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -448,7 +514,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_aperture_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -459,7 +525,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_iso_speed_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -470,7 +536,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_focal_length_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -481,7 +547,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_flash_fired_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -492,7 +558,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_metering_mode_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -503,7 +569,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_orientation_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -514,7 +580,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_color_space_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -525,7 +591,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if ui.get_selected_created_dirty() || ui.get_selected_modified_dirty() {
-                    let Some(path) = selected_path.as_ref() else {
+                    let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
@@ -665,6 +731,48 @@ fn show_message(ui: &MainWindow, title: &str, message: &str) {
     ui.set_message_title(title.into());
     ui.set_message_text(message.into());
     ui.set_message_visible(true);
+}
+
+fn has_exif_metadata_changes(ui: &MainWindow) -> bool {
+    ui.get_taken_date_dirty()
+        || ui.get_camera_make_dirty()
+        || ui.get_camera_model_dirty()
+        || ui.get_lens_model_dirty()
+        || ui.get_software_dirty()
+        || ui.get_artist_dirty()
+        || ui.get_shutter_speed_dirty()
+        || ui.get_aperture_dirty()
+        || ui.get_iso_speed_dirty()
+        || ui.get_focal_length_dirty()
+        || ui.get_flash_fired_dirty()
+        || ui.get_metering_mode_dirty()
+        || ui.get_orientation_dirty()
+        || ui.get_color_space_dirty()
+}
+
+fn collect_current_exif_metadata(ui: &MainWindow) -> ExifMetadata {
+    ExifMetadata {
+        has_exif: true,
+        taken_date: ui.get_taken_date().to_string(),
+        camera_make: ui.get_camera_make().to_string(),
+        camera_model: ui.get_camera_model().to_string(),
+        lens_model: ui.get_lens_model().to_string(),
+        software: ui.get_software().to_string(),
+        artist: ui.get_artist().to_string(),
+        shutter_speed: ui.get_shutter_speed().to_string(),
+        aperture: ui.get_aperture().to_string(),
+        iso_speed: ui.get_iso_speed().to_string(),
+        focal_length: ui.get_focal_length().to_string(),
+        flash_fired: ui.get_flash_fired().to_string(),
+        metering_mode: ui.get_metering_mode().to_string(),
+        image_width: ui.get_image_width().to_string(),
+        image_height: ui.get_image_height().to_string(),
+        orientation: ui.get_orientation().to_string(),
+        color_space: ui.get_color_space().to_string(),
+        gps_latitude: ui.get_gps_latitude().to_string(),
+        gps_longitude: ui.get_gps_longitude().to_string(),
+        gps_altitude: ui.get_gps_altitude().to_string(),
+    }
 }
 
 fn parse_timestamp(value: &str) -> Result<SystemTime, String> {

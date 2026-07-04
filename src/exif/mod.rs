@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use chrono::{NaiveDate, NaiveDateTime};
 
 const DISPLAY_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
@@ -186,20 +186,6 @@ fn write_exif_short_tag(path: &Path, tags: &[u16], value: u16) -> Result<(), Str
     })
 }
 
-fn write_exif_long_tag(path: &Path, tags: &[u16], value: u32) -> Result<(), String> {
-    write_exif_tag_values(path, tags, |entry| {
-        if entry.field_type == 4 && entry.count == 1 {
-            let bytes = match entry.endian {
-                Endian::Little => value.to_le_bytes(),
-                Endian::Big => value.to_be_bytes(),
-            };
-            Some(bytes.to_vec())
-        } else {
-            None
-        }
-    })
-}
-
 fn write_exif_rational_tag(path: &Path, tags: &[u16], numerator: u32, denominator: u32) -> Result<(), String> {
     write_exif_tag_values(path, tags, |entry| {
         if entry.field_type == 5 && entry.count == 1 {
@@ -282,8 +268,20 @@ pub fn write_orientation(path: &Path, value: &str) -> Result<(), String> {
 }
 
 pub fn write_color_space(path: &Path, value: &str) -> Result<(), String> {
-    let color_space = parse_u16_value(value)?;
+    let color_space = parse_color_space_value(value)?;
     write_exif_short_tag(path, &[0xa001], color_space)
+}
+
+pub fn rewrite_basic_exif_metadata(path: &Path, metadata: &ExifMetadata) -> Result<PathBuf, String> {
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    if find_exif_tiff_start(&bytes).is_some() {
+        return Err("Refusing to rewrite an existing EXIF structure. Existing EXIF files only support editing tags that are already present.".to_string());
+    }
+    let exif_segment = build_basic_exif_app1(metadata)?;
+    let updated = replace_or_insert_exif_app1(&bytes, &exif_segment)?;
+    let output_path = next_new_exif_output_path(path)?;
+    fs::write(&output_path, updated).map_err(|err| err.to_string())?;
+    Ok(output_path)
 }
 
 fn parse_u16_value(value: &str) -> Result<u16, String> {
@@ -291,6 +289,13 @@ fn parse_u16_value(value: &str) -> Result<u16, String> {
         .trim()
         .parse::<u16>()
         .map_err(|_| "Expected an integer value.".to_string())
+}
+
+fn parse_optional_u16_value(value: &str) -> Result<Option<u16>, String> {
+    if is_empty_metadata_value(value) {
+        return Ok(None);
+    }
+    parse_u16_value(value).map(Some)
 }
 
 fn parse_exif_rational_value(value: &str) -> Result<(u32, u32), String> {
@@ -347,6 +352,13 @@ fn parse_flash_value(value: &str) -> Result<u16, String> {
     parse_u16_value(value)
 }
 
+fn parse_optional_flash_value(value: &str) -> Result<Option<u16>, String> {
+    if is_empty_metadata_value(value) {
+        return Ok(None);
+    }
+    parse_flash_value(value).map(Some)
+}
+
 fn parse_metering_mode_value(value: &str) -> Result<u16, String> {
     let lowered = value.trim().to_lowercase();
     let mode = match lowered.as_str() {
@@ -360,6 +372,383 @@ fn parse_metering_mode_value(value: &str) -> Result<u16, String> {
         _ => parse_u16_value(value)?,
     };
     Ok(mode)
+}
+
+fn parse_optional_metering_mode_value(value: &str) -> Result<Option<u16>, String> {
+    if is_empty_metadata_value(value) {
+        return Ok(None);
+    }
+    parse_metering_mode_value(value).map(Some)
+}
+
+fn parse_orientation_value(value: &str) -> Result<u16, String> {
+    let lowered = value.trim().to_lowercase();
+    let orientation = match lowered.as_str() {
+        "normal" => 1,
+        "mirrored horizontal" => 2,
+        "rotated 180" => 3,
+        "mirrored vertical" => 4,
+        "mirrored horizontal rotated 270" => 5,
+        "rotated 90" => 6,
+        "mirrored horizontal rotated 90" => 7,
+        "rotated 270" => 8,
+        _ => parse_u16_value(value)?,
+    };
+    Ok(orientation)
+}
+
+fn parse_optional_orientation_value(value: &str) -> Result<Option<u16>, String> {
+    if is_empty_metadata_value(value) {
+        return Ok(None);
+    }
+    parse_orientation_value(value).map(Some)
+}
+
+fn parse_color_space_value(value: &str) -> Result<u16, String> {
+    let lowered = value.trim().to_lowercase();
+    let color_space = match lowered.as_str() {
+        "srgb" => 1,
+        "uncalibrated" => 0xffff,
+        _ => parse_u16_value(value)?,
+    };
+    Ok(color_space)
+}
+
+fn parse_optional_color_space_value(value: &str) -> Result<Option<u16>, String> {
+    if is_empty_metadata_value(value) {
+        return Ok(None);
+    }
+    parse_color_space_value(value).map(Some)
+}
+
+fn build_basic_exif_app1(metadata: &ExifMetadata) -> Result<Vec<u8>, String> {
+    let tiff = build_basic_tiff(metadata)?;
+    let segment_len = tiff
+        .len()
+        .checked_add(8)
+        .ok_or_else(|| "EXIF segment is too large.".to_string())?;
+    if segment_len > u16::MAX as usize {
+        return Err("EXIF segment is too large for JPEG APP1.".to_string());
+    }
+
+    let mut segment = Vec::with_capacity(segment_len + 2);
+    segment.extend_from_slice(&[0xff, 0xe1]);
+    segment.extend_from_slice(&(segment_len as u16).to_be_bytes());
+    segment.extend_from_slice(b"Exif\0\0");
+    segment.extend_from_slice(&tiff);
+    Ok(segment)
+}
+
+fn build_basic_tiff(metadata: &ExifMetadata) -> Result<Vec<u8>, String> {
+    let mut ifd0 = TiffIfdBuilder::new();
+    let mut exif_ifd = TiffIfdBuilder::new();
+
+    ifd0.add_ascii(0x010f, &metadata.camera_make);
+    ifd0.add_ascii(0x0110, &metadata.camera_model);
+    if let Some(orientation) = parse_optional_orientation_value(&metadata.orientation)? {
+        ifd0.add_short(0x0112, orientation);
+    }
+    ifd0.add_ascii(0x0131, &metadata.software);
+    if let Some(datetime) = optional_exif_datetime(&metadata.taken_date)? {
+        ifd0.add_ascii_value(0x0132, datetime.clone());
+        exif_ifd.add_ascii_value(0x9003, datetime.clone());
+        exif_ifd.add_ascii_value(0x9004, datetime);
+    }
+    ifd0.add_ascii(0x013b, &metadata.artist);
+
+    if let Some((num, den)) = parse_optional_rational_value(&metadata.shutter_speed)? {
+        exif_ifd.add_rational(0x829a, num, den);
+    }
+    if let Some((num, den)) = parse_optional_aperture_value(&metadata.aperture)? {
+        exif_ifd.add_rational(0x829d, num, den);
+    }
+    if let Some(iso) = parse_optional_u16_value(&metadata.iso_speed)? {
+        exif_ifd.add_short(0x8827, iso);
+    }
+    if let Some(mode) = parse_optional_metering_mode_value(&metadata.metering_mode)? {
+        exif_ifd.add_short(0x9207, mode);
+    }
+    if let Some(flash) = parse_optional_flash_value(&metadata.flash_fired)? {
+        exif_ifd.add_short(0x9209, flash);
+    }
+    if let Some((num, den)) = parse_optional_rational_value(&metadata.focal_length)? {
+        exif_ifd.add_rational(0x920a, num, den);
+    }
+    if let Some(color_space) = parse_optional_color_space_value(&metadata.color_space)? {
+        exif_ifd.add_short(0xa001, color_space);
+    }
+    exif_ifd.add_ascii(0xa434, &metadata.lens_model);
+
+    let include_exif_ifd = !exif_ifd.entries.is_empty();
+    if include_exif_ifd {
+        ifd0.add_long(0x8769, 0);
+    }
+
+    let ifd0_count = ifd0.entries.len();
+    let ifd0_size = 2 + ifd0_count * 12 + 4;
+    let exif_ifd_offset = 8 + ifd0_size + ifd0.extra_len();
+    if include_exif_ifd {
+        ifd0.set_long_value(0x8769, exif_ifd_offset as u32);
+    }
+
+    let mut tiff = Vec::new();
+    tiff.extend_from_slice(b"II");
+    tiff.extend_from_slice(&42u16.to_le_bytes());
+    tiff.extend_from_slice(&8u32.to_le_bytes());
+    ifd0.write_to(&mut tiff, 8);
+
+    if include_exif_ifd {
+        while tiff.len() < exif_ifd_offset {
+            tiff.push(0);
+        }
+        exif_ifd.write_to(&mut tiff, exif_ifd_offset);
+    }
+
+    Ok(tiff)
+}
+
+fn replace_or_insert_exif_app1(bytes: &[u8], exif_segment: &[u8]) -> Result<Vec<u8>, String> {
+    if bytes.len() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8 {
+        return Err("Only JPEG files are supported for EXIF creation.".to_string());
+    }
+
+    if let Some((start, end)) = find_exif_app1_range(bytes) {
+        let mut updated = Vec::with_capacity(bytes.len() - (end - start) + exif_segment.len());
+        updated.extend_from_slice(&bytes[..start]);
+        updated.extend_from_slice(exif_segment);
+        updated.extend_from_slice(&bytes[end..]);
+        return Ok(updated);
+    }
+
+    let insert_pos = jpeg_exif_insert_pos(bytes)?;
+    let mut updated = Vec::with_capacity(bytes.len() + exif_segment.len());
+    updated.extend_from_slice(&bytes[..insert_pos]);
+    updated.extend_from_slice(exif_segment);
+    updated.extend_from_slice(&bytes[insert_pos..]);
+    Ok(updated)
+}
+
+fn find_exif_app1_range(bytes: &[u8]) -> Option<(usize, usize)> {
+    if bytes.len() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8 {
+        return None;
+    }
+
+    let mut pos = 2usize;
+    while pos + 4 <= bytes.len() {
+        if bytes[pos] != 0xff {
+            return None;
+        }
+
+        let marker = bytes[pos + 1];
+        if marker == 0xda || marker == 0xd9 {
+            return None;
+        }
+
+        let len = u16::from_be_bytes([bytes[pos + 2], bytes[pos + 3]]) as usize;
+        if len < 2 || pos + 2 + len > bytes.len() {
+            return None;
+        }
+
+        let segment_start = pos + 4;
+        let segment_end = pos + 2 + len;
+        if marker == 0xe1 && bytes.get(segment_start..segment_end)?.starts_with(b"Exif\0\0") {
+            return Some((pos, segment_end));
+        }
+
+        pos = segment_end;
+    }
+
+    None
+}
+
+fn jpeg_exif_insert_pos(bytes: &[u8]) -> Result<usize, String> {
+    let mut pos = 2usize;
+    while pos + 4 <= bytes.len() {
+        if bytes[pos] != 0xff {
+            return Ok(2);
+        }
+
+        let marker = bytes[pos + 1];
+        if marker == 0xda || marker == 0xd9 {
+            return Ok(pos);
+        }
+
+        let len = u16::from_be_bytes([bytes[pos + 2], bytes[pos + 3]]) as usize;
+        if len < 2 || pos + 2 + len > bytes.len() {
+            return Err("Invalid JPEG segment length.".to_string());
+        }
+
+        if marker == 0xe0 {
+            pos += 2 + len;
+            continue;
+        }
+
+        return Ok(pos);
+    }
+
+    Ok(2)
+}
+
+fn next_new_exif_output_path(path: &Path) -> Result<PathBuf, String> {
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Invalid file name.".to_string())?;
+    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("jpg");
+
+    for index in 0..1000 {
+        let suffix = if index == 0 {
+            "_new_exif_tag".to_string()
+        } else {
+            format!("_new_exif_tag_{index}")
+        };
+        let candidate = parent.join(format!("{stem}{suffix}.{extension}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err("Unable to create a unique EXIF output file name.".to_string())
+}
+
+fn optional_exif_datetime(value: &str) -> Result<Option<String>, String> {
+    if is_empty_metadata_value(value) {
+        return Ok(None);
+    }
+    display_datetime_to_exif(value).map(Some)
+}
+
+fn parse_optional_rational_value(value: &str) -> Result<Option<(u32, u32)>, String> {
+    if is_empty_metadata_value(value) {
+        return Ok(None);
+    }
+    parse_exif_rational_value(value).map(Some)
+}
+
+fn parse_optional_aperture_value(value: &str) -> Result<Option<(u32, u32)>, String> {
+    if is_empty_metadata_value(value) {
+        return Ok(None);
+    }
+    parse_aperture_value(value).map(Some)
+}
+
+fn is_empty_metadata_value(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty() || trimmed == "N/A" || trimmed == "-"
+}
+
+struct TiffIfdBuilder {
+    entries: Vec<TiffEntryBuilder>,
+}
+
+impl TiffIfdBuilder {
+    fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    fn add_ascii(&mut self, tag: u16, value: &str) {
+        if is_empty_metadata_value(value) {
+            return;
+        }
+        self.add_ascii_value(tag, value.trim().to_string());
+    }
+
+    fn add_ascii_value(&mut self, tag: u16, value: String) {
+        let mut bytes = value.into_bytes();
+        bytes.push(0);
+        self.entries.push(TiffEntryBuilder {
+            tag,
+            field_type: 2,
+            count: bytes.len() as u32,
+            value: bytes,
+        });
+    }
+
+    fn add_short(&mut self, tag: u16, value: u16) {
+        self.entries.push(TiffEntryBuilder {
+            tag,
+            field_type: 3,
+            count: 1,
+            value: value.to_le_bytes().to_vec(),
+        });
+    }
+
+    fn add_long(&mut self, tag: u16, value: u32) {
+        self.entries.push(TiffEntryBuilder {
+            tag,
+            field_type: 4,
+            count: 1,
+            value: value.to_le_bytes().to_vec(),
+        });
+    }
+
+    fn add_rational(&mut self, tag: u16, numerator: u32, denominator: u32) {
+        let mut value = Vec::with_capacity(8);
+        value.extend_from_slice(&numerator.to_le_bytes());
+        value.extend_from_slice(&denominator.to_le_bytes());
+        self.entries.push(TiffEntryBuilder {
+            tag,
+            field_type: 5,
+            count: 1,
+            value,
+        });
+    }
+
+    fn set_long_value(&mut self, tag: u16, value: u32) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.tag == tag) {
+            entry.value = value.to_le_bytes().to_vec();
+        }
+    }
+
+    fn extra_len(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.value.len() > 4)
+            .map(|entry| entry.value.len())
+            .sum()
+    }
+
+    fn write_to(&mut self, tiff: &mut Vec<u8>, ifd_offset: usize) {
+        self.entries.sort_by_key(|entry| entry.tag);
+        let count = self.entries.len();
+        let entries_start = ifd_offset + 2;
+        let next_ifd_offset = entries_start + count * 12;
+        let mut data_offset = next_ifd_offset + 4;
+
+        while tiff.len() < ifd_offset {
+            tiff.push(0);
+        }
+
+        tiff.extend_from_slice(&(count as u16).to_le_bytes());
+        let mut extra_data = Vec::new();
+
+        for entry in &self.entries {
+            tiff.extend_from_slice(&entry.tag.to_le_bytes());
+            tiff.extend_from_slice(&entry.field_type.to_le_bytes());
+            tiff.extend_from_slice(&entry.count.to_le_bytes());
+
+            if entry.value.len() <= 4 {
+                let mut inline = [0u8; 4];
+                inline[..entry.value.len()].copy_from_slice(&entry.value);
+                tiff.extend_from_slice(&inline);
+            } else {
+                tiff.extend_from_slice(&(data_offset as u32).to_le_bytes());
+                extra_data.extend_from_slice(&entry.value);
+                data_offset += entry.value.len();
+            }
+        }
+
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        tiff.extend_from_slice(&extra_data);
+    }
+}
+
+struct TiffEntryBuilder {
+    tag: u16,
+    field_type: u16,
+    count: u32,
+    value: Vec<u8>,
 }
 
 pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
@@ -868,7 +1257,7 @@ mod tests {
         tiff.extend_from_slice(&8u32.to_le_bytes());
 
         let ifd0_offset = 8usize;
-        let make_offset = 32u32;
+        let make_offset = 26u32;
 
         assert_eq!(tiff.len(), ifd0_offset);
         tiff.extend_from_slice(&1u16.to_le_bytes());
@@ -900,7 +1289,7 @@ mod tests {
         tiff.extend_from_slice(&8u32.to_le_bytes());
 
         let ifd0_offset = 8usize;
-        let model_offset = 32u32;
+        let model_offset = 26u32;
 
         assert_eq!(tiff.len(), ifd0_offset);
         tiff.extend_from_slice(&1u16.to_le_bytes());
@@ -1054,6 +1443,91 @@ mod tests {
 
         let metadata = read_exif_metadata(&path);
         assert_eq!(metadata.lens_model, "RF24-70mm");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn creates_new_exif_file_when_jpeg_has_no_exif() {
+        let path = std::env::temp_dir().join(format!(
+            "sh_exif_tool_no_exif_test_{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+
+        let metadata = ExifMetadata {
+            has_exif: true,
+            taken_date: "2026-05-09 12:34:56".to_string(),
+            camera_make: "Sony".to_string(),
+            camera_model: "A7C".to_string(),
+            lens_model: "FE 35mm F1.8".to_string(),
+            software: "sh_exif_tool".to_string(),
+            artist: "tester".to_string(),
+            shutter_speed: "1/125".to_string(),
+            aperture: "f/2.8".to_string(),
+            iso_speed: "400".to_string(),
+            focal_length: "35 mm".to_string(),
+            flash_fired: "No".to_string(),
+            metering_mode: "Pattern".to_string(),
+            image_width: String::new(),
+            image_height: String::new(),
+            orientation: "Normal".to_string(),
+            color_space: "sRGB".to_string(),
+            gps_latitude: String::new(),
+            gps_longitude: String::new(),
+            gps_altitude: String::new(),
+        };
+
+        let output_path = rewrite_basic_exif_metadata(&path, &metadata).unwrap();
+
+        assert!(path.exists());
+        assert!(output_path.exists());
+        assert_ne!(path, output_path);
+        assert!(!read_exif_metadata(&path).has_exif);
+
+        let written = read_exif_metadata(&output_path);
+        assert!(written.has_exif);
+        assert_eq!(written.taken_date, "2026-05-09 12:34:56");
+        assert_eq!(written.camera_make, "Sony");
+        assert_eq!(written.camera_model, "A7C");
+        assert_eq!(written.lens_model, "FE 35mm F1.8");
+        assert_eq!(written.iso_speed, "400");
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn refuses_to_add_missing_tag_to_existing_exif() {
+        let path = std::env::temp_dir().join(format!(
+            "sh_exif_tool_missing_tag_test_{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, minimal_jpeg_with_camera_make("Canon")).unwrap();
+
+        let err = write_lens_model(&path, "RF24-70mm").unwrap_err();
+
+        assert!(err.contains("does not create missing tags"));
+        assert_eq!(read_exif_metadata(&path).camera_make, "Canon");
+        assert_eq!(read_exif_metadata(&path).lens_model, "");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn refuses_to_rewrite_existing_exif_structure() {
+        let path = std::env::temp_dir().join(format!(
+            "sh_exif_tool_existing_exif_rewrite_test_{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, minimal_jpeg_with_camera_make("Canon")).unwrap();
+
+        let mut metadata = ExifMetadata::default();
+        metadata.camera_make = "Sony".to_string();
+        let err = rewrite_basic_exif_metadata(&path, &metadata).unwrap_err();
+
+        assert!(err.contains("Refusing to rewrite an existing EXIF structure"));
+        assert_eq!(read_exif_metadata(&path).camera_make, "Canon");
 
         let _ = std::fs::remove_file(path);
     }
