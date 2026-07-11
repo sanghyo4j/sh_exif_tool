@@ -1,36 +1,66 @@
-import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
 import { SectionHeader, EditableInfoRow, ReadOnlyCheckRow } from "info_row.slint";
 import { FontSettings } from "../theme.slint";
 
-component TabButton inherits Rectangle {
+component ToolButton inherits Rectangle {
     in property <string> title;
-    in property <bool> active;
     callback clicked();
 
-    width: 88px;
+    width: 78px;
     height: 24px;
-    background: active ? #ffffff : area.has-hover ? #e8f0f5 : #edf3f7;
+    background: area.has-hover ? #e8f0f5 : #ffffff;
     border-width: 1px;
-    border-color: active ? #b8c6cf : #cbd6dd;
+    border-color: area.has-hover ? #8aa8ba : #b8c6cf;
     border-radius: 2px;
 
-    if active: Rectangle {
-        x: 0px;
-        y: 0px;
-        width: 100%;
-        height: 3px;
-        background: #315a72;
-    }
-
     Text {
-        width: 100%;
+        x: 9px;
+        width: parent.width - 24px;
         height: 100%;
         text: root.title;
         font-size: max(9pt, (FontSettings.font_size_pt - 1) * 1pt);
-        color: root.active ? #1f3440 : #667781;
-        font-weight: root.active ? 700 : 500;
+        color: #1f3440;
+        font-weight: 700;
+        horizontal-alignment: left;
+        vertical-alignment: center;
+    }
+
+    Text {
+        x: parent.width - 18px;
+        width: 14px;
+        height: 100%;
+        text: "v";
+        font-size: max(8pt, (FontSettings.font_size_pt - 2) * 1pt);
+        color: #52626d;
         horizontal-alignment: center;
         vertical-alignment: center;
+    }
+
+    area := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.clicked(); }
+    }
+}
+
+component MenuRow inherits Rectangle {
+    in property <string> title;
+    in property <bool> danger: false;
+    callback clicked();
+
+    width: 220px;
+    height: 30px;
+    background: area.has-hover ? (danger ? #fff1f1 : #eaf4ff) : #ffffff;
+
+    Text {
+        x: 12px;
+        width: parent.width - 24px;
+        height: 100%;
+        text: root.title;
+        font-size: FontSettings.font_size_pt * 1pt;
+        color: root.danger ? #b42318 : #1f2933;
+        vertical-alignment: center;
+        overflow: elide;
     }
 
     area := TouchArea {
@@ -126,10 +156,10 @@ export component MetadataPanel inherits Rectangle {
     callback metadata_edited();
     callback shortcut_requested(string);
 
-    property <int> selected_tab: 0;
+    property <bool> tools_menu_visible: false;
 
     public function focus_file_name() {
-        root.selected_tab = 0;
+        file_name_row.focus_input();
     }
 
     public function clear_editor_focus() {
@@ -162,16 +192,26 @@ export component MetadataPanel inherits Rectangle {
                 background: #cfdbe2;
             }
 
-            HorizontalBox {
-                x: 8px;
-                y: 4px;
-                width: parent.width - 16px;
-                height: 24px;
-                spacing: 4px;
+            Text {
+                x: 12px;
+                width: parent.width - 104px;
+                height: 100%;
+                text: "Metadata";
+                font-size: max(10pt, FontSettings.font_size_pt * 1pt);
+                font-weight: 800;
+                color: #203d4e;
+                vertical-alignment: center;
+                overflow: elide;
+            }
 
-                TabButton { title: "Metadata"; active: root.selected_tab == 0; clicked => { root.selected_tab = 0; } }
-                TabButton { title: "Advanced"; active: root.selected_tab == 1; clicked => { root.selected_tab = 1; } }
-                Rectangle { horizontal-stretch: 1; }
+            ToolButton {
+                x: parent.width - 90px;
+                y: 4px;
+                title: "Tools";
+                clicked => {
+                    root.tools_menu_visible = !root.tools_menu_visible;
+                    focus_sink.focus();
+                }
             }
         }
 
@@ -179,7 +219,7 @@ export component MetadataPanel inherits Rectangle {
             vertical-stretch: 1;
             background: #fcfcfc;
 
-            if root.selected_tab == 0: ScrollView {
+            ScrollView {
                 width: 100%;
                 height: 100%;
                 vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
@@ -194,7 +234,7 @@ export component MetadataPanel inherits Rectangle {
                     spacing: 0px;
 
                     SectionHeader { title: "FILE"; }
-                    EditableInfoRow { label: "File Name"; value <=> root.selected_name; dirty <=> root.selected_name_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    file_name_row := EditableInfoRow { label: "File Name"; value <=> root.selected_name; dirty <=> root.selected_name_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     EditableInfoRow { label: "File Created"; value <=> root.selected_created; dirty <=> root.selected_created_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     EditableInfoRow { label: "File Modified"; value <=> root.selected_modified; dirty <=> root.selected_modified_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     ReadOnlyCheckRow { label: "EXIF Tag Available"; checked: root.exif_available; }
@@ -227,22 +267,6 @@ export component MetadataPanel inherits Rectangle {
                     EditableInfoRow { label: "GPS Altitude"; value <=> root.gps_altitude; dirty <=> root.gps_altitude_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                 }
             }
-
-            if root.selected_tab == 1: VerticalLayout {
-                width: 100%;
-                padding-top: 10px;
-                padding-left: 12px;
-                padding-right: 12px;
-                spacing: 8px;
-
-                SectionHeader { title: "BATCH"; }
-                Button { height: 30px; text: "Rename"; clicked => { root.selected_tab = 0; } }
-                Button { height: 30px; text: "Extract Taken Date from Filename"; clicked => { root.fill_taken_date_from_filename(); } }
-
-                SectionHeader { title: "FILE"; }
-                Button { height: 30px; text: "Duplicate"; clicked => { root.duplicate_file(); } }
-                Button { height: 30px; text: "Remove EXIF Tags"; clicked => { root.remove_exif_tags(); } }
-            }
         }
 
         Rectangle {
@@ -272,5 +296,28 @@ export component MetadataPanel inherits Rectangle {
                 }
             }
         }
+    }
+
+    if tools_menu_visible: TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            root.tools_menu_visible = false;
+        }
+    }
+
+    if tools_menu_visible: Rectangle {
+        x: parent.width - 232px;
+        y: 30px;
+        width: 220px;
+        height: 63px;
+        background: #ffffff;
+        border-width: 1px;
+        border-color: #cfd8dc;
+        border-radius: 3px;
+
+        MenuRow { y: 1px; title: "Taken Date from Filename"; clicked => { root.tools_menu_visible = false; root.fill_taken_date_from_filename(); } }
+        Rectangle { y: 31px; width: 100%; height: 1px; background: #edf0f2; }
+        MenuRow { y: 32px; title: "Remove EXIF Tags"; danger: true; clicked => { root.tools_menu_visible = false; root.remove_exif_tags(); } }
     }
 }

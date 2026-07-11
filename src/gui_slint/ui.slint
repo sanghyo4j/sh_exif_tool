@@ -120,16 +120,6 @@ export component MainWindow inherits Window {
         Menu {
             title: "&File";
 
-            MenuItem { title: "&Open Folder... (Ctrl+Shift+O)"; activated => { root.file_context_menu_visible = false; root.editing_path = true; } }
-            MenuItem {
-                title: "&Refresh (F5)";
-                activated => {
-                    root.file_context_menu_visible = false;
-                    root.editing_path = false;
-                    root.reload();
-                }
-            }
-            MenuSeparator {}
             MenuItem {
                 title: "&Save Copy";
                 enabled: root.selected_index >= 0 && !root.selected_is_dir;
@@ -185,27 +175,6 @@ export component MainWindow inherits Window {
                     root.file_context_menu_visible = false;
                     root.editing_path = false;
                     root.exit_app();
-                }
-            }
-        }
-
-        Menu {
-            title: "&Advanced";
-
-            MenuItem {
-                title: "&Fill Taken date from Filename";
-                activated => {
-                    root.file_context_menu_visible = false;
-                    root.editing_path = false;
-                    root.fill_taken_date_from_filename();
-                }
-            }
-            MenuItem {
-                title: "&Remove EXIF Tags";
-                activated => {
-                    root.file_context_menu_visible = false;
-                    root.editing_path = false;
-                    root.remove_exif_tags();
                 }
             }
         }
