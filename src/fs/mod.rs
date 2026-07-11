@@ -93,6 +93,56 @@ pub fn save_file_copy(source_path: &Path) -> Result<PathBuf, String> {
     Err("Could not find an available copy filename.".to_string())
 }
 
+pub fn duplicate_file(source_path: &Path) -> Result<PathBuf, String> {
+    if !source_path.is_file() {
+        return Err("Select a file before duplicating.".to_string());
+    }
+
+    let parent = source_path
+        .parent()
+        .ok_or_else(|| "Selected file parent could not be resolved.".to_string())?;
+    let stem = source_path
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "duplicate".to_string());
+    let stem = duplicate_base_stem(&stem);
+    let extension = source_path
+        .extension()
+        .map(|value| value.to_string_lossy().to_string());
+
+    for index in 1..1000 {
+        let file_name = match &extension {
+            Some(extension) => format!("{stem} ({index}).{extension}"),
+            None => format!("{stem} ({index})"),
+        };
+        let target_path = parent.join(file_name);
+
+        if !target_path.exists() {
+            std::fs::copy(source_path, &target_path).map_err(|err| err.to_string())?;
+            return Ok(target_path);
+        }
+    }
+
+    Err("Could not find an available duplicate filename.".to_string())
+}
+
+fn duplicate_base_stem(stem: &str) -> String {
+    let trimmed = stem.trim_end();
+    let Some(number_end) = trimmed.strip_suffix(')') else {
+        return stem.to_string();
+    };
+    let Some(open_index) = number_end.rfind(" (") else {
+        return stem.to_string();
+    };
+
+    if number_end[open_index + 2..].parse::<u32>().is_ok() {
+        number_end[..open_index].to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
 pub fn move_file_to_recycle_bin(path: &Path) -> Result<(), String> {
     if !path.is_file() {
         return Err("Select a file before deleting.".to_string());

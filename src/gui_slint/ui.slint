@@ -5,14 +5,16 @@ import { PathBar } from "components/path_bar.slint";
 import { FileTable } from "components/file_table.slint";
 import { CustomFileTable } from "components/custom_file_table.slint";
 import { MetadataPanel } from "components/metadata_panel.slint";
+import { FontSettings } from "theme.slint";
 
-export { FileEntry, Palette }
+export { FileEntry, Palette, FontSettings }
 
 export component MainWindow inherits Window {
     width: 1200px;
     height: 800px;
     background: #ffffff;
-    default-font-family: "Segoe UI";
+    default-font-family: "Malgun Gothic";
+    default-font-size: 10pt;
     title: "Rust EXIF Tool";
 
     in-out property <string> current_path: "C:/";
@@ -94,13 +96,16 @@ export component MainWindow inherits Window {
     in-out property <string> message_title: "Operation Failed";
     in-out property <string> message_text: "";
     in-out property <bool> confirm_delete_visible: false;
+    in-out property <bool> file_context_menu_visible: false;
 
     callback open_dir(int);
     callback reload();
     callback go_parent();
     callback change_dir(string);
     callback save_copy();
+    callback duplicate_file();
     callback delete_file();
+    callback confirm_delete_file();
     callback open_in_explorer();
     callback exit_app();
     callback apply_changes();
@@ -109,16 +114,17 @@ export component MainWindow inherits Window {
     callback fill_taken_date_from_filename();
     callback metadata_value_edited();
     callback table_row_clicked(int);
-    callback table_row_selected(int);
+    callback table_row_selected(int, bool, bool);
 
     MenuBar {
         Menu {
             title: "&File";
 
-            MenuItem { title: "&Open Folder... (Ctrl+Shift+O)"; activated => { root.editing_path = true; } }
+            MenuItem { title: "&Open Folder... (Ctrl+Shift+O)"; activated => { root.file_context_menu_visible = false; root.editing_path = true; } }
             MenuItem {
                 title: "&Refresh (F5)";
                 activated => {
+                    root.file_context_menu_visible = false;
                     root.editing_path = false;
                     root.reload();
                 }
@@ -128,6 +134,7 @@ export component MainWindow inherits Window {
                 title: "&Save Copy";
                 enabled: root.selected_index >= 0 && !root.selected_is_dir;
                 activated => {
+                    root.file_context_menu_visible = false;
                     root.editing_path = false;
                     root.save_copy();
                 }
@@ -136,6 +143,7 @@ export component MainWindow inherits Window {
                 title: "&Delete File";
                 enabled: root.selected_index >= 0 && !root.selected_is_dir;
                 activated => {
+                    root.file_context_menu_visible = false;
                     root.editing_path = false;
                     root.confirm_delete_visible = true;
                     root.message_title = "Delete File";
@@ -147,6 +155,7 @@ export component MainWindow inherits Window {
                 title: "&Apply (Ctrl+S)";
                 enabled: root.metadata_dirty;
                 activated => {
+                    root.file_context_menu_visible = false;
                     root.editing_path = false;
                     root.apply_changes();
                 }
@@ -155,6 +164,7 @@ export component MainWindow inherits Window {
                 title: "&Revert (Ctrl+R)";
                 enabled: root.metadata_dirty;
                 activated => {
+                    root.file_context_menu_visible = false;
                     root.editing_path = false;
                     root.revert_changes();
                 }
@@ -163,6 +173,7 @@ export component MainWindow inherits Window {
             MenuItem {
                 title: "Open in Explore&r (Alt+Shift+R)";
                 activated => {
+                    root.file_context_menu_visible = false;
                     root.editing_path = false;
                     root.open_in_explorer();
                 }
@@ -171,6 +182,7 @@ export component MainWindow inherits Window {
             MenuItem {
                 title: "E&xit (Ctrl+W)";
                 activated => {
+                    root.file_context_menu_visible = false;
                     root.editing_path = false;
                     root.exit_app();
                 }
@@ -183,6 +195,7 @@ export component MainWindow inherits Window {
             MenuItem {
                 title: "&Fill Taken date from Filename";
                 activated => {
+                    root.file_context_menu_visible = false;
                     root.editing_path = false;
                     root.fill_taken_date_from_filename();
                 }
@@ -190,6 +203,7 @@ export component MainWindow inherits Window {
             MenuItem {
                 title: "&Remove EXIF Tags";
                 activated => {
+                    root.file_context_menu_visible = false;
                     root.editing_path = false;
                     root.remove_exif_tags();
                 }
@@ -199,28 +213,64 @@ export component MainWindow inherits Window {
         Menu {
             title: "A&nalyze";
 
-            MenuItem { title: "&Analyze Selected"; activated => { root.editing_path = false; } }
-            MenuItem { title: "Analyze &Folder"; activated => { root.editing_path = false; } }
-            MenuItem { title: "Analyze &Missing Metadata"; activated => { root.editing_path = false; } }
+            MenuItem { title: "&Analyze Selected"; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
+            MenuItem { title: "Analyze &Folder"; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
+            MenuItem { title: "Analyze &Missing Metadata"; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
             MenuSeparator {}
-            MenuItem { title: "&Clear Results"; activated => { root.editing_path = false; } }
+            MenuItem { title: "&Clear Results"; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
+        }
+
+        Menu {
+            title: "&View";
+
+            MenuItem {
+                title: "Increase Font Size";
+                enabled: FontSettings.font_size_pt < 15;
+                activated => {
+                    root.file_context_menu_visible = false;
+                    FontSettings.font_size_pt = min(15, FontSettings.font_size_pt + 1);
+                    root.editing_path = false;
+                }
+            }
+            MenuItem {
+                title: "Decrease Font Size";
+                enabled: FontSettings.font_size_pt > 6;
+                activated => {
+                    root.file_context_menu_visible = false;
+                    FontSettings.font_size_pt = max(6, FontSettings.font_size_pt - 1);
+                    root.editing_path = false;
+                }
+            }
+            MenuItem {
+                title: "Default Font Size";
+                activated => {
+                    root.file_context_menu_visible = false;
+                    FontSettings.font_size_pt = 10;
+                    root.editing_path = false;
+                }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: "Font Family: " + FontSettings.font_family;
+                enabled: false;
+            }
         }
 
         Menu {
             title: "&Settings";
 
-            MenuItem { title: "&Date Source Priority..."; activated => { root.editing_path = false; } }
-            MenuItem { title: "&Filename Patterns..."; activated => { root.editing_path = false; } }
+            MenuItem { title: "&Date Source Priority..."; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
+            MenuItem { title: "&Filename Patterns..."; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
             MenuSeparator {}
-            MenuItem { title: "&Write Software Tag"; checkable: true; checked: true; activated => { root.editing_path = false; } }
-            MenuItem { title: "&Rename With _SH148 Suffix"; checkable: true; activated => { root.editing_path = false; } }
-            MenuItem { title: "&Backup Before Changes"; checkable: true; checked: true; activated => { root.editing_path = false; } }
+            MenuItem { title: "&Write Software Tag"; checkable: true; checked: true; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
+            MenuItem { title: "&Rename With _SH148 Suffix"; checkable: true; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
+            MenuItem { title: "&Backup Before Changes"; checkable: true; checked: true; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
         }
 
         Menu {
             title: "&Help";
 
-            MenuItem { title: "&About"; activated => { root.editing_path = false; } }
+            MenuItem { title: "&About"; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
         }
     }
 
@@ -272,6 +322,7 @@ export component MainWindow inherits Window {
 
             if ((event.text == "S" || event.text == "s") && event.modifiers.control) {
                 root.editing_path = false;
+                content_focus.focus();
                 root.apply_changes();
                 return accept;
             }
@@ -301,12 +352,13 @@ export component MainWindow inherits Window {
             width: 750px;
             height: 100%;
 
-            CustomFileTable {
+            file_table := CustomFileTable {
                 width: 100%;
                 height: 100%;
                 files: root.files;
                 selected_index <=> root.selected_index;
-                row_selected(index) => {
+                context_menu_visible <=> root.file_context_menu_visible;
+                row_selected(index, ctrl, shift) => {
                     root.editing_path = false;
                     root.metadata_dirty = false;
                     root.selected_name_dirty = false;
@@ -340,7 +392,7 @@ export component MainWindow inherits Window {
                         root.original_selected_modified = root.files[index].modified;
                         root.selected_is_dir = root.files[index].is_dir;
                     }
-                    root.table_row_selected(index);
+                    root.table_row_selected(index, ctrl, shift);
                 }
                 row_clicked(index) => {
                     root.table_row_clicked(index);
@@ -356,6 +408,20 @@ export component MainWindow inherits Window {
                     root.editing_path = false;
                     root.reload();
                 }
+                duplicate_requested() => {
+                    root.editing_path = false;
+                    if (root.selected_index >= 0 && !root.selected_is_dir) {
+                        root.duplicate_file();
+                    }
+                }
+                delete_requested() => {
+                    root.editing_path = false;
+                    if (root.selected_index >= 0 && !root.selected_is_dir) {
+                        root.confirm_delete_visible = true;
+                        root.message_title = "Delete File";
+                        root.message_text = "Move \"" + root.selected_name + "\" to the Recycle Bin?";
+                    }
+                }
                 open_folder_requested() => {
                     root.editing_path = true;
                 }
@@ -365,6 +431,7 @@ export component MainWindow inherits Window {
                 }
                 apply_requested() => {
                     root.editing_path = false;
+                    content_focus.focus();
                     root.apply_changes();
                 }
                 revert_requested() => {
@@ -466,6 +533,18 @@ export component MainWindow inherits Window {
                     root.gps_longitude_dirty = false;
                     root.gps_altitude_dirty = false;
                 }
+                duplicate_file() => {
+                    root.editing_path = false;
+                    root.duplicate_file();
+                }
+                fill_taken_date_from_filename() => {
+                    root.editing_path = false;
+                    root.fill_taken_date_from_filename();
+                }
+                remove_exif_tags() => {
+                    root.editing_path = false;
+                    root.remove_exif_tags();
+                }
                 metadata_edited() => {
                     root.metadata_value_edited();
                 }
@@ -480,6 +559,7 @@ export component MainWindow inherits Window {
                         root.open_in_explorer();
                     } else if (action == "save") {
                         root.editing_path = false;
+                        metadata_panel.clear_editor_focus();
                         root.apply_changes();
                     } else if (action == "revert") {
                         root.editing_path = false;
@@ -490,6 +570,43 @@ export component MainWindow inherits Window {
                     }
                 }
         }
+        }
+    }
+
+    if root.file_context_menu_visible: TouchArea {
+        y: 1px;
+        width: 100%;
+        height: 40px;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.file_context_menu_visible = false;
+            }
+        }
+    }
+
+    if root.file_context_menu_visible: TouchArea {
+        x: 750px;
+        y: 41px;
+        width: root.width - 750px;
+        height: root.height - 67px;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.file_context_menu_visible = false;
+            }
+        }
+    }
+
+    if root.file_context_menu_visible: TouchArea {
+        y: root.height - 26px;
+        width: 100%;
+        height: 26px;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.file_context_menu_visible = false;
+            }
         }
     }
 
@@ -533,9 +650,9 @@ export component MainWindow inherits Window {
 
                 if (root.confirm_delete_visible && event.text == Key.Return) {
                     root.confirm_delete_visible = false;
-                    root.delete_file();
                     root.message_title = "Operation Failed";
                     root.message_text = "";
+                    root.confirm_delete_file();
                     return accept;
                 }
 
@@ -577,47 +694,110 @@ export component MainWindow inherits Window {
                 height: 40px;
                 text: root.message_text;
                 color: #37474f;
-                font-size: 12px;
+                font-size: FontSettings.font_size_pt * 1pt;
                 wrap: word-wrap;
             }
 
-            if !confirm_delete_visible: Button {
+            if !confirm_delete_visible: Rectangle {
                 x: parent.width - 92px;
                 y: parent.height - 44px;
                 width: 72px;
                 height: 28px;
-                text: "OK";
-                clicked => {
-                    root.message_visible = false;
-                    root.message_title = "Operation Failed";
-                    root.message_text = "";
+                background: ok_touch.has-hover ? #eaf4ff : #ffffff;
+                border-width: 1px;
+                border-color: #b8c2cc;
+                border-radius: 3px;
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: "OK";
+                    color: #1f2933;
+                    font-size: FontSettings.font_size_pt * 1pt;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                ok_touch := TouchArea {
+                    width: 100%;
+                    height: 100%;
+
+                    pointer-event(event) => {
+                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                            root.message_visible = false;
+                            root.message_title = "Operation Failed";
+                            root.message_text = "";
+                        }
+                    }
                 }
             }
 
-            if confirm_delete_visible: Button {
+            if confirm_delete_visible: Rectangle {
                 x: parent.width - 172px;
                 y: parent.height - 44px;
                 width: 72px;
                 height: 28px;
-                text: "No";
-                clicked => {
-                    root.confirm_delete_visible = false;
-                    root.message_title = "Operation Failed";
-                    root.message_text = "";
+                background: no_touch.has-hover ? #f3f6f8 : #ffffff;
+                border-width: 1px;
+                border-color: #b8c2cc;
+                border-radius: 3px;
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: "No";
+                    color: #1f2933;
+                    font-size: FontSettings.font_size_pt * 1pt;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                no_touch := TouchArea {
+                    width: 100%;
+                    height: 100%;
+
+                    pointer-event(event) => {
+                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                            root.confirm_delete_visible = false;
+                            root.message_title = "Operation Failed";
+                            root.message_text = "";
+                        }
+                    }
                 }
             }
 
-            if confirm_delete_visible: Button {
+            if confirm_delete_visible: Rectangle {
                 x: parent.width - 92px;
                 y: parent.height - 44px;
                 width: 72px;
                 height: 28px;
-                text: "Yes";
-                clicked => {
-                    root.confirm_delete_visible = false;
-                    root.delete_file();
-                    root.message_title = "Operation Failed";
-                    root.message_text = "";
+                background: yes_touch.has-hover ? #fff1f1 : #ffffff;
+                border-width: 1px;
+                border-color: #d99a9a;
+                border-radius: 3px;
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: "Yes";
+                    color: #b42318;
+                    font-size: FontSettings.font_size_pt * 1pt;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                yes_touch := TouchArea {
+                    width: 100%;
+                    height: 100%;
+
+                    pointer-event(event) => {
+                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                            root.confirm_delete_visible = false;
+                            root.message_title = "Operation Failed";
+                            root.message_text = "";
+                            root.confirm_delete_file();
+                        }
+                    }
                 }
             }
         }
@@ -633,11 +813,22 @@ export component MainWindow inherits Window {
 
         Text {
             x: 10px;
-            width: parent.width - 20px;
+            width: max(0px, parent.width - font_size_status.width - 24px);
             height: 100%;
             text: "Files: " + item_count;
-            font-size: 12px;
+            font-size: FontSettings.font_size_pt * 1pt;
             color: #666666;
+            vertical-alignment: center;
+        }
+
+        font_size_status := Text {
+            x: parent.width - self.width - 10px;
+            width: 110px;
+            height: 100%;
+            text: "Font: " + FontSettings.font_size_pt + " pt";
+            font-size: FontSettings.font_size_pt * 1pt;
+            color: #666666;
+            horizontal-alignment: right;
             vertical-alignment: center;
         }
     }

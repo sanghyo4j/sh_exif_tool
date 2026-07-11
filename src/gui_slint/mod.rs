@@ -29,7 +29,7 @@ use crate::exif::{
     write_taken_date,
     ExifMetadata,
 };
-use crate::fs::{move_file_to_recycle_bin, open_in_file_manager, rename_entry, save_file_copy, set_file_times};
+use crate::fs::{duplicate_file, move_file_to_recycle_bin, open_in_file_manager, rename_entry, save_file_copy, set_file_times};
 use crate::GuiRunner;
 
 slint::include_modules!();
@@ -51,16 +51,19 @@ impl GuiRunner for SlintRunner {
             let app_handle = app.clone();
             move |selected_path: Option<PathBuf>| {
                 if let Some(ui) = ui_handle.upgrade() {
-                    let app = app_handle.borrow();
-                    ui.set_current_path(app.current_path.as_str().into());
-                    ui.set_item_count(app.file_count() as i32);
-                    ui.set_files(app.get_ui_model());
-                    ui.set_table_rows(app.get_table_model());
+                    let mut app = app_handle.borrow_mut();
                     let selected_index = selected_path
                         .as_deref()
                         .and_then(|path| app.ui_index_for_path(path))
                         .unwrap_or(-1);
-                    set_selected_file(&ui, &app, selected_index);
+                    if selected_index >= 0 {
+                        app.select_ui_index(selected_index, false, false);
+                    }
+                    ui.set_current_path(app.current_path.as_str().into());
+                    ui.set_item_count(app.file_count() as i32);
+                    ui.set_files(app.get_ui_model());
+                    ui.set_table_rows(app.get_table_model());
+                    set_selected_files(&ui, &app);
                 }
             }
         };
@@ -177,10 +180,13 @@ impl GuiRunner for SlintRunner {
 
         let app_handle = app.clone();
         let ui_handle = ui.as_weak();
-        ui.on_table_row_selected(move |index| {
+        ui.on_table_row_selected(move |index, ctrl, shift| {
             if let Some(ui) = ui_handle.upgrade() {
-                let app = app_handle.borrow();
-                set_selected_file(&ui, &app, index);
+                let mut app = app_handle.borrow_mut();
+                app.select_ui_index(index, ctrl, shift);
+                ui.set_selected_index(index);
+                ui.set_files(app.get_ui_model());
+                set_selected_files(&ui, &app);
             }
         });
 
@@ -316,6 +322,46 @@ impl GuiRunner for SlintRunner {
                     Err(err) => show_message(&ui, "Save Copy Failed", &err),
                 }
             }
+        });
+
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_duplicate_file(move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                if ui.get_selected_index() < 0 || ui.get_selected_is_dir() {
+                    show_message(&ui, "Duplicate Failed", "Select a file before duplicating.");
+                    return;
+                }
+
+                let result = {
+                    let mut app = app_handle.borrow_mut();
+                    let Some(path) = app.path_for_ui_index(ui.get_selected_index()) else {
+                        show_message(&ui, "Duplicate Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+
+                    duplicate_file(&path).map(|target_path| {
+                        app.load_folder();
+                        target_path
+                    })
+                };
+
+                match result {
+                    Ok(target_path) => refresh(Some(target_path)),
+                    Err(err) => show_message(&ui, "Duplicate Failed", &err),
+                }
+            }
+        });
+
+        let ui_handle = ui.as_weak();
+        ui.on_confirm_delete_file(move || {
+            let ui_handle = ui_handle.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_handle.upgrade() {
+                    ui.invoke_delete_file();
+                }
+            });
         });
 
         let app_handle = app.clone();
@@ -737,6 +783,52 @@ fn set_selected_file(ui: &MainWindow, app: &SlintApp, index: i32) {
     set_loaded_exif_metadata(ui, metadata);
 }
 
+fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
+    let indices = app.selected_indices();
+    if indices.is_empty() {
+        clear_selected_file(ui);
+        return;
+    }
+
+    if indices.len() == 1 {
+        set_selected_file(ui, app, indices[0]);
+        return;
+    }
+
+    let mut names = Vec::new();
+    let mut created_values = Vec::new();
+    let mut modified_values = Vec::new();
+    let mut has_dir = false;
+    let mut metadata_values = Vec::new();
+
+    for index in indices {
+        if let Some((name, created, modified, is_dir)) = app.ui_details_for_index(*index) {
+            names.push(name);
+            created_values.push(created);
+            modified_values.push(modified);
+            has_dir |= is_dir;
+        }
+
+        let metadata = app
+            .path_for_ui_index(*index)
+            .filter(|path| path.is_file())
+            .map(|path| read_exif_metadata(&path))
+            .unwrap_or_default();
+        metadata_values.push(metadata);
+    }
+
+    ui.set_selected_index(*indices.last().unwrap_or(&-1));
+    ui.set_selected_name(joined_selection_value(names).into());
+    ui.set_selected_created(joined_selection_value(created_values).into());
+    ui.set_selected_modified(joined_selection_value(modified_values).into());
+    ui.set_original_selected_name(ui.get_selected_name());
+    ui.set_original_selected_created(ui.get_selected_created());
+    ui.set_original_selected_modified(ui.get_selected_modified());
+    ui.set_selected_is_dir(has_dir);
+
+    set_loaded_exif_metadata(ui, join_metadata(&metadata_values));
+}
+
 fn clear_selected_file(ui: &MainWindow) {
     ui.set_selected_index(-1);
     ui.set_selected_name("N/A".into());
@@ -797,6 +889,48 @@ fn set_loaded_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
     ui.set_original_gps_altitude(metadata.gps_altitude.into());
     ui.set_metadata_dirty(false);
     reset_metadata_dirty_flags(ui);
+}
+
+fn joined_selection_value(values: Vec<String>) -> String {
+    let mut iter = values.into_iter();
+    let Some(first) = iter.next() else {
+        return String::new();
+    };
+
+    let mut joined = first;
+    for value in iter {
+        if value != joined && !joined.split("; ").any(|existing| existing == value) {
+            joined.push_str("; ");
+            joined.push_str(&value);
+        }
+    }
+
+    joined
+}
+
+fn join_metadata(values: &[ExifMetadata]) -> ExifMetadata {
+    ExifMetadata {
+        has_exif: values.iter().any(|metadata| metadata.has_exif),
+        taken_date: joined_selection_value(values.iter().map(|metadata| metadata.taken_date.clone()).collect()),
+        camera_make: joined_selection_value(values.iter().map(|metadata| metadata.camera_make.clone()).collect()),
+        camera_model: joined_selection_value(values.iter().map(|metadata| metadata.camera_model.clone()).collect()),
+        lens_model: joined_selection_value(values.iter().map(|metadata| metadata.lens_model.clone()).collect()),
+        software: joined_selection_value(values.iter().map(|metadata| metadata.software.clone()).collect()),
+        artist: joined_selection_value(values.iter().map(|metadata| metadata.artist.clone()).collect()),
+        shutter_speed: joined_selection_value(values.iter().map(|metadata| metadata.shutter_speed.clone()).collect()),
+        aperture: joined_selection_value(values.iter().map(|metadata| metadata.aperture.clone()).collect()),
+        iso_speed: joined_selection_value(values.iter().map(|metadata| metadata.iso_speed.clone()).collect()),
+        focal_length: joined_selection_value(values.iter().map(|metadata| metadata.focal_length.clone()).collect()),
+        flash_fired: joined_selection_value(values.iter().map(|metadata| metadata.flash_fired.clone()).collect()),
+        metering_mode: joined_selection_value(values.iter().map(|metadata| metadata.metering_mode.clone()).collect()),
+        image_width: joined_selection_value(values.iter().map(|metadata| metadata.image_width.clone()).collect()),
+        image_height: joined_selection_value(values.iter().map(|metadata| metadata.image_height.clone()).collect()),
+        orientation: joined_selection_value(values.iter().map(|metadata| metadata.orientation.clone()).collect()),
+        color_space: joined_selection_value(values.iter().map(|metadata| metadata.color_space.clone()).collect()),
+        gps_latitude: joined_selection_value(values.iter().map(|metadata| metadata.gps_latitude.clone()).collect()),
+        gps_longitude: joined_selection_value(values.iter().map(|metadata| metadata.gps_longitude.clone()).collect()),
+        gps_altitude: joined_selection_value(values.iter().map(|metadata| metadata.gps_altitude.clone()).collect()),
+    }
 }
 
 fn show_message(ui: &MainWindow, title: &str, message: &str) {

@@ -1,31 +1,34 @@
 import { CheckBox, HorizontalBox } from "std-widgets.slint";
 import { HDivider } from "dividers.slint";
+import { FontSettings } from "../theme.slint";
 
 export component SectionHeader inherits Rectangle {
     in property <string> title;
 
-    height: 28px;
-    background: #fcfcfc;
+    height: 30px;
+    background: #e7f0f5;
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 4px;
+        height: 100%;
+        background: #3d7895;
+    }
 
     HorizontalBox {
         width: 100%;
         height: 100%;
-        padding-left: 14px;
+        padding-left: 18px;
         padding-right: 12px;
-        spacing: 10px;
+        spacing: 0px;
 
         Text {
             text: title;
-            font-size: 11px;
+            font-size: max(9pt, (FontSettings.font_size_pt - 1) * 1pt);
             font-weight: 800;
-            color: #607d8b;
+            color: #203d4e;
             vertical-alignment: center;
-        }
-
-        Rectangle {
-            horizontal-stretch: 1;
-            height: 1px;
-            background: #e8edf0;
         }
     }
 }
@@ -42,7 +45,7 @@ export component EditableInfoRow inherits Rectangle {
         input.select-all();
     }
 
-    height: 34px;
+    height: 36px;
     background: #ffffff;
 
     HorizontalBox {
@@ -56,7 +59,7 @@ export component EditableInfoRow inherits Rectangle {
             text: label;
             width: 126px;
             color: #455a64;
-            font-size: 12px;
+            font-size: FontSettings.font_size_pt * 1pt;
             vertical-alignment: center;
             overflow: elide;
         }
@@ -73,7 +76,7 @@ export component EditableInfoRow inherits Rectangle {
                 width: parent.width - 16px;
                 height: 100%;
                 text <=> root.value;
-                font-size: 12px;
+                font-size: FontSettings.font_size_pt * 1pt;
                 vertical-alignment: center;
                 single-line: true;
                 color: #1f2933;
@@ -129,7 +132,7 @@ export component ReadOnlyCheckRow inherits Rectangle {
     in property <string> label;
     in property <bool> checked;
 
-    height: 34px;
+    height: 36px;
     background: #ffffff;
 
     HorizontalBox {
@@ -143,7 +146,7 @@ export component ReadOnlyCheckRow inherits Rectangle {
             text: label;
             width: 126px;
             color: #455a64;
-            font-size: 12px;
+            font-size: FontSettings.font_size_pt * 1pt;
             vertical-alignment: center;
             overflow: elide;
         }

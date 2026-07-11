@@ -1,5 +1,74 @@
-import { VerticalBox, HorizontalBox, ScrollView, Button, StandardButton } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
 import { SectionHeader, EditableInfoRow, ReadOnlyCheckRow } from "info_row.slint";
+import { FontSettings } from "../theme.slint";
+
+component TabButton inherits Rectangle {
+    in property <string> title;
+    in property <bool> active;
+    callback clicked();
+
+    width: 88px;
+    height: 24px;
+    background: active ? #ffffff : area.has-hover ? #e8f0f5 : #edf3f7;
+    border-width: 1px;
+    border-color: active ? #b8c6cf : #cbd6dd;
+    border-radius: 2px;
+
+    if active: Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 3px;
+        background: #315a72;
+    }
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.title;
+        font-size: max(9pt, (FontSettings.font_size_pt - 1) * 1pt);
+        color: root.active ? #1f3440 : #667781;
+        font-weight: root.active ? 700 : 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    area := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.clicked(); }
+    }
+}
+
+component ActionButton inherits Rectangle {
+    in property <string> title;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: 96px;
+    height: 30px;
+    background: !enabled ? #f6f7f8 : area.has-hover ? #eef4f8 : #ffffff;
+    border-width: 1px;
+    border-color: !enabled ? #d9dee2 : area.has-hover ? #8aa8ba : #9aa5ad;
+    border-radius: 3px;
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.title;
+        font-size: FontSettings.font_size_pt * 1pt;
+        color: root.enabled ? #34434c : #9aa1a6;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    area := TouchArea {
+        enabled: root.enabled;
+        width: 100%;
+        height: 100%;
+        clicked => { root.clicked(); }
+    }
+}
 
 export component MetadataPanel inherits Rectangle {
     in-out property <string> selected_name;
@@ -51,61 +120,58 @@ export component MetadataPanel inherits Rectangle {
 
     callback apply_changes();
     callback revert_changes();
+    callback duplicate_file();
+    callback fill_taken_date_from_filename();
+    callback remove_exif_tags();
     callback metadata_edited();
     callback shortcut_requested(string);
 
+    property <int> selected_tab: 0;
+
     public function focus_file_name() {
-        file_name_row.focus_input();
+        root.selected_tab = 0;
     }
 
-    horizontal-stretch: 1;
-    height: 100%;
+    public function clear_editor_focus() {
+        focus_sink.focus();
+    }
+
     background: #fcfcfc;
+
+    focus_sink := FocusScope {
+        x: 0px;
+        y: 0px;
+        width: 0px;
+        height: 0px;
+    }
 
     VerticalBox {
         width: 100%;
         height: 100%;
-        padding: 0;
-        spacing: 0;
+        padding: 0px;
+        spacing: 0px;
 
         Rectangle {
-            height: 42px;
-            background: #ffffff;
-
-            HorizontalBox {
-                width: 100%;
-                height: 100%;
-                padding-left: 16px;
-                padding-right: 12px;
-                spacing: 12px;
-
-                Text {
-                    horizontal-stretch: 1;
-                    text: "Image Metadata";
-                    font-size: 15px;
-                    color: #263238;
-                    font-weight: 700;
-                    horizontal-alignment: left;
-                    vertical-alignment: center;
-                }
-
-                Button {
-                    text: "Revert (Ctrl+R)";
-                    enabled: root.has_pending_changes;
-                    clicked => { root.revert_changes(); }
-                }
-
-                Button {
-                    text: "Apply (Ctrl+S)";
-                    enabled: root.has_pending_changes;
-                    clicked => { root.apply_changes(); }
-                }
-            }
+            height: 32px;
+            background: #edf3f7;
 
             Rectangle {
                 y: parent.height - 1px;
+                width: 100%;
                 height: 1px;
-                background: #eeeeee;
+                background: #cfdbe2;
+            }
+
+            HorizontalBox {
+                x: 8px;
+                y: 4px;
+                width: parent.width - 16px;
+                height: 24px;
+                spacing: 4px;
+
+                TabButton { title: "Metadata"; active: root.selected_tab == 0; clicked => { root.selected_tab = 0; } }
+                TabButton { title: "Advanced"; active: root.selected_tab == 1; clicked => { root.selected_tab = 1; } }
+                Rectangle { horizontal-stretch: 1; }
             }
         }
 
@@ -113,24 +179,22 @@ export component MetadataPanel inherits Rectangle {
             vertical-stretch: 1;
             background: #fcfcfc;
 
-            metadata_scroll := ScrollView {
-                width: parent.width - 12px;
+            if root.selected_tab == 0: ScrollView {
+                width: 100%;
                 height: 100%;
-                viewport-width: self.width - 4px;
-                viewport-height: info_container.preferred-height;
-                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
                 horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
-                info_container := VerticalLayout {
+                VerticalLayout {
                     width: parent.viewport-width;
-                    padding-top: 8px;
-                    padding-bottom: 8px;
-                    padding-left: 4px;
-                    padding-right: 8px;
+                    padding-top: 10px;
+                    padding-bottom: 18px;
+                    padding-left: 12px;
+                    padding-right: 12px;
                     spacing: 0px;
 
                     SectionHeader { title: "FILE"; }
-                    file_name_row := EditableInfoRow { label: "File Name"; value <=> root.selected_name; dirty <=> root.selected_name_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    EditableInfoRow { label: "File Name"; value <=> root.selected_name; dirty <=> root.selected_name_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     EditableInfoRow { label: "File Created"; value <=> root.selected_created; dirty <=> root.selected_created_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     EditableInfoRow { label: "File Modified"; value <=> root.selected_modified; dirty <=> root.selected_modified_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     ReadOnlyCheckRow { label: "EXIF Tag Available"; checked: root.exif_available; }
@@ -164,69 +228,47 @@ export component MetadataPanel inherits Rectangle {
                 }
             }
 
-            metadata_rail := Rectangle {
-                x: parent.width - 12px;
-                y: 0px;
-                width: 12px;
-                height: parent.height;
-                background: #eef2f5;
+            if root.selected_tab == 1: VerticalLayout {
+                width: 100%;
+                padding-top: 10px;
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 8px;
 
-                TouchArea {
-                    width: 100%;
-                    height: 100%;
+                SectionHeader { title: "BATCH"; }
+                Button { height: 30px; text: "Rename"; clicked => { root.selected_tab = 0; } }
+                Button { height: 30px; text: "Extract Taken Date from Filename"; clicked => { root.fill_taken_date_from_filename(); } }
 
-                    pointer-event(event) => {
-                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                            if (metadata_scroll.viewport-height > metadata_scroll.visible-height) {
-                                metadata_scroll.viewport-y = -max(
-                                    0px,
-                                    min(
-                                        metadata_scroll.viewport-height - metadata_scroll.visible-height,
-                                        self.mouse-y * metadata_scroll.viewport-height / parent.height - metadata_scroll.visible-height / 2
-                                    )
-                                );
-                            }
-                        }
-                    }
+                SectionHeader { title: "FILE"; }
+                Button { height: 30px; text: "Duplicate"; clicked => { root.duplicate_file(); } }
+                Button { height: 30px; text: "Remove EXIF Tags"; clicked => { root.remove_exif_tags(); } }
+            }
+        }
 
-                    moved => {
-                        if (self.pressed && metadata_scroll.viewport-height > metadata_scroll.visible-height) {
-                            metadata_scroll.viewport-y = -max(
-                                0px,
-                                min(
-                                    metadata_scroll.viewport-height - metadata_scroll.visible-height,
-                                    self.mouse-y * metadata_scroll.viewport-height / parent.height - metadata_scroll.visible-height / 2
-                                )
-                            );
-                        }
-                    }
+        Rectangle {
+            height: 48px;
+            background: #ffffff;
 
-                    clicked => {
-                        if (metadata_scroll.viewport-height > metadata_scroll.visible-height) {
-                            metadata_scroll.viewport-y = -max(
-                                0px,
-                                min(
-                                    metadata_scroll.viewport-height - metadata_scroll.visible-height,
-                                    self.mouse-y * metadata_scroll.viewport-height / parent.height - metadata_scroll.visible-height / 2
-                                )
-                            );
-                        }
-                    }
-                }
+            ActionButton {
+                x: parent.width - 212px;
+                y: 9px;
+                width: 96px;
+                height: 30px;
+                title: "Revert";
+                enabled: root.has_pending_changes;
+                clicked => { root.revert_changes(); }
+            }
 
-                metadata_thumb := Rectangle {
-                    x: 2px;
-                    y: metadata_scroll.viewport-height <= metadata_scroll.visible-height
-                        ? 4px
-                        : 4px + (-metadata_scroll.viewport-y)
-                            * (parent.height - 8px - self.height)
-                            / (metadata_scroll.viewport-height - metadata_scroll.visible-height);
-                    width: 8px;
-                    height: metadata_scroll.viewport-height <= metadata_scroll.visible-height
-                        ? parent.height - 8px
-                        : max(28px, (parent.height - 8px) * metadata_scroll.visible-height / metadata_scroll.viewport-height);
-                    border-radius: 4px;
-                    background: #9aa8b2;
+            ActionButton {
+                x: parent.width - 108px;
+                y: 9px;
+                width: 96px;
+                height: 30px;
+                title: "Save";
+                enabled: root.has_pending_changes;
+                clicked => {
+                    focus_sink.focus();
+                    root.apply_changes();
                 }
             }
         }

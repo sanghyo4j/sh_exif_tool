@@ -7,6 +7,8 @@ use crate::fs::{read_directory, FileSystemEntry};
 pub struct SlintApp {
     pub current_path: String,
     pub files: Vec<FileSystemEntry>,
+    pub selected_indices: Vec<i32>,
+    selection_anchor: Option<i32>,
 }
 
 impl SlintApp {
@@ -19,6 +21,8 @@ impl SlintApp {
         let mut app = Self {
             current_path: current_dir,
             files: Vec::new(),
+            selected_indices: Vec::new(),
+            selection_anchor: None,
         };
         app.load_folder();
         app
@@ -27,9 +31,15 @@ impl SlintApp {
     pub fn load_folder(&mut self) {
         let path = std::path::Path::new(&self.current_path);
         match read_directory(path) {
-            Ok(entries) => self.files = entries,
+            Ok(entries) => {
+                self.files = entries;
+                self.selected_indices.clear();
+                self.selection_anchor = None;
+            }
             Err(err) => {
                 self.files.clear();
+                self.selected_indices.clear();
+                self.selection_anchor = None;
                 eprintln!("Failed to read directory: {} ({err})", self.current_path);
             }
         }
@@ -44,12 +54,15 @@ impl SlintApp {
             modified: "-".into(),
             created: "-".into(),
             is_dir: true,
+            selected: self.selected_indices.contains(&0),
+            is_supported_image: false,
         });
 
-        for f in &self.files {
+        for (index, f) in self.files.iter().enumerate() {
             let name_str = f.path.file_name()
                 .map(|os_str| os_str.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
+            let ui_index = i32::try_from(index + 1).unwrap_or(i32::MAX);
             
             ui_items.push(UiFileEntry {
                 name: name_str.into(),
@@ -57,6 +70,8 @@ impl SlintApp {
                 modified: f.modified.map(format_time).unwrap_or_else(|| "-".into()).into(),
                 created: f.created.map(format_time).unwrap_or_else(|| "-".into()).into(),
                 is_dir: f.is_dir,
+                selected: self.selected_indices.contains(&ui_index),
+                is_supported_image: is_supported_image_file(&f.path),
             });
         }
 
@@ -138,10 +153,50 @@ impl SlintApp {
 
         Some((name, created, modified, entry.is_dir))
     }
+
+    pub fn select_ui_index(&mut self, index: i32, ctrl: bool, shift: bool) {
+        if index < 0 || usize::try_from(index).map_or(true, |idx| idx >= self.files.len() + 1) {
+            self.selected_indices.clear();
+            self.selection_anchor = None;
+            return;
+        }
+
+        if shift {
+            let anchor = self.selection_anchor.unwrap_or(index);
+            let start = anchor.min(index);
+            let end = anchor.max(index);
+            self.selected_indices = (start..=end).collect();
+        } else if ctrl {
+            if let Some(position) = self.selected_indices.iter().position(|selected| *selected == index) {
+                self.selected_indices.remove(position);
+            } else {
+                self.selected_indices.push(index);
+            }
+            self.selection_anchor = Some(index);
+        } else {
+            self.selected_indices.clear();
+            self.selected_indices.push(index);
+            self.selection_anchor = Some(index);
+        }
+
+        self.selected_indices.sort_unstable();
+        self.selected_indices.dedup();
+    }
+
+    pub fn selected_indices(&self) -> &[i32] {
+        &self.selected_indices
+    }
 }
 
 fn format_time(t: SystemTime) -> String {
     use chrono::{DateTime, Local};
     let dt: DateTime<Local> = t.into();
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn is_supported_image_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg"))
+        .unwrap_or(false)
 }

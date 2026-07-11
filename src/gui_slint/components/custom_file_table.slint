@@ -1,24 +1,86 @@
 import { ListView } from "std-widgets.slint";
 import { FileEntry } from "../types.slint";
 import { HDivider } from "dividers.slint";
+import { FontSettings } from "../theme.slint";
+
+component IconCell inherits Rectangle {
+    in property <bool> is_dir;
+    in property <bool> is_supported_image;
+
+    width: 22px;
+    height: 100%;
+
+    if is_dir: Rectangle {
+        x: 1px; y: 9px; width: 16px; height: 12px;
+        background: #f5c451; border-width: 1px; border-color: #d7a33a; border-radius: 2px;
+        Rectangle { x: 1px; y: -3px; width: 8px; height: 5px; background: #ffd976; border-width: 1px; border-color: #d7a33a; border-radius: 1px; }
+    }
+
+    if is_supported_image: Rectangle {
+        x: 2px; y: 7px; width: 15px; height: 16px;
+        background: #ffffff; border-width: 1px; border-color: #7aa7d9; border-radius: 1px;
+        Rectangle { x: 2px; y: 9px; width: 11px; height: 4px; background: #8ac278; }
+        Rectangle { x: 3px; y: 3px; width: 4px; height: 4px; background: #7aa7d9; border-radius: 2px; }
+    }
+
+    if !is_dir && !is_supported_image: Rectangle {
+        x: 2px; y: 7px; width: 14px; height: 16px;
+        background: #ffffff; border-width: 1px; border-color: #b8c2cc; border-radius: 1px;
+        Rectangle { x: 9px; y: 0px; width: 4px; height: 4px; background: #e8eef5; }
+    }
+}
+
+component MenuRow inherits Rectangle {
+    in property <string> title;
+    in property <bool> danger;
+    in property <bool> enabled;
+    callback clicked();
+
+    x: 1px;
+    width: 134px;
+    height: 31px;
+    background: touch.has-hover && enabled ? (danger ? #fff1f1 : #eaf4ff) : #ffffff;
+
+    Text {
+        x: 12px;
+        width: parent.width - 24px;
+        height: 100%;
+        text: root.title;
+        font-size: FontSettings.font_size_pt * 1pt;
+        color: !root.enabled ? #9aa8b2 : (root.danger ? #b42318 : #1f2933);
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { if (root.enabled) { root.clicked(); } }
+    }
+}
 
 export component CustomFileTable inherits Rectangle {
     in property <[FileEntry]> files;
     in-out property <int> selected_index;
+    in-out property <bool> context_menu_visible: false;
 
-    callback row_selected(int);
+    callback row_selected(int, bool, bool);
     callback row_clicked(int);
     callback row_activated(int);
     callback rename_requested(int);
     callback reload_requested();
+    callback duplicate_requested();
+    callback delete_requested();
     callback open_folder_requested();
     callback open_in_file_manager_requested();
     callback apply_requested();
     callback revert_requested();
     callback exit_requested();
 
-    horizontal-stretch: 0;
-    height: 100%;
+    property <length> menu_x: 0px;
+    property <length> menu_y: 0px;
+    property <length> menu_width: 136px;
+    property <length> menu_height: 97px;
+
     background: #ffffff;
     forward-focus: focus_scope;
 
@@ -27,8 +89,8 @@ export component CustomFileTable inherits Rectangle {
         height: 100%;
         spacing: 0px;
 
-        header := Rectangle {
-            height: 28px;
+        Rectangle {
+            height: 30px;
             background: #f7f9fb;
 
             HorizontalLayout {
@@ -38,61 +100,24 @@ export component CustomFileTable inherits Rectangle {
                 padding-right: 10px;
                 spacing: 0px;
 
-                Text {
-                    width: parent.width - size_header.width - modified_header.width - 20px;
-                    text: "Name";
-                    color: #37474f;
-                    font-size: 12px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-
-                size_header := Text {
-                    width: 92px;
-                    text: "Size";
-                    color: #37474f;
-                    font-size: 12px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                    horizontal-alignment: left;
-                }
-
-                modified_header := Text {
-                    width: 156px;
-                    text: "Modified";
-                    color: #37474f;
-                    font-size: 12px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                    horizontal-alignment: left;
-                }
+                Rectangle { width: 22px; }
+                Text { width: parent.width - 22px - size_header.width - modified_header.width - 20px; text: "Name"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; overflow: elide; }
+                size_header := Text { width: 92px; text: "Size"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; }
+                modified_header := Text { width: 156px; text: "Modified"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; }
             }
 
             HDivider { y: parent.height - 1px; }
         }
 
         list := ListView {
-            vertical-stretch: 1;
             width: 100%;
+            vertical-stretch: 1;
             vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
             horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
 
-            for entry[i] in files : Rectangle {
-                height: 28px;
-                background: i == root.selected_index ? #dbeafe : #ffffff;
-
-                TouchArea {
-                    width: 100%;
-                    height: 100%;
-
-                    clicked => {
-                        root.focus();
-                        root.selected_index = i;
-                        root.row_selected(i);
-                        root.row_clicked(i);
-                    }
-                }
+            for entry[i] in files: Rectangle {
+                height: 30px;
+                background: entry.selected ? #dbeafe : #ffffff;
 
                 HorizontalLayout {
                     width: 100%;
@@ -101,39 +126,56 @@ export component CustomFileTable inherits Rectangle {
                     padding-right: 10px;
                     spacing: 0px;
 
-                    Text {
-                        width: parent.width - size_cell.width - modified_cell.width - 20px;
-                        text: entry.is_dir && entry.name != "[..]" ? "[" + entry.name + "]" : entry.name;
-                        color: i == root.selected_index ? #0f172a : #1f2933;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
+                    IconCell { is_dir: entry.is_dir; is_supported_image: entry.is_supported_image; }
+                    Text { width: parent.width - 22px - size_cell.width - modified_cell.width - 20px; text: entry.is_dir && entry.name != "[..]" ? "[" + entry.name + "]" : entry.name; color: entry.selected ? #0f172a : #1f2933; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                    size_cell := Text { width: 92px; text: entry.size; color: #4b5563; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                    modified_cell := Text { width: 156px; text: entry.modified; color: #4b5563; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                }
 
-                    size_cell := Text {
-                        width: 92px;
-                        text: entry.size;
-                        color: #4b5563;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        horizontal-alignment: left;
-                        overflow: elide;
-                    }
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
 
-                    modified_cell := Text {
-                        width: 156px;
-                        text: entry.modified;
-                        color: #4b5563;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        horizontal-alignment: left;
-                        overflow: elide;
+                    pointer-event(event) => {
+                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                            root.context_menu_visible = false;
+                            root.focus();
+                            root.selected_index = i;
+                            root.row_selected(i, event.modifiers.control, event.modifiers.shift);
+                            root.row_clicked(i);
+                        }
+
+                        if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                            root.focus();
+                            root.selected_index = i;
+                            root.row_selected(i, false, false);
+                            root.menu_x = min(root.width - root.menu_width - 1px, max(1px, self.mouse-x + 1px));
+                            root.menu_y = min(root.height - root.menu_height - 1px, max(1px, list.y + parent.y + self.mouse-y + 1px));
+                            root.context_menu_visible = true;
+                        }
                     }
                 }
 
                 HDivider { y: parent.height - 1px; background: #eef2f5; }
             }
         }
+    }
+
+    if context_menu_visible: Rectangle {
+        x: root.menu_x;
+        y: root.menu_y;
+        width: root.menu_width;
+        height: root.menu_height;
+        background: #ffffff;
+        border-width: 1px;
+        border-color: #cfd8dc;
+        border-radius: 3px;
+
+        MenuRow { y: 1px; title: "Refresh"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.reload_requested(); } }
+        HDivider { y: 32px; background: #edf0f2; }
+        MenuRow { y: 33px; title: "Duplicate"; danger: false; enabled: root.selected_index > 0 && root.selected_index < root.files.length && !root.files[root.selected_index].is_dir; clicked => { root.context_menu_visible = false; if (root.selected_index > 0 && root.selected_index < root.files.length && !root.files[root.selected_index].is_dir) { root.duplicate_requested(); } } }
+        HDivider { y: 64px; background: #edf0f2; }
+        MenuRow { y: 65px; title: "Delete"; danger: true; enabled: root.selected_index > 0 && root.selected_index < root.files.length && !root.files[root.selected_index].is_dir; clicked => { root.context_menu_visible = false; if (root.selected_index > 0 && root.selected_index < root.files.length && !root.files[root.selected_index].is_dir) { root.delete_requested(); } } }
     }
 
     focus_scope := FocusScope {
@@ -144,65 +186,21 @@ export component CustomFileTable inherits Rectangle {
 
         key-pressed(event) => {
             if (event.text == Key.UpArrow) {
-                if (root.selected_index > 0) {
-                    root.selected_index -= 1;
-                    root.row_selected(root.selected_index);
-                }
+                if (root.selected_index > 0) { root.selected_index -= 1; root.row_selected(root.selected_index, false, false); }
                 return accept;
             }
-
             if (event.text == Key.DownArrow) {
-                if (root.selected_index < root.files.length - 1) {
-                    root.selected_index += 1;
-                    root.row_selected(root.selected_index);
-                }
+                if (root.selected_index < root.files.length - 1) { root.selected_index += 1; root.row_selected(root.selected_index, false, false); }
                 return accept;
             }
-
-            if (event.text == Key.Return) {
-                if (root.selected_index >= 0 && root.selected_index < root.files.length) {
-                    root.row_activated(root.selected_index);
-                }
-                return accept;
-            }
-
-            if (event.text == Key.F2) {
-                if (root.selected_index > 0 && root.selected_index < root.files.length) {
-                    root.rename_requested(root.selected_index);
-                }
-                return accept;
-            }
-
-            if (event.text == Key.F5) {
-                root.reload_requested();
-                return accept;
-            }
-
-            if ((event.text == "O" || event.text == "o") && event.modifiers.control && event.modifiers.shift) {
-                root.open_folder_requested();
-                return accept;
-            }
-
-            if ((event.text == "S" || event.text == "s") && event.modifiers.control) {
-                root.apply_requested();
-                return accept;
-            }
-
-            if ((event.text == "R" || event.text == "r") && event.modifiers.alt && event.modifiers.shift) {
-                root.open_in_file_manager_requested();
-                return accept;
-            }
-
-            if ((event.text == "R" || event.text == "r") && event.modifiers.control && !event.modifiers.shift) {
-                root.revert_requested();
-                return accept;
-            }
-
-            if ((event.text == "W" || event.text == "w") && event.modifiers.control) {
-                root.exit_requested();
-                return accept;
-            }
-
+            if (event.text == Key.Return) { if (root.selected_index >= 0 && root.selected_index < root.files.length) { root.row_activated(root.selected_index); } return accept; }
+            if (event.text == Key.F2) { if (root.selected_index > 0 && root.selected_index < root.files.length) { root.rename_requested(root.selected_index); } return accept; }
+            if (event.text == Key.F5) { root.reload_requested(); return accept; }
+            if ((event.text == "O" || event.text == "o") && event.modifiers.control && event.modifiers.shift) { root.open_folder_requested(); return accept; }
+            if ((event.text == "S" || event.text == "s") && event.modifiers.control) { root.apply_requested(); return accept; }
+            if ((event.text == "R" || event.text == "r") && event.modifiers.alt && event.modifiers.shift) { root.open_in_file_manager_requested(); return accept; }
+            if ((event.text == "R" || event.text == "r") && event.modifiers.control && !event.modifiers.shift) { root.revert_requested(); return accept; }
+            if ((event.text == "W" || event.text == "w") && event.modifiers.control) { root.exit_requested(); return accept; }
             reject
         }
     }

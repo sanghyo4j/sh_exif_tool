@@ -1,5 +1,6 @@
 import { Button, HorizontalBox, LineEdit } from "std-widgets.slint";
 import { HDivider } from "dividers.slint";
+import { FontSettings } from "../theme.slint";
 
 export component PathBar inherits Rectangle {
     in-out property <string> current_path;
@@ -24,7 +25,7 @@ export component PathBar inherits Rectangle {
             vertical-alignment: center;
             color: #5f6b75;
             font-weight: 700;
-            font-size: 12px;
+            font-size: FontSettings.font_size_pt * 1pt;
             width: 42px;
         }
 
@@ -50,7 +51,7 @@ export component PathBar inherits Rectangle {
                     width: parent.width - 18px;
                     height: 100%;
                     text: root.current_path;
-                    font-size: 13px;
+                    font-size: FontSettings.font_size_pt * 1pt;
                     color: #263238;
                     horizontal-alignment: left;
                     vertical-alignment: center;
@@ -64,7 +65,7 @@ export component PathBar inherits Rectangle {
                 width: parent.width - 8px;
                 height: parent.height - 4px;
                 text: root.current_path;
-                font-size: 13px;
+                font-size: FontSettings.font_size_pt * 1pt;
 
                 init => {
                     self.focus();
