@@ -26,6 +26,10 @@ export component MainWindow inherits Window {
     in-out property <string> selected_created: "N/A";
     in-out property <string> selected_modified: "N/A";
     in-out property <bool> selected_is_dir: false;
+    in-out property <int> selected_file_count: 0;
+    in-out property <int> selected_recyclable_count: 0;
+    in-out property <int> copied_file_count: 0;
+    in-out property <string> selected_delete_message: "";
     in-out property <int> item_count: 0;
     in-out property <string> taken_date: "";
     in-out property <string> camera_make: "";
@@ -46,6 +50,28 @@ export component MainWindow inherits Window {
     in-out property <string> gps_latitude: "";
     in-out property <string> gps_longitude: "";
     in-out property <string> gps_altitude: "";
+    in-out property <string> selected_name_status: "";
+    in-out property <string> selected_created_status: "";
+    in-out property <string> selected_modified_status: "";
+    in-out property <string> taken_date_status: "";
+    in-out property <string> camera_make_status: "";
+    in-out property <string> camera_model_status: "";
+    in-out property <string> lens_model_status: "";
+    in-out property <string> software_status: "";
+    in-out property <string> artist_status: "";
+    in-out property <string> shutter_speed_status: "";
+    in-out property <string> aperture_status: "";
+    in-out property <string> iso_speed_status: "";
+    in-out property <string> focal_length_status: "";
+    in-out property <string> flash_fired_status: "";
+    in-out property <string> metering_mode_status: "";
+    in-out property <string> image_width_status: "";
+    in-out property <string> image_height_status: "";
+    in-out property <string> orientation_status: "";
+    in-out property <string> color_space_status: "";
+    in-out property <string> gps_latitude_status: "";
+    in-out property <string> gps_longitude_status: "";
+    in-out property <string> gps_altitude_status: "";
     in-out property <string> original_selected_name: "N/A";
     in-out property <string> original_selected_created: "N/A";
     in-out property <string> original_selected_modified: "N/A";
@@ -98,13 +124,15 @@ export component MainWindow inherits Window {
     in-out property <bool> confirm_delete_visible: false;
     in-out property <bool> file_context_menu_visible: false;
     in-out property <bool> show_only_supported_images: true;
+    in-out property <bool> show_extension_in_file_name: false;
 
     callback open_dir(int);
     callback reload();
     callback go_parent();
     callback change_dir(string);
     callback save_copy();
-    callback duplicate_file();
+    callback copy_files();
+    callback paste_files();
     callback delete_file();
     callback confirm_delete_file();
     callback open_in_explorer();
@@ -112,13 +140,16 @@ export component MainWindow inherits Window {
     callback apply_changes();
     callback revert_changes();
     callback remove_exif_tags();
+    callback remove_gps_information();
     callback create_exif_structure();
     callback fill_taken_date_from_filename();
     callback fill_taken_date_from_created_date();
+    callback set_modified_date_from_created_date();
     callback metadata_value_edited();
     callback table_row_clicked(int);
     callback table_row_selected(int, bool, bool);
     callback set_show_only_supported_images(bool);
+    callback set_show_extension_in_file_name(bool);
 
     MenuBar {
         Menu {
@@ -134,14 +165,14 @@ export component MainWindow inherits Window {
                 }
             }
             MenuItem {
-                title: "&Delete File";
-                enabled: root.selected_index >= 0 && !root.selected_is_dir;
+                title: "&Delete";
+                enabled: root.selected_recyclable_count > 0;
                 activated => {
                     root.file_context_menu_visible = false;
                     root.editing_path = false;
                     root.confirm_delete_visible = true;
-                    root.message_title = "Delete File";
-                    root.message_text = "Move \"" + root.selected_name + "\" to the Recycle Bin?";
+                    root.message_title = "Delete";
+                    root.message_text = root.selected_delete_message;
                 }
             }
             MenuSeparator {}
@@ -197,7 +228,7 @@ export component MainWindow inherits Window {
             title: "&View";
 
             MenuItem {
-                title: "Show Only JPG/JPEG Files";
+                title: "Show Only *.jpg/*.jpeg Files";
                 checkable: true;
                 checked: root.show_only_supported_images;
                 activated => {
@@ -205,6 +236,17 @@ export component MainWindow inherits Window {
                     root.editing_path = false;
                     root.show_only_supported_images = !root.show_only_supported_images;
                     root.set_show_only_supported_images(root.show_only_supported_images);
+                }
+            }
+            MenuItem {
+                title: "Show Extension in Metadata File Name";
+                checkable: true;
+                checked: root.show_extension_in_file_name;
+                activated => {
+                    root.file_context_menu_visible = false;
+                    root.editing_path = false;
+                    root.show_extension_in_file_name = !root.show_extension_in_file_name;
+                    root.set_show_extension_in_file_name(root.show_extension_in_file_name);
                 }
             }
             MenuSeparator {}
@@ -342,6 +384,9 @@ export component MainWindow inherits Window {
                 height: 100%;
                 files: root.files;
                 selected_index <=> root.selected_index;
+                selected_file_count: root.selected_file_count;
+                selected_recyclable_count: root.selected_recyclable_count;
+                copied_file_count: root.copied_file_count;
                 context_menu_visible <=> root.file_context_menu_visible;
                 row_selected(index, ctrl, shift) => {
                     root.editing_path = false;
@@ -393,18 +438,20 @@ export component MainWindow inherits Window {
                     root.editing_path = false;
                     root.reload();
                 }
-                duplicate_requested() => {
+                copy_requested() => {
                     root.editing_path = false;
-                    if (root.selected_index >= 0 && !root.selected_is_dir) {
-                        root.duplicate_file();
-                    }
+                    root.copy_files();
+                }
+                paste_requested() => {
+                    root.editing_path = false;
+                    root.paste_files();
                 }
                 delete_requested() => {
                     root.editing_path = false;
-                    if (root.selected_index >= 0 && !root.selected_is_dir) {
+                    if (root.selected_recyclable_count > 0) {
                         root.confirm_delete_visible = true;
-                        root.message_title = "Delete File";
-                        root.message_text = "Move \"" + root.selected_name + "\" to the Recycle Bin?";
+                        root.message_title = "Delete";
+                        root.message_text = root.selected_delete_message;
                     }
                 }
                 open_folder_requested() => {
@@ -463,6 +510,28 @@ export component MainWindow inherits Window {
                 gps_latitude <=> root.gps_latitude;
                 gps_longitude <=> root.gps_longitude;
                 gps_altitude <=> root.gps_altitude;
+                selected_name_status <=> root.selected_name_status;
+                selected_created_status <=> root.selected_created_status;
+                selected_modified_status <=> root.selected_modified_status;
+                taken_date_status <=> root.taken_date_status;
+                camera_make_status <=> root.camera_make_status;
+                camera_model_status <=> root.camera_model_status;
+                lens_model_status <=> root.lens_model_status;
+                software_status <=> root.software_status;
+                artist_status <=> root.artist_status;
+                shutter_speed_status <=> root.shutter_speed_status;
+                aperture_status <=> root.aperture_status;
+                iso_speed_status <=> root.iso_speed_status;
+                focal_length_status <=> root.focal_length_status;
+                flash_fired_status <=> root.flash_fired_status;
+                metering_mode_status <=> root.metering_mode_status;
+                image_width_status <=> root.image_width_status;
+                image_height_status <=> root.image_height_status;
+                orientation_status <=> root.orientation_status;
+                color_space_status <=> root.color_space_status;
+                gps_latitude_status <=> root.gps_latitude_status;
+                gps_longitude_status <=> root.gps_longitude_status;
+                gps_altitude_status <=> root.gps_altitude_status;
                 exif_available <=> root.exif_available;
                 has_pending_changes <=> root.metadata_dirty;
                 selected_name_dirty <=> root.selected_name_dirty;
@@ -518,10 +587,6 @@ export component MainWindow inherits Window {
                     root.gps_longitude_dirty = false;
                     root.gps_altitude_dirty = false;
                 }
-                duplicate_file() => {
-                    root.editing_path = false;
-                    root.duplicate_file();
-                }
                 fill_taken_date_from_filename() => {
                     root.editing_path = false;
                     root.fill_taken_date_from_filename();
@@ -530,9 +595,20 @@ export component MainWindow inherits Window {
                     root.editing_path = false;
                     root.fill_taken_date_from_created_date();
                 }
+                set_modified_date_from_created_date() => {
+                    root.editing_path = false;
+                    root.set_modified_date_from_created_date();
+                }
                 remove_exif_tags() => {
                     root.editing_path = false;
                     root.remove_exif_tags();
+                }
+                remove_gps_information() => {
+                    root.editing_path = false;
+                    root.gps_latitude = "";
+                    root.gps_longitude = "";
+                    root.gps_altitude = "";
+                    root.metadata_value_edited();
                 }
                 create_exif_structure() => {
                     root.editing_path = false;

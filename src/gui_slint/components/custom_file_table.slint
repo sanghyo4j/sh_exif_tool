@@ -47,6 +47,9 @@ component MenuRow inherits Rectangle {
 export component CustomFileTable inherits Rectangle {
     in property <[FileEntry]> files;
     in-out property <int> selected_index;
+    in property <int> selected_file_count: 0;
+    in property <int> selected_recyclable_count: 0;
+    in property <int> copied_file_count: 0;
     in-out property <bool> context_menu_visible: false;
 
     callback row_selected(int, bool, bool);
@@ -54,7 +57,8 @@ export component CustomFileTable inherits Rectangle {
     callback row_activated(int);
     callback rename_requested(int);
     callback reload_requested();
-    callback duplicate_requested();
+    callback copy_requested();
+    callback paste_requested();
     callback delete_requested();
     callback open_folder_requested();
     callback open_in_file_manager_requested();
@@ -65,7 +69,7 @@ export component CustomFileTable inherits Rectangle {
     property <length> menu_x: 0px;
     property <length> menu_y: 0px;
     property <length> menu_width: 136px;
-    property <length> menu_height: 97px;
+    property <length> menu_height: 161px;
 
     background: #ffffff;
     forward-focus: focus_scope;
@@ -134,7 +138,9 @@ export component CustomFileTable inherits Rectangle {
                         if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                             root.focus();
                             root.selected_index = i;
-                            root.row_selected(i, false, false);
+                            if (!entry.selected) {
+                                root.row_selected(i, false, false);
+                            }
                             root.menu_x = min(root.width - root.menu_width - 1px, max(1px, self.mouse-x + 1px));
                             root.menu_y = min(root.height - root.menu_height - 1px, max(1px, list.y + parent.y + self.mouse-y + 1px));
                             root.context_menu_visible = true;
@@ -159,9 +165,13 @@ export component CustomFileTable inherits Rectangle {
 
         MenuRow { y: 1px; title: "Refresh"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.reload_requested(); } }
         HDivider { y: 32px; background: #edf0f2; }
-        MenuRow { y: 33px; title: "Duplicate"; danger: false; enabled: root.selected_index > 0 && root.selected_index < root.files.length && !root.files[root.selected_index].is_dir; clicked => { root.context_menu_visible = false; if (root.selected_index > 0 && root.selected_index < root.files.length && !root.files[root.selected_index].is_dir) { root.duplicate_requested(); } } }
+        MenuRow { y: 33px; title: "Rename"; danger: false; enabled: root.selected_recyclable_count == 1; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count == 1) { root.rename_requested(root.selected_index); } } }
         HDivider { y: 64px; background: #edf0f2; }
-        MenuRow { y: 65px; title: "Delete"; danger: true; enabled: root.selected_index > 0 && root.selected_index < root.files.length && !root.files[root.selected_index].is_dir; clicked => { root.context_menu_visible = false; if (root.selected_index > 0 && root.selected_index < root.files.length && !root.files[root.selected_index].is_dir) { root.delete_requested(); } } }
+        MenuRow { y: 65px; title: "Copy"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.copy_requested(); } } }
+        HDivider { y: 96px; background: #edf0f2; }
+        MenuRow { y: 97px; title: "Paste"; danger: false; enabled: root.copied_file_count > 0; clicked => { root.context_menu_visible = false; if (root.copied_file_count > 0) { root.paste_requested(); } } }
+        HDivider { y: 128px; background: #edf0f2; }
+        MenuRow { y: 129px; title: "Delete"; danger: true; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.delete_requested(); } } }
     }
 
     focus_scope := FocusScope {
@@ -182,6 +192,8 @@ export component CustomFileTable inherits Rectangle {
             if (event.text == Key.Return) { if (root.selected_index >= 0 && root.selected_index < root.files.length) { root.row_activated(root.selected_index); } return accept; }
             if (event.text == Key.F2) { if (root.selected_index > 0 && root.selected_index < root.files.length) { root.rename_requested(root.selected_index); } return accept; }
             if (event.text == Key.F5) { root.reload_requested(); return accept; }
+            if ((event.text == "C" || event.text == "c") && event.modifiers.control) { root.copy_requested(); return accept; }
+            if ((event.text == "V" || event.text == "v") && event.modifiers.control) { root.paste_requested(); return accept; }
             if ((event.text == "O" || event.text == "o") && event.modifiers.control && event.modifiers.shift) { root.open_folder_requested(); return accept; }
             if ((event.text == "S" || event.text == "s") && event.modifiers.control) { root.apply_requested(); return accept; }
             if ((event.text == "R" || event.text == "r") && event.modifiers.alt && event.modifiers.shift) { root.open_in_file_manager_requested(); return accept; }
