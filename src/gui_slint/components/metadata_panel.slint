@@ -1,5 +1,5 @@
 import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
-import { SectionHeader, EditableInfoRow, ReadOnlyCheckRow } from "info_row.slint";
+import { SectionHeader, EditableInfoRow, ExifAvailabilityRow } from "info_row.slint";
 import { FontSettings } from "../theme.slint";
 
 component ToolButton inherits Rectangle {
@@ -48,8 +48,9 @@ component MenuRow inherits Rectangle {
     in property <bool> danger: false;
     callback clicked();
 
-    width: 220px;
-    height: 30px;
+    x: 1px;
+    width: 278px;
+    height: 31px;
     background: area.has-hover ? (danger ? #fff1f1 : #eaf4ff) : #ffffff;
 
     Text {
@@ -152,7 +153,9 @@ export component MetadataPanel inherits Rectangle {
     callback revert_changes();
     callback duplicate_file();
     callback fill_taken_date_from_filename();
+    callback fill_taken_date_from_created_date();
     callback remove_exif_tags();
+    callback create_exif_structure();
     callback metadata_edited();
     callback shortcut_requested(string);
 
@@ -237,7 +240,11 @@ export component MetadataPanel inherits Rectangle {
                     file_name_row := EditableInfoRow { label: "File Name"; value <=> root.selected_name; dirty <=> root.selected_name_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     EditableInfoRow { label: "File Created"; value <=> root.selected_created; dirty <=> root.selected_created_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     EditableInfoRow { label: "File Modified"; value <=> root.selected_modified; dirty <=> root.selected_modified_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    ReadOnlyCheckRow { label: "EXIF Tag Available"; checked: root.exif_available; }
+                    ExifAvailabilityRow {
+                        label: "EXIF Tag Available";
+                        available: root.exif_available;
+                        create_requested => { root.create_exif_structure(); }
+                    }
 
                     SectionHeader { title: "CAMERA"; }
                     EditableInfoRow { label: "Taken Date"; value <=> root.taken_date; dirty <=> root.taken_date_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
@@ -307,17 +314,19 @@ export component MetadataPanel inherits Rectangle {
     }
 
     if tools_menu_visible: Rectangle {
-        x: parent.width - 232px;
+        x: parent.width - 292px;
         y: 30px;
-        width: 220px;
-        height: 63px;
+        width: 280px;
+        height: 97px;
         background: #ffffff;
         border-width: 1px;
         border-color: #cfd8dc;
         border-radius: 3px;
 
-        MenuRow { y: 1px; title: "Taken Date from Filename"; clicked => { root.tools_menu_visible = false; root.fill_taken_date_from_filename(); } }
-        Rectangle { y: 31px; width: 100%; height: 1px; background: #edf0f2; }
-        MenuRow { y: 32px; title: "Remove EXIF Tags"; danger: true; clicked => { root.tools_menu_visible = false; root.remove_exif_tags(); } }
+        MenuRow { y: 1px; title: "Set Taken Date from Filename"; clicked => { root.tools_menu_visible = false; root.fill_taken_date_from_filename(); } }
+        Rectangle { y: 32px; width: 100%; height: 1px; background: #edf0f2; }
+        MenuRow { y: 33px; title: "Set Taken Date from Created Date"; clicked => { root.tools_menu_visible = false; root.fill_taken_date_from_created_date(); } }
+        Rectangle { y: 64px; width: 100%; height: 1px; background: #edf0f2; }
+        MenuRow { y: 65px; title: "Remove EXIF Tags"; danger: true; clicked => { root.tools_menu_visible = false; root.remove_exif_tags(); } }
     }
 }

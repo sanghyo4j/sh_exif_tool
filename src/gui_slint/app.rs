@@ -8,6 +8,7 @@ pub struct SlintApp {
     pub current_path: String,
     pub files: Vec<FileSystemEntry>,
     pub selected_indices: Vec<i32>,
+    pub show_only_supported_images: bool,
     selection_anchor: Option<i32>,
 }
 
@@ -22,6 +23,7 @@ impl SlintApp {
             current_path: current_dir,
             files: Vec::new(),
             selected_indices: Vec::new(),
+            show_only_supported_images: true,
             selection_anchor: None,
         };
         app.load_folder();
@@ -58,11 +60,11 @@ impl SlintApp {
             is_supported_image: false,
         });
 
-        for (index, f) in self.files.iter().enumerate() {
+        for (visible_index, f) in self.visible_files().into_iter().enumerate() {
             let name_str = f.path.file_name()
                 .map(|os_str| os_str.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
-            let ui_index = i32::try_from(index + 1).unwrap_or(i32::MAX);
+            let ui_index = i32::try_from(visible_index + 1).unwrap_or(i32::MAX);
             
             ui_items.push(UiFileEntry {
                 name: name_str.into(),
@@ -87,7 +89,7 @@ impl SlintApp {
             StandardListViewItem::from("-"),
         ])));
 
-        for f in &self.files {
+        for f in self.visible_files() {
             let name = f.path.file_name()
                 .map(|os_str| os_str.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
@@ -114,7 +116,7 @@ impl SlintApp {
     }
 
     pub fn file_count(&self) -> usize {
-        self.files.iter().filter(|entry| !entry.is_dir).count()
+        self.visible_files().iter().filter(|entry| !entry.is_dir).count()
     }
 
     pub fn path_for_ui_index(&self, index: i32) -> Option<PathBuf> {
@@ -123,12 +125,12 @@ impl SlintApp {
             return Some(PathBuf::from(&self.current_path).parent()?.to_path_buf());
         }
 
-        self.files.get(idx - 1).map(|entry| entry.path.clone())
+        self.visible_files().get(idx - 1).map(|entry| entry.path.clone())
     }
 
     pub fn ui_index_for_path(&self, path: &std::path::Path) -> Option<i32> {
-        self.files
-            .iter()
+        self.visible_files()
+            .into_iter()
             .position(|entry| entry.path == path)
             .and_then(|index| i32::try_from(index + 1).ok())
     }
@@ -144,7 +146,8 @@ impl SlintApp {
             ));
         }
 
-        let entry = self.files.get(idx - 1)?;
+        let visible = self.visible_files();
+        let entry = visible.get(idx - 1)?;
         let name = entry.path.file_name()
             .map(|os_str| os_str.to_string_lossy().to_string())
             .unwrap_or_else(|| "Unknown".to_string());
@@ -155,7 +158,7 @@ impl SlintApp {
     }
 
     pub fn select_ui_index(&mut self, index: i32, ctrl: bool, shift: bool) {
-        if index < 0 || usize::try_from(index).map_or(true, |idx| idx >= self.files.len() + 1) {
+        if index < 0 || usize::try_from(index).map_or(true, |idx| idx >= self.visible_files().len() + 1) {
             self.selected_indices.clear();
             self.selection_anchor = None;
             return;
@@ -185,6 +188,17 @@ impl SlintApp {
 
     pub fn selected_indices(&self) -> &[i32] {
         &self.selected_indices
+    }
+
+    fn visible_files(&self) -> Vec<&FileSystemEntry> {
+        self.files
+            .iter()
+            .filter(|entry| {
+                !self.show_only_supported_images
+                    || entry.is_dir
+                    || is_supported_image_file(&entry.path)
+            })
+            .collect()
     }
 }
 

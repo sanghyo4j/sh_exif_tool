@@ -97,6 +97,7 @@ export component MainWindow inherits Window {
     in-out property <string> message_text: "";
     in-out property <bool> confirm_delete_visible: false;
     in-out property <bool> file_context_menu_visible: false;
+    in-out property <bool> show_only_supported_images: true;
 
     callback open_dir(int);
     callback reload();
@@ -111,10 +112,13 @@ export component MainWindow inherits Window {
     callback apply_changes();
     callback revert_changes();
     callback remove_exif_tags();
+    callback create_exif_structure();
     callback fill_taken_date_from_filename();
+    callback fill_taken_date_from_created_date();
     callback metadata_value_edited();
     callback table_row_clicked(int);
     callback table_row_selected(int, bool, bool);
+    callback set_show_only_supported_images(bool);
 
     MenuBar {
         Menu {
@@ -192,6 +196,18 @@ export component MainWindow inherits Window {
         Menu {
             title: "&View";
 
+            MenuItem {
+                title: "Show Only JPG/JPEG Files";
+                checkable: true;
+                checked: root.show_only_supported_images;
+                activated => {
+                    root.file_context_menu_visible = false;
+                    root.editing_path = false;
+                    root.show_only_supported_images = !root.show_only_supported_images;
+                    root.set_show_only_supported_images(root.show_only_supported_images);
+                }
+            }
+            MenuSeparator {}
             MenuItem {
                 title: "Increase Font Size";
                 enabled: FontSettings.font_size_pt < 15;
@@ -510,9 +526,17 @@ export component MainWindow inherits Window {
                     root.editing_path = false;
                     root.fill_taken_date_from_filename();
                 }
+                fill_taken_date_from_created_date() => {
+                    root.editing_path = false;
+                    root.fill_taken_date_from_created_date();
+                }
                 remove_exif_tags() => {
                     root.editing_path = false;
                     root.remove_exif_tags();
+                }
+                create_exif_structure() => {
+                    root.editing_path = false;
+                    root.create_exif_structure();
                 }
                 metadata_edited() => {
                     root.metadata_value_edited();

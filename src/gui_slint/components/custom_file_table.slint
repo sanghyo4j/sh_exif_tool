@@ -1,6 +1,7 @@
 import { ListView } from "std-widgets.slint";
 import { FileEntry } from "../types.slint";
 import { HDivider } from "dividers.slint";
+import { FileIcon, FolderIcon, ImageFileIcon } from "icons.slint";
 import { FontSettings } from "../theme.slint";
 
 component IconCell inherits Rectangle {
@@ -10,24 +11,9 @@ component IconCell inherits Rectangle {
     width: 22px;
     height: 100%;
 
-    if is_dir: Rectangle {
-        x: 1px; y: 9px; width: 16px; height: 12px;
-        background: #f5c451; border-width: 1px; border-color: #d7a33a; border-radius: 2px;
-        Rectangle { x: 1px; y: -3px; width: 8px; height: 5px; background: #ffd976; border-width: 1px; border-color: #d7a33a; border-radius: 1px; }
-    }
-
-    if is_supported_image: Rectangle {
-        x: 2px; y: 7px; width: 15px; height: 16px;
-        background: #ffffff; border-width: 1px; border-color: #7aa7d9; border-radius: 1px;
-        Rectangle { x: 2px; y: 9px; width: 11px; height: 4px; background: #8ac278; }
-        Rectangle { x: 3px; y: 3px; width: 4px; height: 4px; background: #7aa7d9; border-radius: 2px; }
-    }
-
-    if !is_dir && !is_supported_image: Rectangle {
-        x: 2px; y: 7px; width: 14px; height: 16px;
-        background: #ffffff; border-width: 1px; border-color: #b8c2cc; border-radius: 1px;
-        Rectangle { x: 9px; y: 0px; width: 4px; height: 4px; background: #e8eef5; }
-    }
+    if is_dir: FolderIcon { y: 4px; }
+    if !is_dir && is_supported_image: ImageFileIcon { y: 4px; }
+    if !is_dir && !is_supported_image: FileIcon { y: 4px; }
 }
 
 component MenuRow inherits Rectangle {

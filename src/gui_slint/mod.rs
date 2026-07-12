@@ -71,6 +71,17 @@ impl GuiRunner for SlintRunner {
         // 초기 실행
         refresh_ui(None);
 
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
+        ui.on_set_show_only_supported_images(move |enabled| {
+            {
+                let mut app = app_handle.borrow_mut();
+                app.show_only_supported_images = enabled;
+                app.selected_indices.clear();
+            }
+            refresh(None);
+        });
+
         // 2. 새로고침 핸들러 (버튼 등)
         let app_handle = app.clone();
         let ui_handle = ui.as_weak();
@@ -215,11 +226,12 @@ impl GuiRunner for SlintRunner {
         });
 
         let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
         let ui_handle = ui.as_weak();
-        ui.on_fill_taken_date_from_filename(move || {
+        ui.on_create_exif_structure(move || {
             if let Some(ui) = ui_handle.upgrade() {
                 if ui.get_selected_index() < 0 || ui.get_selected_is_dir() {
-                    show_message(&ui, "Unable to Fill Taken Date", "Select a file before filling Taken Date.");
+                    show_message(&ui, "Create EXIF Failed", "Select a file before creating EXIF.");
                     return;
                 }
 
@@ -229,16 +241,103 @@ impl GuiRunner for SlintRunner {
                 };
 
                 let Some(path) = path else {
-                    show_message(&ui, "Unable to Fill Taken Date", "Selected file could not be resolved.");
+                    show_message(&ui, "Create EXIF Failed", "Selected file could not be resolved.");
+                    return;
+                };
+
+                if read_exif_metadata(&path).has_exif {
+                    show_message(&ui, "Create EXIF", "EXIF is already available.");
+                    return;
+                }
+
+                let metadata = collect_current_exif_metadata(&ui);
+                let new_path = match rewrite_basic_exif_metadata(&path, &metadata) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        show_message(&ui, "Create EXIF Failed", &err);
+                        return;
+                    }
+                };
+
+                {
+                    let mut app = app_handle.borrow_mut();
+                    app.load_folder();
+                }
+                refresh(Some(new_path.clone()));
+                show_message(
+                    &ui,
+                    "EXIF File Created",
+                    &format!("Created {}", new_path.display()),
+                );
+            }
+        });
+
+        let app_handle = app.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_fill_taken_date_from_filename(move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                if ui.get_selected_index() < 0 || ui.get_selected_is_dir() {
+                    show_message(&ui, "Unable to Set Taken Date", "Select a file before setting Taken Date.");
+                    return;
+                }
+
+                let path = {
+                    let app = app_handle.borrow();
+                    app.path_for_ui_index(ui.get_selected_index())
+                };
+
+                let Some(path) = path else {
+                    show_message(&ui, "Unable to Set Taken Date", "Selected file could not be resolved.");
                     return;
                 };
 
                 let Some(datetime) = extract_datetime_from_filename(&path) else {
-                    show_message(&ui, "Unable to Fill Taken Date", "No supported date pattern was found in the filename.");
+                    show_message(&ui, "Unable to Set Taken Date", "No supported date pattern was found in the filename.");
                     return;
                 };
 
                 ui.set_taken_date(datetime.into());
+                update_metadata_dirty_state(&ui);
+            }
+        });
+
+        let ui_handle = ui.as_weak();
+        ui.on_fill_taken_date_from_created_date(move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                if ui.get_selected_index() < 0 || ui.get_selected_is_dir() {
+                    show_message(&ui, "Unable to Set Taken Date", "Select a file before setting Taken Date.");
+                    return;
+                }
+
+                let created = ui.get_selected_created().to_string();
+                let modified = ui.get_selected_modified().to_string();
+
+                let created_time = match parse_timestamp(&created) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        show_message(&ui, "Unable to Set Taken Date", &err);
+                        return;
+                    }
+                };
+
+                let modified_time = match parse_timestamp(&modified) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        show_message(&ui, "Unable to Set Taken Date", &err);
+                        return;
+                    }
+                };
+
+                if modified_time < created_time {
+                    show_message(
+                        &ui,
+                        "Unable to Set Taken Date",
+                        "File modified date is earlier than file created date.",
+                    );
+                    return;
+                }
+
+                ui.set_taken_date(created.into());
                 update_metadata_dirty_state(&ui);
             }
         });

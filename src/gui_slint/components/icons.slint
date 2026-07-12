@@ -1,0 +1,103 @@
+export component FolderIcon inherits Rectangle {
+    width: 22px;
+    height: 22px;
+    background: #00000000;
+
+    Rectangle {
+        x: 2px;
+        y: 8px;
+        width: 18px;
+        height: 12px;
+        background: #f5c451;
+        border-width: 1px;
+        border-color: #c99a2c;
+        border-radius: 2px;
+    }
+
+    Rectangle {
+        x: 3px;
+        y: 5px;
+        width: 10px;
+        height: 5px;
+        background: #ffd976;
+        border-width: 1px;
+        border-color: #c99a2c;
+        border-radius: 1px;
+    }
+}
+
+export component FileIcon inherits Rectangle {
+    width: 22px;
+    height: 22px;
+    background: #00000000;
+
+    Rectangle {
+        x: 4px;
+        y: 3px;
+        width: 14px;
+        height: 16px;
+        background: #ffffff;
+        border-width: 1px;
+        border-color: #b8c2cc;
+        border-radius: 1px;
+    }
+
+    Rectangle {
+        x: 13px;
+        y: 4px;
+        width: 4px;
+        height: 4px;
+        background: #e8eef5;
+    }
+}
+
+export component ImageFileIcon inherits Rectangle {
+    width: 22px;
+    height: 22px;
+    background: #00000000;
+
+    Rectangle {
+        x: 4px;
+        y: 3px;
+        width: 15px;
+        height: 16px;
+        background: #ffffff;
+        border-width: 1px;
+        border-color: #7aa7d9;
+        border-radius: 1px;
+    }
+
+    Rectangle {
+        x: 6px;
+        y: 12px;
+        width: 11px;
+        height: 4px;
+        background: #8ac278;
+    }
+
+    Rectangle {
+        x: 7px;
+        y: 6px;
+        width: 4px;
+        height: 4px;
+        background: #7aa7d9;
+        border-radius: 2px;
+    }
+}
+
+export component RefreshIcon inherits Rectangle {
+    width: 22px;
+    height: 22px;
+    background: #00000000;
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: "↻";
+        font-family: "Segoe UI Symbol";
+        font-size: 16pt;
+        color: #315a72;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
