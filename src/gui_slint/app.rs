@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use slint::{ModelRc, StandardListViewItem, VecModel};
 use super::FileEntry as UiFileEntry; 
+use crate::exif::read_exif_metadata;
 use crate::fs::{read_directory, FileSystemEntry};
 
 pub struct SlintApp {
@@ -58,6 +59,7 @@ impl SlintApp {
             is_dir: true,
             selected: self.selected_indices.contains(&0),
             is_supported_image: false,
+            has_exif: false,
         });
 
         for (visible_index, f) in self.visible_files().into_iter().enumerate() {
@@ -74,6 +76,7 @@ impl SlintApp {
                 is_dir: f.is_dir,
                 selected: self.selected_indices.contains(&ui_index),
                 is_supported_image: is_supported_image_file(&f.path),
+                has_exif: file_has_exif(&f.path, f.is_dir),
             });
         }
 
@@ -85,6 +88,7 @@ impl SlintApp {
 
         rows.push(ModelRc::new(VecModel::from(vec![
             StandardListViewItem::from("[..]"),
+            StandardListViewItem::from("-"),
             StandardListViewItem::from("-"),
             StandardListViewItem::from("-"),
         ])));
@@ -104,11 +108,19 @@ impl SlintApp {
                 format!("{} KB", (f.size + 1023) / 1024)
             };
             let modified = f.modified.map(format_time).unwrap_or_else(|| "-".to_string());
+            let exif = if f.is_dir {
+                "-".to_string()
+            } else if file_has_exif(&f.path, f.is_dir) {
+                "O".to_string()
+            } else {
+                "X".to_string()
+            };
 
             rows.push(ModelRc::new(VecModel::from(vec![
                 StandardListViewItem::from(display_name.as_str()),
                 StandardListViewItem::from(size.as_str()),
                 StandardListViewItem::from(modified.as_str()),
+                StandardListViewItem::from(exif.as_str()),
             ])));
         }
 
@@ -190,6 +202,17 @@ impl SlintApp {
         &self.selected_indices
     }
 
+    pub fn select_files_without_exif(&mut self) {
+        self.selected_indices = self
+            .visible_files()
+            .into_iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.is_dir && !file_has_exif(&entry.path, entry.is_dir))
+            .filter_map(|(index, _)| i32::try_from(index + 1).ok())
+            .collect();
+        self.selection_anchor = self.selected_indices.first().copied();
+    }
+
     fn visible_files(&self) -> Vec<&FileSystemEntry> {
         self.files
             .iter()
@@ -213,4 +236,8 @@ fn is_supported_image_file(path: &std::path::Path) -> bool {
         .and_then(|extension| extension.to_str())
         .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg"))
         .unwrap_or(false)
+}
+
+fn file_has_exif(path: &std::path::Path, is_dir: bool) -> bool {
+    !is_dir && is_supported_image_file(path) && read_exif_metadata(path).has_exif
 }

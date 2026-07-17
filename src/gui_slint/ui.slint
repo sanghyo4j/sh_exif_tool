@@ -150,6 +150,7 @@ export component MainWindow inherits Window {
     callback table_row_selected(int, bool, bool);
     callback set_show_only_supported_images(bool);
     callback set_show_extension_in_file_name(bool);
+    callback select_files_without_exif();
 
     MenuBar {
         Menu {
@@ -222,6 +223,19 @@ export component MainWindow inherits Window {
             MenuItem { title: "Analyze &Missing Metadata"; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
             MenuSeparator {}
             MenuItem { title: "&Clear Results"; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
+        }
+
+        Menu {
+            title: "&Select";
+
+            MenuItem {
+                title: "Select Files Without EXIF";
+                activated => {
+                    root.file_context_menu_visible = false;
+                    root.editing_path = false;
+                    root.select_files_without_exif();
+                }
+            }
         }
 
         Menu {

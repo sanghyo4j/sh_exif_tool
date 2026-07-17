@@ -91,9 +91,10 @@ export component CustomFileTable inherits Rectangle {
                 spacing: 0px;
 
                 Rectangle { width: 22px; }
-                Text { width: parent.width - 22px - size_header.width - modified_header.width - 20px; text: "Name"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; overflow: elide; }
+                Text { width: parent.width - 22px - size_header.width - modified_header.width - exif_header.width - 20px; text: "Name"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; overflow: elide; }
                 size_header := Text { width: 92px; text: "Size"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; }
                 modified_header := Text { width: 156px; text: "Modified"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; }
+                exif_header := Text { width: 52px; text: "EXIF"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; horizontal-alignment: center; }
             }
 
             HDivider { y: parent.height - 1px; }
@@ -117,9 +118,10 @@ export component CustomFileTable inherits Rectangle {
                     spacing: 0px;
 
                     IconCell { is_dir: entry.is_dir; is_supported_image: entry.is_supported_image; }
-                    Text { width: parent.width - 22px - size_cell.width - modified_cell.width - 20px; text: entry.is_dir && entry.name != "[..]" ? "[" + entry.name + "]" : entry.name; color: entry.selected ? #0f172a : #1f2933; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                    Text { width: parent.width - 22px - size_cell.width - modified_cell.width - exif_cell.width - 20px; text: entry.is_dir && entry.name != "[..]" ? "[" + entry.name + "]" : entry.name; color: entry.selected ? #0f172a : #1f2933; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
                     size_cell := Text { width: 92px; text: entry.size; color: #4b5563; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
                     modified_cell := Text { width: 156px; text: entry.modified; color: #4b5563; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                    exif_cell := Text { width: 52px; text: entry.is_dir ? "-" : (entry.has_exif ? "O" : "X"); color: #4b5563; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; horizontal-alignment: center; overflow: elide; }
                 }
 
                 TouchArea {
@@ -141,8 +143,8 @@ export component CustomFileTable inherits Rectangle {
                             if (!entry.selected) {
                                 root.row_selected(i, false, false);
                             }
-                            root.menu_x = min(root.width - root.menu_width - 1px, max(1px, self.mouse-x + 1px));
-                            root.menu_y = min(root.height - root.menu_height - 1px, max(1px, list.y + parent.y + self.mouse-y + 1px));
+                            root.menu_x = min(root.width - root.menu_width - 1px, max(1px, self.absolute-position.x - root.absolute-position.x + self.mouse-x + 1px));
+                            root.menu_y = min(root.height - root.menu_height - 1px, max(1px, self.absolute-position.y - root.absolute-position.y + self.mouse-y + 1px));
                             root.context_menu_visible = true;
                         }
                     }

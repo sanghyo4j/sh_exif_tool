@@ -1,6 +1,6 @@
 pub mod app;
 
-use chrono::{Local, NaiveDateTime, TimeZone};
+use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 use slint::{language::ColorScheme, ComponentHandle};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -10,11 +10,13 @@ use std::time::{Duration, Instant, SystemTime};
 use self::app::SlintApp;
 use crate::exif::{
     extract_datetime_from_filename,
+    exif_backup_path,
     is_generated_new_exif_path,
     read_exif_metadata,
     remove_gps_information,
     rewrite_basic_exif_metadata,
     rewrite_generated_basic_exif_metadata,
+    rewrite_repairable_exif_metadata,
     write_aperture,
     write_artist,
     write_camera_make,
@@ -89,6 +91,18 @@ impl GuiRunner for SlintRunner {
 
         let app_handle = app.clone();
         let ui_handle = ui.as_weak();
+        ui.on_select_files_without_exif(move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                let mut app = app_handle.borrow_mut();
+                app.select_files_without_exif();
+                ui.set_files(app.get_ui_model());
+                ui.set_table_rows(app.get_table_model());
+                set_selected_files(&ui, &app);
+            }
+        });
+
+        let app_handle = app.clone();
+        let ui_handle = ui.as_weak();
         let refresh = refresh_ui.clone();
         ui.on_set_show_extension_in_file_name(move |_| {
             if let Some(ui) = ui_handle.upgrade() {
@@ -122,13 +136,27 @@ impl GuiRunner for SlintRunner {
         // [추가] 2.5. 경로 직접 입력 핸들러 (엔터 입력 시)
         let app_handle = app.clone();
         let refresh = refresh_ui.clone();
+        let ui_handle = ui.as_weak();
         ui.on_change_dir(move |new_path| {
-            {
-                let mut app = app_handle.borrow_mut();
-                app.current_path = new_path.to_string();
-                app.load_folder();
+            if let Some(ui) = ui_handle.upgrade() {
+                let requested_path = PathBuf::from(new_path.trim());
+                if !requested_path.is_dir() {
+                    let current_path = {
+                        let app = app_handle.borrow();
+                        app.current_path.clone()
+                    };
+                    ui.set_current_path(current_path.into());
+                    show_message(&ui, "Invalid Path", "The entered path is not a valid folder.");
+                    return;
+                }
+
+                {
+                    let mut app = app_handle.borrow_mut();
+                    app.current_path = requested_path.to_string_lossy().to_string();
+                    app.load_folder();
+                }
+                refresh(None);
             }
-            refresh(None);
         });
 
         // 3. 폴더 진입 핸들러 (더블클릭)
@@ -252,49 +280,65 @@ impl GuiRunner for SlintRunner {
         let ui_handle = ui.as_weak();
         ui.on_create_exif_structure(move || {
             if let Some(ui) = ui_handle.upgrade() {
-                if ui.get_selected_index() < 0 || ui.get_selected_is_dir() {
+                if ui.get_selected_file_count() == 0 {
                     show_message(&ui, "Create EXIF Failed", "Select a file before creating EXIF.");
                     return;
                 }
 
-                let path = {
+                let selected_paths = {
                     let app = app_handle.borrow();
-                    app.path_for_ui_index(ui.get_selected_index())
+                    selected_file_paths(&app)
                 };
 
-                let Some(path) = path else {
+                if selected_paths.is_empty() {
                     show_message(&ui, "Create EXIF Failed", "Selected file could not be resolved.");
-                    return;
-                };
-
-                if read_exif_metadata(&path).has_exif {
-                    show_message(&ui, "Create EXIF", "EXIF is already available.");
                     return;
                 }
 
+                let mut created_paths = Vec::new();
+                let mut skipped_count = 0usize;
                 let metadata = collect_current_exif_metadata(&ui);
-                let new_path = match rewrite_basic_exif_metadata(&path, &metadata) {
-                    Ok(path) => path,
-                    Err(err) => {
+
+                for path in selected_paths {
+                    if read_exif_metadata(&path).has_exif {
+                        skipped_count += 1;
+                        continue;
+                    }
+
+                    let new_path = match rewrite_basic_exif_metadata(&path, &metadata) {
+                        Ok(path) => path,
+                        Err(err) => {
+                            show_message(&ui, "Create EXIF Failed", &err);
+                            return;
+                        }
+                    };
+                    let backup_path = exif_backup_path(&new_path);
+                    if let Err(err) = copy_file_times(&backup_path, &new_path) {
                         show_message(&ui, "Create EXIF Failed", &err);
                         return;
                     }
-                };
-                if let Err(err) = copy_file_times(&path, &new_path) {
-                    show_message(&ui, "Create EXIF Failed", &err);
+                    created_paths.push(new_path);
+                }
+
+                if created_paths.is_empty() {
+                    show_message(&ui, "Create EXIF", "EXIF is already available for the selected files.");
                     return;
                 }
 
+                let refresh_path = created_paths.last().cloned();
                 {
                     let mut app = app_handle.borrow_mut();
                     app.load_folder();
                 }
-                refresh(Some(new_path.clone()));
-                show_message(
-                    &ui,
-                    "EXIF File Created",
-                    &format!("Created {}", new_path.display()),
-                );
+                refresh(refresh_path);
+
+                if created_paths.len() == 1 && skipped_count == 0 {
+                    show_message(&ui, "EXIF File Created", &format!("Created {}", created_paths[0].display()));
+                } else if skipped_count == 0 {
+                    show_message(&ui, "EXIF Files Created", &format!("Created EXIF files for {} selected files.", created_paths.len()));
+                } else {
+                    show_message(&ui, "EXIF Files Created", &format!("Created EXIF files for {} selected files. Skipped {} files that already had EXIF.", created_paths.len(), skipped_count));
+                }
             }
         });
 
@@ -725,8 +769,18 @@ impl GuiRunner for SlintRunner {
                     let mut refresh_path = selected_path.clone();
                     let pending_taken_dates_snapshot = pending_taken_dates.borrow().clone();
                     let pending_modified_dates_snapshot = pending_modified_dates_handle.borrow().clone();
+                    let pending_taken_dates_arg = if pending_taken_dates_snapshot.is_empty() {
+                        None
+                    } else {
+                        Some(&pending_taken_dates_snapshot)
+                    };
+                    let pending_modified_dates_arg = if pending_modified_dates_snapshot.is_empty() {
+                        None
+                    } else {
+                        Some(&pending_modified_dates_snapshot)
+                    };
                     for path in &selected_paths {
-                        match apply_metadata_changes_to_path(&ui, path, Some(&pending_taken_dates_snapshot), Some(&pending_modified_dates_snapshot)) {
+                        match apply_metadata_changes_to_path(&ui, path, pending_taken_dates_arg, pending_modified_dates_arg) {
                             Ok(Some(new_path)) => {
                                 refresh_path = Some(new_path);
                             }
@@ -759,7 +813,7 @@ impl GuiRunner for SlintRunner {
 
                     let current_metadata = read_exif_metadata(path);
                     if !current_metadata.has_exif {
-                        let metadata = collect_current_exif_metadata(&ui);
+                        let metadata = collect_dirty_exif_metadata(&ui, current_metadata, None, false);
                         let new_path = match rewrite_basic_exif_metadata(path, &metadata) {
                             Ok(path) => path,
                             Err(err) => {
@@ -767,7 +821,8 @@ impl GuiRunner for SlintRunner {
                                 return;
                             }
                         };
-                        if let Err(err) = copy_file_times(path, &new_path) {
+                        let backup_path = exif_backup_path(&new_path);
+                        if let Err(err) = copy_file_times(&backup_path, &new_path) {
                             show_message(&ui, "Apply Failed", &err);
                             return;
                         }
@@ -819,7 +874,7 @@ impl GuiRunner for SlintRunner {
                     }
 
                     if is_generated_new_exif_path(path) {
-                        let metadata = collect_current_exif_metadata(&ui);
+                        let metadata = collect_dirty_exif_metadata(&ui, current_metadata, None, false);
                         if let Err(err) = rewrite_generated_basic_exif_metadata(path, &metadata) {
                             show_message(&ui, "Apply Failed", &err);
                             return;
@@ -867,202 +922,12 @@ impl GuiRunner for SlintRunner {
                     }
                 }
 
-                if ui.get_taken_date_dirty() {
+                if ui.get_metadata_dirty() {
                     let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
-                    if let Err(err) = write_taken_date(path, ui.get_taken_date().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_camera_make_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_camera_make(path, ui.get_camera_make().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_camera_model_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_camera_model(path, ui.get_camera_model().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_lens_model_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_lens_model(path, ui.get_lens_model().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_software_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_software(path, ui.get_software().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_artist_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_artist(path, ui.get_artist().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_shutter_speed_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_shutter_speed(path, ui.get_shutter_speed().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_aperture_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_aperture(path, ui.get_aperture().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_iso_speed_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_iso_speed(path, ui.get_iso_speed().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_focal_length_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_focal_length(path, ui.get_focal_length().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_flash_fired_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_flash_fired(path, ui.get_flash_fired().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_metering_mode_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_metering_mode(path, ui.get_metering_mode().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_orientation_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_orientation(path, ui.get_orientation().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_color_space_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_color_space(path, ui.get_color_space().as_str()) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if has_gps_metadata_changes(&ui) {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-                    if let Err(err) = write_dirty_gps_tags(&ui, path) {
-                        show_message(&ui, "Apply Failed", &err);
-                        return;
-                    }
-                }
-
-                if ui.get_selected_created_dirty() || ui.get_selected_modified_dirty() {
-                    let Some(path) = apply_path.as_ref() else {
-                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
-                        return;
-                    };
-
-                    let created_time = if ui.get_selected_created_dirty() {
-                        match parse_timestamp(ui.get_selected_created().as_str()) {
-                            Ok(value) => Some(value),
-                            Err(err) => {
-                                show_message(&ui, "Apply Failed", &err);
-                                return;
-                            }
-                        }
-                    } else {
-                        None
-                    };
-
-                    let modified_time = if ui.get_selected_modified_dirty() {
-                        match parse_timestamp(ui.get_selected_modified().as_str()) {
-                            Ok(value) => Some(value),
-                            Err(err) => {
-                                show_message(&ui, "Apply Failed", &err);
-                                return;
-                            }
-                        }
-                    } else {
-                        None
-                    };
-
-                    if let Err(err) = set_file_times(path, created_time, modified_time) {
+                    if let Err(err) = apply_metadata_changes_to_path(&ui, path, None, None) {
                         show_message(&ui, "Apply Failed", &err);
                         return;
                     }
@@ -1444,22 +1309,25 @@ fn apply_metadata_changes_to_path(
     let target_path = if has_exif_changes || has_pending_taken_date {
         let current_metadata = read_exif_metadata(path);
         if !current_metadata.has_exif {
-            let mut metadata = collect_current_exif_metadata(ui);
-            if let Some(taken_date) = taken_date_override {
-                metadata.taken_date = taken_date.to_string();
-            }
+            let metadata = collect_dirty_exif_metadata(ui, current_metadata, taken_date_override, pending_taken_dates.is_some());
             let new_path = rewrite_basic_exif_metadata(path, &metadata)?;
-            copy_file_times(path, &new_path)?;
+            let backup_path = exif_backup_path(&new_path);
+            copy_file_times(&backup_path, &new_path)?;
             Some(new_path)
         } else if is_generated_new_exif_path(path) {
-            let mut metadata = collect_current_exif_metadata(ui);
-            if let Some(taken_date) = taken_date_override {
-                metadata.taken_date = taken_date.to_string();
-            }
+            let metadata = collect_dirty_exif_metadata(ui, current_metadata, taken_date_override, pending_taken_dates.is_some());
             rewrite_generated_basic_exif_metadata(path, &metadata)?;
             None
         } else {
-            write_dirty_exif_tags(ui, path, taken_date_override, pending_taken_dates.is_some())?;
+            if let Err(err) = write_dirty_exif_tags(ui, path, taken_date_override, pending_taken_dates.is_some()) {
+                if is_missing_writable_exif_tag_error(&err) {
+                    let current_metadata = read_exif_metadata(path);
+                    let metadata = collect_dirty_exif_metadata(ui, current_metadata, taken_date_override, pending_taken_dates.is_some());
+                    rewrite_repairable_exif_metadata(path, &metadata)?;
+                } else {
+                    return Err(err);
+                }
+            }
             None
         }
     } else {
@@ -1525,6 +1393,10 @@ fn write_dirty_exif_tags(
         write_dirty_gps_tags(ui, path)?;
     }
     Ok(())
+}
+
+fn is_missing_writable_exif_tag_error(err: &str) -> bool {
+    err.contains("No writable EXIF tag was found")
 }
 
 fn has_gps_metadata_changes(ui: &MainWindow) -> bool {
@@ -1623,13 +1495,76 @@ fn collect_current_exif_metadata(ui: &MainWindow) -> ExifMetadata {
     }
 }
 
+fn collect_dirty_exif_metadata(
+    ui: &MainWindow,
+    mut metadata: ExifMetadata,
+    taken_date_override: Option<&str>,
+    using_pending_taken_dates: bool,
+) -> ExifMetadata {
+    metadata.has_exif = true;
+    if let Some(taken_date) = taken_date_override {
+        metadata.taken_date = taken_date.to_string();
+    } else if ui.get_taken_date_dirty() && !using_pending_taken_dates {
+        metadata.taken_date = ui.get_taken_date().to_string();
+    }
+    if ui.get_camera_make_dirty() {
+        metadata.camera_make = ui.get_camera_make().to_string();
+    }
+    if ui.get_camera_model_dirty() {
+        metadata.camera_model = ui.get_camera_model().to_string();
+    }
+    if ui.get_lens_model_dirty() {
+        metadata.lens_model = ui.get_lens_model().to_string();
+    }
+    if ui.get_software_dirty() {
+        metadata.software = ui.get_software().to_string();
+    }
+    if ui.get_artist_dirty() {
+        metadata.artist = ui.get_artist().to_string();
+    }
+    if ui.get_shutter_speed_dirty() {
+        metadata.shutter_speed = ui.get_shutter_speed().to_string();
+    }
+    if ui.get_aperture_dirty() {
+        metadata.aperture = ui.get_aperture().to_string();
+    }
+    if ui.get_iso_speed_dirty() {
+        metadata.iso_speed = ui.get_iso_speed().to_string();
+    }
+    if ui.get_focal_length_dirty() {
+        metadata.focal_length = ui.get_focal_length().to_string();
+    }
+    if ui.get_flash_fired_dirty() {
+        metadata.flash_fired = ui.get_flash_fired().to_string();
+    }
+    if ui.get_metering_mode_dirty() {
+        metadata.metering_mode = ui.get_metering_mode().to_string();
+    }
+    if ui.get_orientation_dirty() {
+        metadata.orientation = ui.get_orientation().to_string();
+    }
+    if ui.get_color_space_dirty() {
+        metadata.color_space = ui.get_color_space().to_string();
+    }
+    if ui.get_gps_latitude_dirty() {
+        metadata.gps_latitude = ui.get_gps_latitude().to_string();
+    }
+    if ui.get_gps_longitude_dirty() {
+        metadata.gps_longitude = ui.get_gps_longitude().to_string();
+    }
+    if ui.get_gps_altitude_dirty() {
+        metadata.gps_altitude = ui.get_gps_altitude().to_string();
+    }
+    metadata
+}
+
 fn parse_timestamp(value: &str) -> Result<SystemTime, String> {
     if value.trim().is_empty() || value == "N/A" || value == "-" {
         return Err("Invalid timestamp format.".to_string());
     }
 
-    let naive = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
-        .map_err(|_| "Expected datetime format: YYYY-MM-DD HH:MM:SS".to_string())?;
+    let naive = parse_display_datetime_or_date(value)
+        .ok_or_else(|| "Expected datetime format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS".to_string())?;
 
     Local
         .from_local_datetime(&naive)
@@ -1638,16 +1573,26 @@ fn parse_timestamp(value: &str) -> Result<SystemTime, String> {
         .map(|dt| dt.into())
 }
 
+fn parse_display_datetime_or_date(value: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .or_else(|| {
+            NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+        })
+}
+
 fn should_apply_taken_date_candidate(existing: &str, candidate: &str) -> bool {
     let existing = existing.trim();
     if existing.is_empty() || existing == "N/A" || existing == "-" {
         return true;
     }
 
-    let Ok(existing_datetime) = NaiveDateTime::parse_from_str(existing, "%Y-%m-%d %H:%M:%S") else {
+    let Some(existing_datetime) = parse_display_datetime_or_date(existing) else {
         return true;
     };
-    let Ok(candidate_datetime) = NaiveDateTime::parse_from_str(candidate, "%Y-%m-%d %H:%M:%S") else {
+    let Some(candidate_datetime) = parse_display_datetime_or_date(candidate) else {
         return false;
     };
 

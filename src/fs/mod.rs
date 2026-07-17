@@ -1,4 +1,3 @@
-use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
@@ -86,6 +85,7 @@ pub fn save_file_copy(source_path: &Path) -> Result<PathBuf, String> {
 
         if !target_path.exists() {
             std::fs::copy(source_path, &target_path).map_err(|err| err.to_string())?;
+            copy_file_times(source_path, &target_path)?;
             return Ok(target_path);
         }
     }
@@ -101,30 +101,70 @@ pub fn duplicate_file(source_path: &Path) -> Result<PathBuf, String> {
     let parent = source_path
         .parent()
         .ok_or_else(|| "Selected file parent could not be resolved.".to_string())?;
+    copy_file_to_folder(source_path, parent)
+}
+
+pub fn copy_file_to_folder(source_path: &Path, target_dir: &Path) -> Result<PathBuf, String> {
+    if !source_path.is_file() {
+        return Err("Select files only.".to_string());
+    }
+    if !target_dir.is_dir() {
+        return Err("Paste target folder could not be resolved.".to_string());
+    }
+
     let stem = source_path
         .file_stem()
         .map(|value| value.to_string_lossy().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "duplicate".to_string());
-    let stem = duplicate_base_stem(&stem);
+        .unwrap_or_else(|| "copy".to_string());
+    let same_folder = source_path
+        .parent()
+        .map(|parent| parent == target_dir)
+        .unwrap_or(false);
+    let stem = if same_folder {
+        duplicate_base_stem(&stem)
+    } else {
+        stem
+    };
     let extension = source_path
         .extension()
         .map(|value| value.to_string_lossy().to_string());
+
+    if !same_folder {
+        let target_path = target_dir.join(match &extension {
+            Some(extension) => format!("{stem}.{extension}"),
+            None => stem.clone(),
+        });
+        if !target_path.exists() {
+            std::fs::copy(source_path, &target_path).map_err(|err| err.to_string())?;
+            copy_file_times(source_path, &target_path)?;
+            return Ok(target_path);
+        }
+    }
 
     for index in 1..1000 {
         let file_name = match &extension {
             Some(extension) => format!("{stem} ({index}).{extension}"),
             None => format!("{stem} ({index})"),
         };
-        let target_path = parent.join(file_name);
+        let target_path = target_dir.join(file_name);
 
         if !target_path.exists() {
             std::fs::copy(source_path, &target_path).map_err(|err| err.to_string())?;
+            copy_file_times(source_path, &target_path)?;
             return Ok(target_path);
         }
     }
 
     Err("Could not find an available duplicate filename.".to_string())
+}
+
+pub fn copy_file_times(source_path: &Path, target_path: &Path) -> Result<(), String> {
+    let metadata = source_path.metadata().map_err(|err| err.to_string())?;
+    let created = metadata.created().ok();
+    let modified = metadata.modified().ok();
+
+    set_file_times(target_path, created, modified)
 }
 
 fn duplicate_base_stem(stem: &str) -> String {
@@ -144,8 +184,8 @@ fn duplicate_base_stem(stem: &str) -> String {
 }
 
 pub fn move_file_to_recycle_bin(path: &Path) -> Result<(), String> {
-    if !path.is_file() {
-        return Err("Select a file before deleting.".to_string());
+    if !path.exists() {
+        return Err("Selected path does not exist.".to_string());
     }
 
     move_path_to_recycle_bin(path)
@@ -178,26 +218,49 @@ fn set_file_times_impl(
     modified: Option<SystemTime>,
 ) -> Result<(), String> {
     use std::ffi::c_void;
-    use std::os::windows::prelude::AsRawHandle;
+    use std::os::windows::ffi::OsStrExt;
 
     const EPOCH_DIFFERENCE_SECONDS: u64 = 11644473600;
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+    const FILE_SHARE_READ: u32 = 0x00000001;
+    const FILE_SHARE_WRITE: u32 = 0x00000002;
+    const FILE_SHARE_DELETE: u32 = 0x00000004;
+    const OPEN_EXISTING: u32 = 3;
+    const INVALID_HANDLE_VALUE: isize = -1;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x00000080;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
 
     #[repr(C)]
-    struct FileTime {
-        dw_low_date_time: u32,
-        dw_high_date_time: u32,
+    struct FileBasicInfo {
+        creation_time: i64,
+        last_access_time: i64,
+        last_write_time: i64,
+        change_time: i64,
+        file_attributes: u32,
     }
 
+    #[link(name = "kernel32")]
     extern "system" {
-        fn SetFileTime(
+        fn CreateFileW(
+            lpFileName: *const u16,
+            dwDesiredAccess: u32,
+            dwShareMode: u32,
+            lpSecurityAttributes: *mut c_void,
+            dwCreationDisposition: u32,
+            dwFlagsAndAttributes: u32,
+            hTemplateFile: *mut c_void,
+        ) -> *mut c_void;
+        fn SetFileInformationByHandle(
             hFile: *mut c_void,
-            lpCreationTime: *const FileTime,
-            lpLastAccessTime: *const FileTime,
-            lpLastWriteTime: *const FileTime,
+            FileInformationClass: i32,
+            lpFileInformation: *const c_void,
+            dwBufferSize: u32,
         ) -> i32;
+        fn CloseHandle(hObject: *mut c_void) -> i32;
     }
 
-    fn system_time_to_filetime(time: SystemTime) -> Result<FileTime, String> {
+    fn system_time_to_filetime_intervals(time: SystemTime) -> Result<i64, String> {
         let duration = time
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|err| err.to_string())?;
@@ -209,37 +272,153 @@ fn set_file_times_impl(
             .ok_or_else(|| "Time value out of range.".to_string())?
             .checked_add((duration.subsec_nanos() / 100) as u64)
             .ok_or_else(|| "Time value out of range.".to_string())?;
-        Ok(FileTime {
-            dw_low_date_time: intervals as u32,
-            dw_high_date_time: (intervals >> 32) as u32,
-        })
+        i64::try_from(intervals).map_err(|_| "Time value out of range.".to_string())
     }
 
-    let file = OpenOptions::new()
-        .write(true)
-        .open(path)
-        .map_err(|err| err.to_string())?;
-    let handle = file.as_raw_handle() as *mut c_void;
-
-    let creation_ptr = created
-        .map(system_time_to_filetime)
-        .transpose()
-        .map_err(|err| err.to_string())?
-        .as_ref()
-        .map_or(std::ptr::null(), |t| t as *const FileTime);
-
-    let modified_ptr = modified
-        .map(system_time_to_filetime)
-        .transpose()
-        .map_err(|err| err.to_string())?
-        .as_ref()
-        .map_or(std::ptr::null(), |t| t as *const FileTime);
-
-    let result = unsafe { SetFileTime(handle, creation_ptr, std::ptr::null(), modified_ptr) };
-    if result == 0 {
+    let mut wide_path: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide_path.push(0);
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle as isize == INVALID_HANDLE_VALUE {
         return Err(std::io::Error::last_os_error().to_string());
     }
 
+    let creation_time = created
+        .map(system_time_to_filetime_intervals)
+        .transpose()
+        .map_err(|err| err.to_string())?;
+    let modified_time = modified
+        .map(system_time_to_filetime_intervals)
+        .transpose()
+        .map_err(|err| err.to_string())?;
+
+    let info = FileBasicInfo {
+        creation_time: creation_time.unwrap_or(0),
+        last_access_time: 0,
+        last_write_time: modified_time.unwrap_or(0),
+        change_time: 0,
+        file_attributes: 0,
+    };
+
+    let result = unsafe {
+        SetFileInformationByHandle(
+            handle,
+            0,
+            &info as *const FileBasicInfo as *const c_void,
+            std::mem::size_of::<FileBasicInfo>() as u32,
+        )
+    };
+    let close_result = unsafe { CloseHandle(handle) };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    if close_result == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    if !file_times_match(path, created, modified) {
+        set_file_times_with_powershell(path, created, modified)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn file_times_match(
+    path: &Path,
+    created: Option<SystemTime>,
+    modified: Option<SystemTime>,
+) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if let Some(expected) = created {
+        if metadata.created().ok() != Some(expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = modified {
+        if metadata.modified().ok() != Some(expected) {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(windows)]
+fn set_file_times_with_powershell(
+    path: &Path,
+    created: Option<SystemTime>,
+    modified: Option<SystemTime>,
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    fn ticks(time: Option<SystemTime>) -> Result<String, String> {
+        match time {
+            Some(time) => system_time_to_filetime_intervals_for_shell(time).map(|value| value.to_string()),
+            None => Ok(String::new()),
+        }
+    }
+
+    fn system_time_to_filetime_intervals_for_shell(time: SystemTime) -> Result<i64, String> {
+        const EPOCH_DIFFERENCE_SECONDS: u64 = 11644473600;
+        let duration = time
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|err| err.to_string())?;
+        let intervals = duration
+            .as_secs()
+            .checked_add(EPOCH_DIFFERENCE_SECONDS)
+            .ok_or_else(|| "Time value out of range.".to_string())?
+            .checked_mul(10_000_000)
+            .ok_or_else(|| "Time value out of range.".to_string())?
+            .checked_add((duration.subsec_nanos() / 100) as u64)
+            .ok_or_else(|| "Time value out of range.".to_string())?;
+        i64::try_from(intervals).map_err(|_| "Time value out of range.".to_string())
+    }
+
+    let script = r#"
+param([string]$Path, [string]$CreatedTicks, [string]$ModifiedTicks)
+if ($CreatedTicks -ne '') {
+    [System.IO.File]::SetCreationTimeUtc($Path, [DateTime]::FromFileTimeUtc([Int64]$CreatedTicks))
+}
+if ($ModifiedTicks -ne '') {
+    [System.IO.File]::SetLastWriteTimeUtc($Path, [DateTime]::FromFileTimeUtc([Int64]$ModifiedTicks))
+}
+"#;
+
+    let status = Command::new("powershell.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .arg(path)
+        .arg(ticks(created)?)
+        .arg(ticks(modified)?)
+        .status()
+        .map_err(|err| err.to_string())?;
+
+    if !status.success() {
+        return Err(format!("Failed to set file time via PowerShell. Exit code: {status}"));
+    }
+    if !file_times_match(path, created, modified) {
+        return Err("File time update did not take effect.".to_string());
+    }
     Ok(())
 }
 
@@ -323,7 +502,11 @@ fn move_path_to_recycle_bin(path: &Path) -> Result<(), String> {
 
 #[cfg(not(windows))]
 fn move_path_to_recycle_bin(path: &Path) -> Result<(), String> {
-    std::fs::remove_file(path).map_err(|err| err.to_string())
+    if path.is_dir() {
+        std::fs::remove_dir_all(path).map_err(|err| err.to_string())
+    } else {
+        std::fs::remove_file(path).map_err(|err| err.to_string())
+    }
 }
 
 #[cfg(windows)]
@@ -370,4 +553,36 @@ fn open_in_file_manager_impl(path: &Path) -> Result<(), String> {
         .spawn()
         .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn duplicate_preserves_file_times() {
+        let dir = std::env::temp_dir();
+        let source_path = dir.join(format!(
+            "sh_exif_tool_duplicate_created_source_{}.jpg",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&source_path);
+        std::fs::write(&source_path, b"test").unwrap();
+
+        let created = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_100_000);
+        set_file_times(&source_path, Some(created), Some(modified)).unwrap();
+        assert_eq!(source_path.metadata().unwrap().created().unwrap(), created);
+        assert_eq!(source_path.metadata().unwrap().modified().unwrap(), modified);
+
+        let target_path = duplicate_file(&source_path).unwrap();
+        let target_metadata = target_path.metadata().unwrap();
+
+        assert_eq!(target_metadata.created().unwrap(), created);
+        assert_eq!(target_metadata.modified().unwrap(), modified);
+
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(target_path);
+    }
 }
