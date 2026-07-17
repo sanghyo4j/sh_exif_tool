@@ -131,6 +131,7 @@ export component MainWindow inherits Window {
     in-out property <string> toast_text: "";
     in-out property <bool> file_context_menu_visible: false;
     in-out property <int> file_filter: 0;
+    in-out property <bool> backup_before_changes: false;
     in-out property <bool> show_extension_in_file_name: false;
 
     callback open_dir(int);
@@ -345,7 +346,16 @@ export component MainWindow inherits Window {
             MenuSeparator {}
             MenuItem { title: "&Write Software Tag"; checkable: true; checked: true; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
             MenuItem { title: "&Rename With _SH148 Suffix"; checkable: true; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
-            MenuItem { title: "&Backup Before Changes"; checkable: true; checked: true; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
+            MenuItem {
+                title: "&Backup Before Changes";
+                checkable: true;
+                checked: root.backup_before_changes;
+                activated => {
+                    root.backup_before_changes = !root.backup_before_changes;
+                    root.file_context_menu_visible = false;
+                    root.editing_path = false;
+                }
+            }
         }
 
         Menu {
@@ -363,6 +373,10 @@ export component MainWindow inherits Window {
         current_path: root.current_path;
         editing <=> root.editing_path;
         change_dir(path) => { root.change_dir(path); }
+        go_parent() => {
+            root.editing_path = false;
+            root.go_parent();
+        }
         open_folder() => { root.editing_path = true; }
         reload() => {
             root.editing_path = false;
@@ -647,6 +661,7 @@ export component MainWindow inherits Window {
                 }
                 fill_taken_date_from_filename() => {
                     root.editing_path = false;
+                    content_focus.focus();
                     root.fill_taken_date_from_filename();
                 }
                 fill_taken_date_from_created_date() => {

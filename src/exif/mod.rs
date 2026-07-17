@@ -398,13 +398,32 @@ pub fn remove_gps_information(path: &Path) -> Result<(), String> {
     fs::write(path, bytes).map_err(|err| err.to_string())
 }
 
-pub fn rewrite_basic_exif_metadata(path: &Path, metadata: &ExifMetadata) -> Result<PathBuf, String> {
+pub fn rewrite_basic_exif_metadata(
+    path: &Path,
+    metadata: &ExifMetadata,
+    backup_before_changes: bool,
+) -> Result<PathBuf, String> {
     let bytes = fs::read(path).map_err(|err| err.to_string())?;
     if find_exif_tiff_start(&bytes).is_some() {
         return Err("Refusing to rewrite an existing EXIF structure. Existing EXIF files only support editing tags that are already present.".to_string());
     }
     let exif_segment = build_basic_exif_app1(metadata)?;
     let updated = replace_or_insert_exif_app1(&bytes, &exif_segment)?;
+    if !backup_before_changes {
+        let original_file_metadata = fs::metadata(path).map_err(|err| err.to_string())?;
+        let original_created = original_file_metadata.created().ok();
+        let original_modified = original_file_metadata.modified().ok();
+        if let Err(err) = fs::write(path, updated) {
+            return Err(err.to_string());
+        }
+        if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
+            let _ = fs::write(path, &bytes);
+            let _ = crate::fs::set_file_times(path, original_created, original_modified);
+            return Err(err);
+        }
+        return Ok(path.to_path_buf());
+    }
+
     let backup_path = exif_backup_path(path);
     if backup_path.exists() {
         return Err(format!("Backup file already exists: {}", backup_path.display()));
@@ -433,7 +452,11 @@ pub fn rewrite_generated_basic_exif_metadata(path: &Path, metadata: &ExifMetadat
     fs::write(path, updated).map_err(|err| err.to_string())
 }
 
-pub fn rewrite_repairable_exif_metadata(path: &Path, metadata: &ExifMetadata) -> Result<(), String> {
+pub fn rewrite_repairable_exif_metadata(
+    path: &Path,
+    metadata: &ExifMetadata,
+    backup_before_changes: bool,
+) -> Result<(), String> {
     let bytes = fs::read(path).map_err(|err| err.to_string())?;
     if find_exif_tiff_start(&bytes).is_none() {
         return Err("EXIF data was not found.".to_string());
@@ -441,18 +464,15 @@ pub fn rewrite_repairable_exif_metadata(path: &Path, metadata: &ExifMetadata) ->
 
     let exif_segment = build_basic_exif_app1(metadata)?;
     let updated = replace_or_insert_exif_app1(&bytes, &exif_segment)?;
-    let backup_path = exif_backup_path(path);
-    let created_backup = if backup_path.exists() {
-        false
-    } else {
-        fs::copy(path, &backup_path).map_err(|err| err.to_string())?;
-        true
-    };
+    if backup_before_changes {
+        let backup_path = exif_backup_path(path);
+        if !backup_path.exists() {
+            fs::copy(path, &backup_path).map_err(|err| err.to_string())?;
+        }
+    }
 
     if let Err(err) = fs::write(path, updated) {
-        if created_backup {
-            let _ = fs::copy(&backup_path, path);
-        }
+        let _ = fs::write(path, &bytes);
         return Err(err.to_string());
     }
     Ok(())
@@ -977,6 +997,13 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
     let mut candidates = Vec::new();
 
     for start in 0..chars.len() {
+        if start + 19 <= chars.len() {
+            let separated: String = chars[start..start + 19].iter().collect();
+            if let Some(parsed) = parse_separated_filename_datetime(&separated) {
+                candidates.push(parsed);
+            }
+        }
+
         let mut digits = String::new();
         let mut candidate_10 = None;
         let mut candidate_12 = None;
@@ -1017,6 +1044,29 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
 
     let earliest = candidates.into_iter().min()?;
     Some(format_datetime_for_display(earliest))
+}
+
+fn parse_separated_filename_datetime(value: &str) -> Option<NaiveDateTime> {
+    let bytes = value.as_bytes();
+    let digit_positions = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+    if bytes.len() != 19
+        || !digit_positions
+            .iter()
+            .all(|index| bytes[*index].is_ascii_digit())
+        || !matches!(bytes[4], b'-' | b'.' | b'_')
+        || !matches!(bytes[7], b'-' | b'.' | b'_')
+        || !matches!(bytes[10], b' ' | b'-' | b'_' | b'T')
+        || !matches!(bytes[13], b':' | b';' | b'.' | b'-' | b'_')
+        || !matches!(bytes[16], b':' | b';' | b'.' | b'-' | b'_')
+    {
+        return None;
+    }
+
+    let digits: String = digit_positions
+        .iter()
+        .map(|index| bytes[*index] as char)
+        .collect();
+    parse_compact_filename_datetime(&digits)
 }
 
 pub fn exif_datetime_to_display(value: &str) -> String {
@@ -1710,6 +1760,22 @@ mod tests {
     }
 
     #[test]
+    fn extracts_datetime_from_separated_filename_patterns() {
+        assert_eq!(
+            extract_datetime_from_filename(Path::new("IMG-2014-02-20-11-53-59.png")).as_deref(),
+            Some("2014-02-20 11:53:59")
+        );
+        assert_eq!(
+            extract_datetime_from_filename(Path::new("2014-02-20 11;53;59.PNG")).as_deref(),
+            Some("2014-02-20 11:53:59")
+        );
+        assert_eq!(
+            extract_datetime_from_filename(Path::new("2014-02-04 14.40.01.png")).as_deref(),
+            Some("2014-02-04 14:40:01")
+        );
+    }
+
+    #[test]
     fn writes_existing_taken_date_tag_in_place() {
         let path = std::env::temp_dir().join(format!(
             "sh_exif_tool_taken_date_test_{}.jpg",
@@ -1771,7 +1837,7 @@ mod tests {
         let _ = std::fs::remove_file(&backup_path);
         std::fs::write(&path, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
 
-        let output_path = rewrite_basic_exif_metadata(&path, &ExifMetadata::default()).unwrap();
+        let output_path = rewrite_basic_exif_metadata(&path, &ExifMetadata::default(), true).unwrap();
         write_camera_model(&output_path, "HTC-X315E").unwrap();
 
         let metadata = read_exif_metadata(&output_path);
@@ -1852,7 +1918,7 @@ mod tests {
             gps_altitude: String::new(),
         };
 
-        let output_path = rewrite_basic_exif_metadata(&path, &metadata).unwrap();
+        let output_path = rewrite_basic_exif_metadata(&path, &metadata, true).unwrap();
         let backup_path = exif_backup_path(&output_path);
 
         assert!(path.exists());
@@ -1871,6 +1937,30 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(backup_path);
+    }
+
+    #[test]
+    fn creates_exif_without_backup_when_disabled() {
+        let path = std::env::temp_dir().join(format!(
+            "sh_exif_tool_no_backup_test_{}.jpg",
+            std::process::id()
+        ));
+        let backup_path = exif_backup_path(&path);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&backup_path);
+        std::fs::write(&path, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+
+        let metadata = ExifMetadata {
+            camera_make: "Sony".to_string(),
+            ..ExifMetadata::default()
+        };
+        rewrite_basic_exif_metadata(&path, &metadata, false).unwrap();
+
+        assert!(path.exists());
+        assert!(!backup_path.exists());
+        assert_eq!(read_exif_metadata(&path).camera_make, "Sony");
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1905,7 +1995,7 @@ mod tests {
         let mut metadata = read_exif_metadata(&path);
         metadata.camera_model = "HTC-X315E".to_string();
 
-        rewrite_repairable_exif_metadata(&path, &metadata).unwrap();
+        rewrite_repairable_exif_metadata(&path, &metadata, true).unwrap();
 
         let written = read_exif_metadata(&path);
         assert_eq!(written.taken_date, "2012-09-02 14:39:12");
@@ -1914,6 +2004,28 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(backup_path);
+    }
+
+    #[test]
+    fn repairs_existing_exif_without_backup_when_disabled() {
+        let path = std::env::temp_dir().join(format!(
+            "sh_exif_tool_repair_no_backup_test_{}.jpg",
+            std::process::id()
+        ));
+        let backup_path = exif_backup_path(&path);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&backup_path);
+        std::fs::write(&path, minimal_jpeg_with_datetime_original("2012:09:02 14:39:12"))
+            .unwrap();
+
+        let mut metadata = read_exif_metadata(&path);
+        metadata.camera_model = "HTC-X315E".to_string();
+        rewrite_repairable_exif_metadata(&path, &metadata, false).unwrap();
+
+        assert!(!backup_path.exists());
+        assert_eq!(read_exif_metadata(&path).camera_model, "HTC-X315E");
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1926,7 +2038,7 @@ mod tests {
 
         let mut metadata = ExifMetadata::default();
         metadata.camera_make = "Sony".to_string();
-        let err = rewrite_basic_exif_metadata(&path, &metadata).unwrap_err();
+        let err = rewrite_basic_exif_metadata(&path, &metadata, true).unwrap_err();
 
         assert!(err.contains("Refusing to rewrite an existing EXIF structure"));
         assert_eq!(read_exif_metadata(&path).camera_make, "Canon");
@@ -1949,7 +2061,7 @@ mod tests {
             camera_model: "A7C".to_string(),
             ..ExifMetadata::default()
         };
-        let output_path = rewrite_basic_exif_metadata(&path, &metadata).unwrap();
+        let output_path = rewrite_basic_exif_metadata(&path, &metadata, true).unwrap();
         assert_eq!(output_path, path);
         assert!(backup_path.exists());
         let mut updated = read_exif_metadata(&output_path);

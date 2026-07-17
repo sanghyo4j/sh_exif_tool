@@ -138,9 +138,9 @@ impl SlintApp {
 
             rows.push(ModelRc::new(VecModel::from(vec![
                 StandardListViewItem::from(display_name.as_str()),
-                StandardListViewItem::from(media_date),
                 StandardListViewItem::from(size.as_str()),
                 StandardListViewItem::from(modified.as_str()),
+                StandardListViewItem::from(media_date),
                 StandardListViewItem::from(metadata),
             ])));
         }
@@ -241,6 +241,14 @@ impl SlintApp {
                 "Scanning...".to_string(),
             );
         }
+        if is_png_file(&entry.path) {
+            return (
+                "png".to_string(),
+                "PNG image".to_string(),
+                "Scanning...".to_string(),
+                "Scanning...".to_string(),
+            );
+        }
 
         empty_media_details()
     }
@@ -331,9 +339,9 @@ impl SlintApp {
             .iter()
             .filter(|entry| {
                 entry.is_dir || match self.file_filter {
-                    0 => is_supported_media_file(&entry.path),
-                    1 => is_jpeg_file(&entry.path),
-                    2 => is_mp4_file(&entry.path),
+                    0 => is_image_file(&entry.path) || is_video_file(&entry.path),
+                    1 => is_image_file(&entry.path),
+                    2 => is_video_file(&entry.path),
                     _ => true,
                 }
             })
@@ -347,11 +355,12 @@ fn format_time(t: SystemTime) -> String {
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-fn is_supported_media_file(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "mp4"))
-        .unwrap_or(false)
+fn is_image_file(path: &std::path::Path) -> bool {
+    is_jpeg_file(path) || is_png_file(path)
+}
+
+fn is_video_file(path: &std::path::Path) -> bool {
+    is_mp4_file(path)
 }
 
 fn is_mp4_file(path: &std::path::Path) -> bool {
@@ -368,6 +377,28 @@ fn is_jpeg_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg"))
+}
+
+fn is_png_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_image_file, is_video_file};
+    use std::path::Path;
+
+    #[test]
+    fn supported_media_is_the_union_of_images_and_videos() {
+        for name in ["photo.jpg", "photo.JPEG", "image.png", "clip.mp4", "clip.MP4"] {
+            let path = Path::new(name);
+            assert!(is_image_file(path) || is_video_file(path), "{name} should be supported");
+        }
+        assert!(!is_image_file(Path::new("notes.txt")));
+        assert!(!is_video_file(Path::new("notes.txt")));
+    }
 }
 
 fn empty_media_details() -> (String, String, String, String) {

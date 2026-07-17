@@ -12,9 +12,9 @@ component IconCell inherits Rectangle {
     height: 100%;
 
     if is_dir: FolderIcon { y: 4px; }
-    if !is_dir && media_kind == "jpeg": ImageFileIcon { y: 4px; }
+    if !is_dir && (media_kind == "jpeg" || media_kind == "png"): ImageFileIcon { y: 4px; }
     if !is_dir && media_kind == "mp4": VideoFileIcon { y: 4px; }
-    if !is_dir && media_kind != "jpeg" && media_kind != "mp4": FileIcon { y: 4px; }
+    if !is_dir && media_kind != "jpeg" && media_kind != "png" && media_kind != "mp4": FileIcon { y: 4px; }
 }
 
 component MenuRow inherits Rectangle {
@@ -92,10 +92,10 @@ export component CustomFileTable inherits Rectangle {
                 spacing: 0px;
 
                 Rectangle { width: 22px; }
-                Text { width: parent.width - 22px - media_date_header.width - size_header.width - modified_header.width - metadata_header.width - 20px; text: "Name"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; overflow: elide; }
-                media_date_header := Text { width: 150px; text: "Media Date"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; overflow: elide; }
+                Text { width: parent.width - 22px - media_date_header.width - size_header.width - modified_header.width - metadata_header.width - 20px; text: "Filename"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; overflow: elide; }
                 size_header := Text { width: 78px; text: "Size"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; }
                 modified_header := Text { width: 146px; text: "Modified"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; }
+                media_date_header := Text { width: 150px; text: "Media Date"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; overflow: elide; }
                 metadata_header := Text { width: 68px; text: "Metadata"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; horizontal-alignment: center; }
             }
 
@@ -121,9 +121,9 @@ export component CustomFileTable inherits Rectangle {
 
                     IconCell { is_dir: entry.is_dir; media_kind: entry.media_kind; }
                     Text { width: parent.width - 22px - media_date_cell.width - size_cell.width - modified_cell.width - metadata_cell.width - 20px; text: entry.is_dir && entry.name != "[..]" ? "[" + entry.name + "]" : entry.name; color: entry.selected ? #0f172a : #1f2933; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
-                    media_date_cell := Text { width: 150px; text: entry.media_date; color: #4b5563; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
                     size_cell := Text { width: 78px; text: entry.size; color: #4b5563; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
                     modified_cell := Text { width: 146px; text: entry.modified; color: #4b5563; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                    media_date_cell := Text { width: 150px; text: entry.media_date; color: #4b5563; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
                     metadata_cell := Text { width: 68px; text: entry.metadata_status; color: entry.metadata_status == "!" ? #b42318 : #4b5563; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; horizontal-alignment: center; overflow: elide; }
                 }
 

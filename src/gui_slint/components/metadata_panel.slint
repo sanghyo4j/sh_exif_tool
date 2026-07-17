@@ -273,8 +273,11 @@ export component MetadataPanel inherits Rectangle {
 
                     if root.selected_media_kind == "mp4": SectionHeader { title: "VIDEO"; }
                     if root.selected_media_kind == "mp4": ReadOnlyInfoRow { label: "Media Type"; value: root.selected_media_type; }
-                    if root.selected_media_kind == "mp4": ReadOnlyInfoRow { label: "Media Date"; value: root.selected_media_date; }
-                    if root.selected_media_kind == "mp4": ReadOnlyInfoRow { label: "Metadata"; value: root.selected_metadata_status; }
+                    if root.selected_media_kind == "mp4": EditableInfoRow { label: "Media Date"; value <=> root.taken_date; status <=> root.taken_date_status; dirty <=> root.taken_date_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+
+                    if root.selected_media_kind == "png": SectionHeader { title: "IMAGE"; }
+                    if root.selected_media_kind == "png": ReadOnlyInfoRow { label: "Media Type"; value: root.selected_media_type; }
+                    if root.selected_media_kind == "png": EditableInfoRow { label: "Media Date"; value <=> root.taken_date; status <=> root.taken_date_status; dirty <=> root.taken_date_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
 
                     if root.selected_media_kind == "jpeg": ExifAvailabilityRow {
                         label: "EXIF Tag Available";
@@ -363,19 +366,19 @@ export component MetadataPanel inherits Rectangle {
         x: parent.width - 292px;
         y: 30px;
         width: 280px;
-        height: root.selected_media_kind == "jpeg" ? 161px : 65px;
+        height: root.selected_media_kind == "jpeg" ? 161px : (root.selected_media_kind == "mp4" || root.selected_media_kind == "png") ? 97px : 65px;
         background: #ffffff;
         border-width: 1px;
         border-color: #cfd8dc;
         border-radius: 3px;
 
         MenuRow { y: 1px; title: "Set Filename from Media Date"; clicked => { root.tools_menu_visible = false; root.set_filename_from_media_date(); } }
-        if root.selected_media_kind == "jpeg": Rectangle { y: 32px; width: 100%; height: 1px; background: #edf0f2; }
-        if root.selected_media_kind == "jpeg": MenuRow { y: 33px; title: "Set Taken Date from Filename"; clicked => { root.tools_menu_visible = false; root.fill_taken_date_from_filename(); } }
+        if root.selected_media_kind == "jpeg" || root.selected_media_kind == "mp4" || root.selected_media_kind == "png": Rectangle { y: 32px; width: 100%; height: 1px; background: #edf0f2; }
+        if root.selected_media_kind == "jpeg" || root.selected_media_kind == "mp4" || root.selected_media_kind == "png": MenuRow { y: 33px; title: root.selected_media_kind == "jpeg" ? "Set Taken Date from Filename" : "Set Media Date from Filename"; clicked => { root.tools_menu_visible = false; root.fill_taken_date_from_filename(); } }
         if root.selected_media_kind == "jpeg": Rectangle { y: 64px; width: 100%; height: 1px; background: #edf0f2; }
         if root.selected_media_kind == "jpeg": MenuRow { y: 65px; title: "Set Taken Date from File Timestamp"; clicked => { root.tools_menu_visible = false; root.fill_taken_date_from_created_date(); } }
-        Rectangle { y: root.selected_media_kind == "jpeg" ? 96px : 32px; width: 100%; height: 1px; background: #edf0f2; }
-        MenuRow { y: root.selected_media_kind == "jpeg" ? 97px : 33px; title: "Set Modified Date from Created Date"; clicked => { root.tools_menu_visible = false; root.set_modified_date_from_created_date(); } }
+        Rectangle { y: root.selected_media_kind == "jpeg" ? 96px : (root.selected_media_kind == "mp4" || root.selected_media_kind == "png") ? 64px : 32px; width: 100%; height: 1px; background: #edf0f2; }
+        MenuRow { y: root.selected_media_kind == "jpeg" ? 97px : (root.selected_media_kind == "mp4" || root.selected_media_kind == "png") ? 65px : 33px; title: "Set Modified Date from Created Date"; clicked => { root.tools_menu_visible = false; root.set_modified_date_from_created_date(); } }
         if root.selected_media_kind == "jpeg": Rectangle { y: 128px; width: 100%; height: 1px; background: #edf0f2; }
         if root.selected_media_kind == "jpeg": MenuRow { y: 129px; title: "Remove EXIF Tags"; danger: true; clicked => { root.tools_menu_visible = false; root.remove_exif_tags(); } }
     }

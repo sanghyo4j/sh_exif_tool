@@ -37,7 +37,7 @@ use crate::exif::{
     ExifMetadata,
 };
 use crate::fs::{copy_file_times, copy_file_to_folder, move_file_to_recycle_bin, open_in_file_manager, rename_entry, save_file_copy, set_file_times};
-use crate::media::{scan_media_file, MediaScanJob};
+use crate::media::{scan_media_file, write_mp4_media_date, write_png_media_date, MediaScanJob};
 use crate::GuiRunner;
 
 slint::include_modules!();
@@ -232,10 +232,14 @@ impl GuiRunner for SlintRunner {
             } else {
                 *clipboard.borrow_mut() = Some(ExifClipboard::Tag {
                     source_path: path,
-                    key,
-                    value,
+                    key: key.clone(),
+                    value: value.clone(),
                 });
-                show_toast(&ui, "Copied.");
+                let display_value = if value.is_empty() { "(empty)" } else { value.as_str() };
+                show_toast(
+                    &ui,
+                    &format!("Copied: '{}: {}'", exif_key_label(&key), display_value),
+                );
             }
         });
 
@@ -268,7 +272,14 @@ impl GuiRunner for SlintRunner {
                     section: section.clone(),
                     values: current_values,
                 });
-                show_toast(&ui, "Copied.");
+                show_toast(
+                    &ui,
+                    &format!(
+                        "Copied: '{} section ({} tags)'",
+                        exif_section_label(&section),
+                        collect_exif_section(&ui, &section).len()
+                    ),
+                );
             }
         });
 
@@ -537,6 +548,7 @@ impl GuiRunner for SlintRunner {
                 let mut created_paths = Vec::new();
                 let mut skipped_count = 0usize;
                 let metadata = collect_current_exif_metadata(&ui);
+                let backup_before_changes = ui.get_backup_before_changes();
 
                 for path in selected_paths {
                     if read_exif_metadata(&path).has_exif {
@@ -544,17 +556,19 @@ impl GuiRunner for SlintRunner {
                         continue;
                     }
 
-                    let new_path = match rewrite_basic_exif_metadata(&path, &metadata) {
+                    let new_path = match rewrite_basic_exif_metadata(&path, &metadata, backup_before_changes) {
                         Ok(path) => path,
                         Err(err) => {
                             show_message(&ui, "Create EXIF Failed", &err);
                             return;
                         }
                     };
-                    let backup_path = exif_backup_path(&new_path);
-                    if let Err(err) = copy_file_times(&backup_path, &new_path) {
-                        show_message(&ui, "Create EXIF Failed", &err);
-                        return;
+                    if backup_before_changes {
+                        let backup_path = exif_backup_path(&new_path);
+                        if let Err(err) = copy_file_times(&backup_path, &new_path) {
+                            show_message(&ui, "Create EXIF Failed", &err);
+                            return;
+                        }
                     }
                     created_paths.push(new_path);
                 }
@@ -586,8 +600,18 @@ impl GuiRunner for SlintRunner {
         let ui_handle = ui.as_weak();
         ui.on_fill_taken_date_from_filename(move || {
             if let Some(ui) = ui_handle.upgrade() {
+                let date_label = if matches!(ui.get_selected_media_kind().as_str(), "mp4" | "png") {
+                    "Media Date"
+                } else {
+                    "Taken Date"
+                };
+                let unable_title = format!("Unable to Set {date_label}");
                 if ui.get_selected_file_count() == 0 {
-                    show_message(&ui, "Unable to Set Taken Date", "Select a file before setting Taken Date.");
+                    show_message(
+                        &ui,
+                        &unable_title,
+                        &format!("Select a file before setting {date_label}."),
+                    );
                     return;
                 }
 
@@ -597,23 +621,32 @@ impl GuiRunner for SlintRunner {
                 };
 
                 if selected_paths.is_empty() {
-                    show_message(&ui, "Unable to Set Taken Date", "Selected file could not be resolved.");
+                    show_message(&ui, &unable_title, "Selected file could not be resolved.");
                     return;
                 }
 
                 if selected_paths.len() == 1 {
                     let path = &selected_paths[0];
                     let Some(datetime) = extract_datetime_from_filename(path) else {
-                        show_message(&ui, "Unable to Set Taken Date", "No supported date pattern was found in the filename.");
+                        show_message(&ui, &unable_title, "No supported date pattern was found in the filename.");
                         return;
                     };
                     if !should_apply_taken_date_candidate(ui.get_taken_date().as_str(), &datetime) {
-                        show_message(&ui, "Taken Date Ignored", "Filename timestamp is later than the existing Taken Date.");
+                        show_message(
+                            &ui,
+                            &format!("{date_label} Ignored"),
+                            &format!("Filename timestamp is later than the existing {date_label}."),
+                        );
                         return;
                     }
 
                     pending_taken_dates.borrow_mut().clear();
                     ui.set_taken_date(datetime.into());
+                    if ui.get_selected_media_kind().as_str() == "jpeg" && !ui.get_exif_available() {
+                        // Stage a new EXIF structure in the UI. The file is still only
+                        // changed when Apply/Ctrl+S is invoked.
+                        ui.set_exif_available(true);
+                    }
                     update_metadata_dirty_state(&ui);
                     return;
                 }
@@ -621,7 +654,11 @@ impl GuiRunner for SlintRunner {
                 let mut pending = HashMap::new();
                 for path in &selected_paths {
                     if let Some(datetime) = extract_datetime_from_filename(path) {
-                        let existing_taken_date = read_exif_metadata(path).taken_date;
+                        let existing_taken_date = if is_mp4_path(path) || is_png_path(path) {
+                            scan_media_file(path).media_date
+                        } else {
+                            read_exif_metadata(path).taken_date
+                        };
                         if should_apply_taken_date_candidate(&existing_taken_date, &datetime) {
                             pending.insert(path.clone(), datetime);
                         }
@@ -629,7 +666,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if pending.is_empty() {
-                    show_message(&ui, "Unable to Set Taken Date", "No supported date pattern was found in the selected filenames.");
+                    show_message(&ui, &unable_title, "No supported date pattern was found in the selected filenames.");
                     return;
                 }
 
@@ -641,11 +678,23 @@ impl GuiRunner for SlintRunner {
                 ui.set_taken_date_status("Mixed".into());
                 ui.set_taken_date_dirty(true);
                 ui.set_metadata_dirty(true);
+                if ui.get_selected_media_kind().as_str() == "jpeg" && !ui.get_exif_available() {
+                    // Each EXIF-less JPEG will receive its structure during Apply.
+                    ui.set_exif_available(true);
+                }
 
                 if skipped_count == 0 {
-                    show_message(&ui, "Taken Date Staged", &format!("Taken Date was parsed for {parsed_count} files. Save to apply."));
+                    show_message(
+                        &ui,
+                        &format!("{date_label} Staged"),
+                        &format!("{date_label} was parsed for {parsed_count} files. Save to apply."),
+                    );
                 } else {
-                    show_message(&ui, "Taken Date Staged", &format!("Taken Date was parsed for {parsed_count} files. {skipped_count} files could not be parsed. Save to apply."));
+                    show_message(
+                        &ui,
+                        &format!("{date_label} Staged"),
+                        &format!("{date_label} was parsed for {parsed_count} files. {skipped_count} files could not be parsed. Save to apply."),
+                    );
                 }
             }
         });
@@ -1044,7 +1093,43 @@ impl GuiRunner for SlintRunner {
                 }
 
                 let apply_path = selected_path.clone();
-                if has_exif_metadata_changes(&ui) {
+                if ui.get_selected_media_kind().as_str() == "mp4" && ui.get_taken_date_dirty() {
+                    let Some(path) = apply_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if !is_mp4_path(path) {
+                        show_message(&ui, "Apply Failed", "Selected file is not an MP4 video.");
+                        return;
+                    }
+                    if let Err(err) = write_mp4_media_date(path, ui.get_taken_date().as_str()) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                    ui.set_original_taken_date(ui.get_taken_date());
+                    ui.set_taken_date_dirty(false);
+                    update_metadata_dirty_state(&ui);
+                } else if ui.get_selected_media_kind().as_str() == "png" && ui.get_taken_date_dirty() {
+                    let Some(path) = apply_path.as_ref() else {
+                        show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
+                        return;
+                    };
+                    if !is_png_path(path) {
+                        show_message(&ui, "Apply Failed", "Selected file is not a PNG image.");
+                        return;
+                    }
+                    if let Err(err) = write_png_media_date(
+                        path,
+                        ui.get_taken_date().as_str(),
+                        ui.get_backup_before_changes(),
+                    ) {
+                        show_message(&ui, "Apply Failed", &err);
+                        return;
+                    }
+                    ui.set_original_taken_date(ui.get_taken_date());
+                    ui.set_taken_date_dirty(false);
+                    update_metadata_dirty_state(&ui);
+                } else if has_exif_metadata_changes(&ui) {
                     let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
@@ -1053,17 +1138,20 @@ impl GuiRunner for SlintRunner {
                     let current_metadata = read_exif_metadata(path);
                     if !current_metadata.has_exif {
                         let metadata = collect_dirty_exif_metadata(&ui, current_metadata, None, false);
-                        let new_path = match rewrite_basic_exif_metadata(path, &metadata) {
+                        let backup_before_changes = ui.get_backup_before_changes();
+                        let new_path = match rewrite_basic_exif_metadata(path, &metadata, backup_before_changes) {
                             Ok(path) => path,
                             Err(err) => {
                                 show_message(&ui, "Apply Failed", &err);
                                 return;
                             }
                         };
-                        let backup_path = exif_backup_path(&new_path);
-                        if let Err(err) = copy_file_times(&backup_path, &new_path) {
-                            show_message(&ui, "Apply Failed", &err);
-                            return;
+                        if backup_before_changes {
+                            let backup_path = exif_backup_path(&new_path);
+                            if let Err(err) = copy_file_times(&backup_path, &new_path) {
+                                show_message(&ui, "Apply Failed", &err);
+                                return;
+                            }
                         }
 
                         if ui.get_selected_created_dirty() || ui.get_selected_modified_dirty() {
@@ -1220,6 +1308,12 @@ fn set_selected_file(ui: &MainWindow, app: &SlintApp, index: i32) {
         .map(|path| read_exif_metadata(&path))
         .unwrap_or_default();
     set_loaded_exif_metadata(ui, metadata);
+    if let Some(path) = app.path_for_ui_index(index).filter(|path| path.is_file() && is_mp4_path(path)) {
+        set_loaded_media_date(ui, scan_media_file(&path).media_date);
+    }
+    if let Some(path) = app.path_for_ui_index(index).filter(|path| path.is_file() && is_png_path(path)) {
+        set_loaded_media_date(ui, scan_media_file(&path).media_date);
+    }
 }
 
 fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
@@ -1335,6 +1429,8 @@ fn set_selected_media_details(ui: &MainWindow, app: &SlintApp) {
         set_media_details(ui, "jpeg", "", "", "");
     } else if kinds.len() == 1 && kinds[0] == "mp4" {
         set_media_details(ui, "mp4", "Multiple videos", "Mixed", "Mixed");
+    } else if kinds.len() == 1 && kinds[0] == "png" {
+        set_media_details(ui, "png", "Multiple PNG images", "Mixed", "Mixed");
     } else {
         set_media_details(ui, "mixed", "", "", "");
     }
@@ -1351,6 +1447,19 @@ fn set_media_details(
     ui.set_selected_media_type(media_type.into());
     ui.set_selected_media_date(media_date.into());
     ui.set_selected_metadata_status(metadata_status.into());
+}
+
+fn set_loaded_media_date(ui: &MainWindow, media_date: String) {
+    let value = if media_date == "-" { String::new() } else { media_date };
+    ui.set_taken_date(value.clone().into());
+    ui.set_original_taken_date(value.clone().into());
+    ui.set_taken_date_status(status_for_value(&value).into());
+    ui.set_taken_date_dirty(false);
+    ui.set_metadata_dirty(
+        ui.get_selected_name_dirty()
+            || ui.get_selected_created_dirty()
+            || ui.get_selected_modified_dirty(),
+    );
 }
 
 fn set_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
@@ -1602,6 +1711,18 @@ fn is_jpeg_path(path: &std::path::Path) -> bool {
         .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg"))
 }
 
+fn is_png_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+}
+
+fn is_mp4_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+}
+
 fn selected_recyclable_paths(app: &SlintApp) -> Vec<PathBuf> {
     app.selected_indices()
         .iter()
@@ -1629,6 +1750,38 @@ fn apply_metadata_changes_to_path(
         .and_then(|values| values.get(path))
         .map(String::as_str);
     let has_pending_taken_date = taken_date_override.is_some();
+    if is_mp4_path(path) {
+        if has_exif_metadata_changes_without_taken_date(ui) {
+            return Err("Only Media Date can be written to MP4 files.".to_string());
+        }
+        if let Some(taken_date) = taken_date_override {
+            write_mp4_media_date(path, taken_date)?;
+        } else if ui.get_selected_media_kind().as_str() == "mp4"
+            && ui.get_taken_date_dirty()
+            && pending_taken_dates.is_none()
+        {
+            write_mp4_media_date(path, ui.get_taken_date().as_str())?;
+        }
+        write_dirty_file_times(ui, path, pending_modified_dates)?;
+        return Ok(None);
+    }
+    if is_png_path(path) {
+        if has_exif_metadata_changes_without_taken_date(ui) {
+            return Err("Only Media Date can be written to PNG files.".to_string());
+        }
+        if let Some(taken_date) = taken_date_override {
+            write_png_media_date(path, taken_date, ui.get_backup_before_changes())?;
+        } else if ui.get_selected_media_kind().as_str() == "png" && ui.get_taken_date_dirty() && pending_taken_dates.is_none() {
+            write_png_media_date(
+                path,
+                ui.get_taken_date().as_str(),
+                ui.get_backup_before_changes(),
+            )?;
+        }
+        write_dirty_file_times(ui, path, pending_modified_dates)?;
+        return Ok(None);
+    }
+
     let has_exif_changes = if pending_taken_dates.is_some() && !has_pending_taken_date {
         has_exif_metadata_changes_without_taken_date(ui)
     } else {
@@ -1639,9 +1792,12 @@ fn apply_metadata_changes_to_path(
         let current_metadata = read_exif_metadata(path);
         if !current_metadata.has_exif {
             let metadata = collect_dirty_exif_metadata(ui, current_metadata, taken_date_override, pending_taken_dates.is_some());
-            let new_path = rewrite_basic_exif_metadata(path, &metadata)?;
-            let backup_path = exif_backup_path(&new_path);
-            copy_file_times(&backup_path, &new_path)?;
+            let backup_before_changes = ui.get_backup_before_changes();
+            let new_path = rewrite_basic_exif_metadata(path, &metadata, backup_before_changes)?;
+            if backup_before_changes {
+                let backup_path = exif_backup_path(&new_path);
+                copy_file_times(&backup_path, &new_path)?;
+            }
             Some(new_path)
         } else if is_generated_new_exif_path(path) {
             let metadata = collect_dirty_exif_metadata(ui, current_metadata, taken_date_override, pending_taken_dates.is_some());
@@ -1652,7 +1808,11 @@ fn apply_metadata_changes_to_path(
                 if is_missing_writable_exif_tag_error(&err) {
                     let current_metadata = read_exif_metadata(path);
                     let metadata = collect_dirty_exif_metadata(ui, current_metadata, taken_date_override, pending_taken_dates.is_some());
-                    rewrite_repairable_exif_metadata(path, &metadata)?;
+                    rewrite_repairable_exif_metadata(
+                        path,
+                        &metadata,
+                        ui.get_backup_before_changes(),
+                    )?;
                 } else {
                     return Err(err);
                 }
@@ -2122,6 +2282,35 @@ fn is_writable_exif_key(key: &str) -> bool {
             | "orientation"
             | "color_space"
     )
+}
+
+fn exif_key_label(key: &str) -> &'static str {
+    match key {
+        "taken_date" => "Taken Date",
+        "camera_make" => "Camera Make",
+        "camera_model" => "Camera Model",
+        "lens_model" => "Lens Model",
+        "software" => "Software",
+        "artist" => "Artist",
+        "shutter_speed" => "Shutter Speed",
+        "aperture" => "Aperture",
+        "iso_speed" => "ISO Speed",
+        "focal_length" => "Focal Length",
+        "flash_fired" => "Flash Fired",
+        "metering_mode" => "Metering Mode",
+        "orientation" => "Orientation",
+        "color_space" => "Color Space",
+        _ => "EXIF Tag",
+    }
+}
+
+fn exif_section_label(section: &str) -> &'static str {
+    match section {
+        "camera" => "CAMERA",
+        "exposure" => "EXPOSURE",
+        "image" => "IMAGE",
+        _ => "EXIF",
+    }
 }
 
 fn get_exif_value(ui: &MainWindow, key: &str) -> String {
