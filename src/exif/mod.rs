@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use chrono::{NaiveDate, NaiveDateTime};
 
@@ -83,6 +84,66 @@ pub fn read_exif_metadata(path: &Path) -> ExifMetadata {
     };
 
     parse_tiff(tiff).unwrap_or_default()
+}
+
+pub(crate) fn read_exif_metadata_for_scan(path: &Path) -> ExifMetadata {
+    let Ok(file) = fs::File::open(path) else {
+        return ExifMetadata::default();
+    };
+    let Some(tiff) = read_jpeg_exif_tiff(file) else {
+        return ExifMetadata::default();
+    };
+    parse_tiff(&tiff).unwrap_or_default()
+}
+
+fn read_jpeg_exif_tiff(file: fs::File) -> Option<Vec<u8>> {
+    let mut reader = BufReader::new(file);
+    let mut signature = [0u8; 2];
+    reader.read_exact(&mut signature).ok()?;
+    if signature != [0xff, 0xd8] {
+        return None;
+    }
+
+    loop {
+        let mut marker_prefix = [0u8; 1];
+        reader.read_exact(&mut marker_prefix).ok()?;
+        while marker_prefix[0] != 0xff {
+            reader.read_exact(&mut marker_prefix).ok()?;
+        }
+
+        let mut marker = [0u8; 1];
+        reader.read_exact(&mut marker).ok()?;
+        while marker[0] == 0xff {
+            reader.read_exact(&mut marker).ok()?;
+        }
+        if marker[0] == 0x00 {
+            continue;
+        }
+        if marker[0] == 0xda || marker[0] == 0xd9 {
+            return None;
+        }
+        if marker[0] == 0x01 || (0xd0..=0xd7).contains(&marker[0]) {
+            continue;
+        }
+
+        let mut length_bytes = [0u8; 2];
+        reader.read_exact(&mut length_bytes).ok()?;
+        let segment_len = usize::from(u16::from_be_bytes(length_bytes));
+        if segment_len < 2 {
+            return None;
+        }
+        let payload_len = segment_len - 2;
+
+        if marker[0] == 0xe1 {
+            let mut payload = vec![0u8; payload_len];
+            reader.read_exact(&mut payload).ok()?;
+            if let Some(tiff) = payload.strip_prefix(b"Exif\0\0") {
+                return Some(tiff.to_vec());
+            }
+        } else {
+            reader.seek(SeekFrom::Current(payload_len as i64)).ok()?;
+        }
+    }
 }
 
 fn write_exif_tag_values<F>(path: &Path, tags: &[u16], mut make_bytes: F) -> Result<(), String>

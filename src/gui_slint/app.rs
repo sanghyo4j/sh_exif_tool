@@ -1,15 +1,28 @@
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use slint::{ModelRc, StandardListViewItem, VecModel};
 use super::FileEntry as UiFileEntry; 
 use crate::exif::read_exif_metadata;
 use crate::fs::{read_directory, FileSystemEntry};
+use crate::media::{MediaScanJob, MediaScanResult};
+
+#[derive(Clone, Debug)]
+pub struct CachedMediaScan {
+    pub size: u64,
+    pub modified: Option<SystemTime>,
+    pub result: MediaScanResult,
+}
 
 pub struct SlintApp {
     pub current_path: String,
     pub files: Vec<FileSystemEntry>,
     pub selected_indices: Vec<i32>,
-    pub show_only_supported_images: bool,
+    pub file_filter: i32,
+    pub scan_results: Arc<Mutex<HashMap<PathBuf, CachedMediaScan>>>,
+    pub scan_epoch: Arc<AtomicU64>,
     selection_anchor: Option<i32>,
 }
 
@@ -24,7 +37,9 @@ impl SlintApp {
             current_path: current_dir,
             files: Vec::new(),
             selected_indices: Vec::new(),
-            show_only_supported_images: true,
+            file_filter: 0,
+            scan_results: Arc::new(Mutex::new(HashMap::new())),
+            scan_epoch: Arc::new(AtomicU64::new(0)),
             selection_anchor: None,
         };
         app.load_folder();
@@ -32,6 +47,11 @@ impl SlintApp {
     }
 
     pub fn load_folder(&mut self) {
+        self.scan_epoch.fetch_add(1, Ordering::Relaxed);
+        self.scan_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         let path = std::path::Path::new(&self.current_path);
         match read_directory(path) {
             Ok(entries) => {
@@ -58,8 +78,9 @@ impl SlintApp {
             created: "-".into(),
             is_dir: true,
             selected: self.selected_indices.contains(&0),
-            is_supported_image: false,
-            has_exif: false,
+            media_kind: "folder".into(),
+            media_date: "-".into(),
+            metadata_status: "-".into(),
         });
 
         for (visible_index, f) in self.visible_files().into_iter().enumerate() {
@@ -68,15 +89,17 @@ impl SlintApp {
                 .unwrap_or_else(|| "Unknown".to_string());
             let ui_index = i32::try_from(visible_index + 1).unwrap_or(i32::MAX);
             
+            let scan = self.scan_result_for(f);
             ui_items.push(UiFileEntry {
                 name: name_str.into(),
-                size: if f.is_dir { "-".into() } else { format!("{} KB", (f.size + 1023) / 1024).into() },
+                size: if f.is_dir { "-".into() } else { format_file_size(f.size).into() },
                 modified: f.modified.map(format_time).unwrap_or_else(|| "-".into()).into(),
                 created: f.created.map(format_time).unwrap_or_else(|| "-".into()).into(),
                 is_dir: f.is_dir,
                 selected: self.selected_indices.contains(&ui_index),
-                is_supported_image: is_supported_image_file(&f.path),
-                has_exif: file_has_exif(&f.path, f.is_dir),
+                media_kind: if f.is_dir { "folder" } else { scan.as_ref().map(|value| value.media_kind.as_str()).unwrap_or("pending") }.into(),
+                media_date: if f.is_dir { "-" } else { scan.as_ref().map(|value| value.media_date.as_str()).unwrap_or("…") }.into(),
+                metadata_status: if f.is_dir { "-" } else { scan.as_ref().map(|value| value.metadata_status.as_str()).unwrap_or("…") }.into(),
             });
         }
 
@@ -88,6 +111,7 @@ impl SlintApp {
 
         rows.push(ModelRc::new(VecModel::from(vec![
             StandardListViewItem::from("[..]"),
+            StandardListViewItem::from("-"),
             StandardListViewItem::from("-"),
             StandardListViewItem::from("-"),
             StandardListViewItem::from("-"),
@@ -105,22 +129,19 @@ impl SlintApp {
             let size = if f.is_dir {
                 "-".to_string()
             } else {
-                format!("{} KB", (f.size + 1023) / 1024)
+                format_file_size(f.size)
             };
             let modified = f.modified.map(format_time).unwrap_or_else(|| "-".to_string());
-            let exif = if f.is_dir {
-                "-".to_string()
-            } else if file_has_exif(&f.path, f.is_dir) {
-                "O".to_string()
-            } else {
-                "X".to_string()
-            };
+            let scan = self.scan_result_for(f);
+            let media_date = scan.as_ref().map(|value| value.media_date.as_str()).unwrap_or("…");
+            let metadata = scan.as_ref().map(|value| value.metadata_status.as_str()).unwrap_or("…");
 
             rows.push(ModelRc::new(VecModel::from(vec![
                 StandardListViewItem::from(display_name.as_str()),
+                StandardListViewItem::from(media_date),
                 StandardListViewItem::from(size.as_str()),
                 StandardListViewItem::from(modified.as_str()),
-                StandardListViewItem::from(exif.as_str()),
+                StandardListViewItem::from(metadata),
             ])));
         }
 
@@ -169,6 +190,61 @@ impl SlintApp {
         Some((name, created, modified, entry.is_dir))
     }
 
+    pub fn media_details_for_index(&self, index: i32) -> (String, String, String, String) {
+        let Some(idx) = usize::try_from(index).ok() else {
+            return empty_media_details();
+        };
+        if idx == 0 {
+            return (
+                "folder".to_string(),
+                "Folder".to_string(),
+                "-".to_string(),
+                "-".to_string(),
+            );
+        }
+
+        let visible = self.visible_files();
+        let Some(entry) = visible.get(idx - 1) else {
+            return empty_media_details();
+        };
+        if entry.is_dir {
+            return (
+                "folder".to_string(),
+                "Folder".to_string(),
+                "-".to_string(),
+                "-".to_string(),
+            );
+        }
+
+        if let Some(scan) = self.scan_result_for(entry) {
+            return (
+                scan.media_kind,
+                scan.media_type,
+                scan.media_date,
+                media_metadata_label(&scan.metadata_status).to_string(),
+            );
+        }
+
+        if is_mp4_file(&entry.path) {
+            return (
+                "mp4".to_string(),
+                "Scanning...".to_string(),
+                "Scanning...".to_string(),
+                "Scanning...".to_string(),
+            );
+        }
+        if is_jpeg_file(&entry.path) {
+            return (
+                "jpeg".to_string(),
+                "JPEG image".to_string(),
+                "Scanning...".to_string(),
+                "Scanning...".to_string(),
+            );
+        }
+
+        empty_media_details()
+    }
+
     pub fn select_ui_index(&mut self, index: i32, ctrl: bool, shift: bool) {
         if index < 0 || usize::try_from(index).map_or(true, |idx| idx >= self.visible_files().len() + 1) {
             self.selected_indices.clear();
@@ -207,19 +283,59 @@ impl SlintApp {
             .visible_files()
             .into_iter()
             .enumerate()
-            .filter(|(_, entry)| !entry.is_dir && !file_has_exif(&entry.path, entry.is_dir))
+            .filter(|(_, entry)| !entry.is_dir && is_jpeg_file(&entry.path) && !file_has_exif(&entry.path, entry.is_dir))
             .filter_map(|(index, _)| i32::try_from(index + 1).ok())
             .collect();
         self.selection_anchor = self.selected_indices.first().copied();
+    }
+
+    pub fn prepare_scan_jobs(&self) -> (u64, Vec<MediaScanJob>) {
+        let epoch = self.scan_epoch.load(Ordering::Relaxed);
+        let selected_paths: HashSet<_> = self.selected_indices
+            .iter()
+            .filter_map(|index| self.path_for_ui_index(*index))
+            .collect();
+        let cache = self.scan_results.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut jobs: Vec<_> = self
+            .visible_files()
+            .into_iter()
+            .filter(|entry| !entry.is_dir)
+            .filter(|entry| {
+                cache.get(&entry.path).is_none_or(|cached| {
+                    cached.size != entry.size || cached.modified != entry.modified
+                })
+            })
+            .map(|entry| MediaScanJob {
+                path: entry.path.clone(),
+                size: entry.size,
+                modified: entry.modified,
+            })
+            .collect();
+        jobs.sort_by_key(|job| (!selected_paths.contains(&job.path), job.size));
+        (epoch, jobs)
+    }
+
+    pub fn restart_scan(&self) {
+        self.scan_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn scan_result_for(&self, entry: &FileSystemEntry) -> Option<MediaScanResult> {
+        let cache = self.scan_results.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.get(&entry.path)
+            .filter(|cached| cached.size == entry.size && cached.modified == entry.modified)
+            .map(|cached| cached.result.clone())
     }
 
     fn visible_files(&self) -> Vec<&FileSystemEntry> {
         self.files
             .iter()
             .filter(|entry| {
-                !self.show_only_supported_images
-                    || entry.is_dir
-                    || is_supported_image_file(&entry.path)
+                entry.is_dir || match self.file_filter {
+                    0 => is_supported_media_file(&entry.path),
+                    1 => is_jpeg_file(&entry.path),
+                    2 => is_mp4_file(&entry.path),
+                    _ => true,
+                }
             })
             .collect()
     }
@@ -231,13 +347,58 @@ fn format_time(t: SystemTime) -> String {
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-fn is_supported_image_file(path: &std::path::Path) -> bool {
+fn is_supported_media_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg"))
+        .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "mp4"))
         .unwrap_or(false)
 }
 
+fn is_mp4_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+}
+
 fn file_has_exif(path: &std::path::Path, is_dir: bool) -> bool {
-    !is_dir && is_supported_image_file(path) && read_exif_metadata(path).has_exif
+    !is_dir && is_jpeg_file(path) && read_exif_metadata(path).has_exif
+}
+
+fn is_jpeg_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg"))
+}
+
+fn empty_media_details() -> (String, String, String, String) {
+    (
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+    )
+}
+
+fn media_metadata_label(status: &str) -> &'static str {
+    match status {
+        "O" => "Available",
+        "X" => "Not Found",
+        "!" => "Read Error",
+        "…" => "Scanning...",
+        _ => "-",
+    }
+}
+
+fn format_file_size(size: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let size = size as f64;
+    if size >= GB {
+        format!("{:.1} GB", size / GB)
+    } else if size >= MB {
+        format!("{:.1} MB", size / MB)
+    } else {
+        format!("{} KB", (size / KB).ceil() as u64)
+    }
 }

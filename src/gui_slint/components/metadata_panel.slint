@@ -1,5 +1,5 @@
 import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
-import { SectionHeader, EditableInfoRow, ExifAvailabilityRow, CreateExifRow } from "info_row.slint";
+import { SectionHeader, EditableInfoRow, ReadOnlyInfoRow, ExifAvailabilityRow, CreateExifRow } from "info_row.slint";
 import { FontSettings } from "../theme.slint";
 
 component ToolButton inherits Rectangle {
@@ -105,6 +105,10 @@ export component MetadataPanel inherits Rectangle {
     in-out property <string> selected_name;
     in-out property <string> selected_created;
     in-out property <string> selected_modified;
+    in-out property <string> selected_media_kind;
+    in-out property <string> selected_media_type;
+    in-out property <string> selected_media_date;
+    in-out property <string> selected_metadata_status;
     in-out property <string> taken_date;
     in-out property <string> camera_make;
     in-out property <string> camera_model;
@@ -176,11 +180,14 @@ export component MetadataPanel inherits Rectangle {
     callback fill_taken_date_from_filename();
     callback fill_taken_date_from_created_date();
     callback set_modified_date_from_created_date();
+    callback set_filename_from_media_date();
     callback remove_exif_tags();
     callback remove_gps_information();
     callback create_exif_structure();
     callback metadata_edited();
     callback shortcut_requested(string);
+    callback exif_tag_right_clicked(string, string);
+    callback exif_section_right_clicked(string);
 
     property <bool> tools_menu_visible: false;
 
@@ -263,46 +270,54 @@ export component MetadataPanel inherits Rectangle {
                     file_name_row := EditableInfoRow { label: "File Name"; value <=> root.selected_name; status <=> root.selected_name_status; dirty <=> root.selected_name_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     EditableInfoRow { label: "File Created"; value <=> root.selected_created; status <=> root.selected_created_status; dirty <=> root.selected_created_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     EditableInfoRow { label: "File Modified"; value <=> root.selected_modified; status <=> root.selected_modified_status; dirty <=> root.selected_modified_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    ExifAvailabilityRow {
+
+                    if root.selected_media_kind == "mp4": SectionHeader { title: "VIDEO"; }
+                    if root.selected_media_kind == "mp4": ReadOnlyInfoRow { label: "Media Type"; value: root.selected_media_type; }
+                    if root.selected_media_kind == "mp4": ReadOnlyInfoRow { label: "Media Date"; value: root.selected_media_date; }
+                    if root.selected_media_kind == "mp4": ReadOnlyInfoRow { label: "Metadata"; value: root.selected_metadata_status; }
+
+                    if root.selected_media_kind == "jpeg": ExifAvailabilityRow {
                         label: "EXIF Tag Available";
                         available: root.exif_available;
                     }
 
-                    if !root.exif_available: CreateExifRow {
+                    if root.selected_media_kind == "jpeg" && !root.exif_available: CreateExifRow {
                         create_requested => { root.create_exif_structure(); }
                     }
 
-                    if root.exif_available: SectionHeader { title: "CAMERA"; }
-                    if root.exif_available: EditableInfoRow { label: "Taken Date"; value <=> root.taken_date; status <=> root.taken_date_status; dirty <=> root.taken_date_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "Camera Make"; value <=> root.camera_make; status <=> root.camera_make_status; dirty <=> root.camera_make_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "Camera Model"; value <=> root.camera_model; status <=> root.camera_model_status; dirty <=> root.camera_model_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "Lens Model"; value <=> root.lens_model; status <=> root.lens_model_status; dirty <=> root.lens_model_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "Software"; value <=> root.software; status <=> root.software_status; dirty <=> root.software_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "Artist"; value <=> root.artist; status <=> root.artist_status; dirty <=> root.artist_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: SectionHeader { title: "CAMERA"; metadata_section: "camera"; section_right_clicked(section) => { root.exif_section_right_clicked(section); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Taken Date"; metadata_key: "taken_date"; value <=> root.taken_date; status <=> root.taken_date_status; dirty <=> root.taken_date_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Camera Make"; metadata_key: "camera_make"; value <=> root.camera_make; status <=> root.camera_make_status; dirty <=> root.camera_make_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Camera Model"; metadata_key: "camera_model"; value <=> root.camera_model; status <=> root.camera_model_status; dirty <=> root.camera_model_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Lens Model"; metadata_key: "lens_model"; value <=> root.lens_model; status <=> root.lens_model_status; dirty <=> root.lens_model_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Software"; metadata_key: "software"; value <=> root.software; status <=> root.software_status; dirty <=> root.software_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Artist"; metadata_key: "artist"; value <=> root.artist; status <=> root.artist_status; dirty <=> root.artist_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
 
-                    if root.exif_available: SectionHeader { title: "EXPOSURE"; }
-                    if root.exif_available: EditableInfoRow { label: "Shutter Speed"; value <=> root.shutter_speed; status <=> root.shutter_speed_status; dirty <=> root.shutter_speed_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "Aperture"; value <=> root.aperture; status <=> root.aperture_status; dirty <=> root.aperture_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "ISO Speed"; value <=> root.iso_speed; status <=> root.iso_speed_status; dirty <=> root.iso_speed_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "Focal Length"; value <=> root.focal_length; status <=> root.focal_length_status; dirty <=> root.focal_length_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "Flash Fired"; value <=> root.flash_fired; status <=> root.flash_fired_status; dirty <=> root.flash_fired_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "Metering Mode"; value <=> root.metering_mode; status <=> root.metering_mode_status; dirty <=> root.metering_mode_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: SectionHeader { title: "EXPOSURE"; metadata_section: "exposure"; section_right_clicked(section) => { root.exif_section_right_clicked(section); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Shutter Speed"; metadata_key: "shutter_speed"; value <=> root.shutter_speed; status <=> root.shutter_speed_status; dirty <=> root.shutter_speed_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Aperture"; metadata_key: "aperture"; value <=> root.aperture; status <=> root.aperture_status; dirty <=> root.aperture_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "ISO Speed"; metadata_key: "iso_speed"; value <=> root.iso_speed; status <=> root.iso_speed_status; dirty <=> root.iso_speed_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Focal Length"; metadata_key: "focal_length"; value <=> root.focal_length; status <=> root.focal_length_status; dirty <=> root.focal_length_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Flash Fired"; metadata_key: "flash_fired"; value <=> root.flash_fired; status <=> root.flash_fired_status; dirty <=> root.flash_fired_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Metering Mode"; metadata_key: "metering_mode"; value <=> root.metering_mode; status <=> root.metering_mode_status; dirty <=> root.metering_mode_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
 
-                    if root.exif_available: SectionHeader { title: "IMAGE"; }
-                    if root.exif_available: EditableInfoRow { label: "Image Width"; value <=> root.image_width; status <=> root.image_width_status; dirty <=> root.image_width_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "Image Height"; value <=> root.image_height; status <=> root.image_height_status; dirty <=> root.image_height_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "Orientation"; value <=> root.orientation; status <=> root.orientation_status; dirty <=> root.orientation_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "Color Space"; value <=> root.color_space; status <=> root.color_space_status; dirty <=> root.color_space_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: SectionHeader { title: "IMAGE"; metadata_section: "image"; section_right_clicked(section) => { root.exif_section_right_clicked(section); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Image Width"; metadata_key: "image_width"; value <=> root.image_width; status <=> root.image_width_status; dirty <=> root.image_width_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Image Height"; metadata_key: "image_height"; value <=> root.image_height; status <=> root.image_height_status; dirty <=> root.image_height_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Orientation"; metadata_key: "orientation"; value <=> root.orientation; status <=> root.orientation_status; dirty <=> root.orientation_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Color Space"; metadata_key: "color_space"; value <=> root.color_space; status <=> root.color_space_status; dirty <=> root.color_space_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
 
-                    if root.exif_available: SectionHeader {
+                    if root.selected_media_kind == "jpeg" && root.exif_available: SectionHeader {
                         title: "LOCATION";
+                        metadata_section: "location";
                         action_title: "Remove GPS";
                         action_enabled: root.gps_latitude != "" || root.gps_longitude != "" || root.gps_altitude != "" || root.gps_latitude_status == "Mixed" || root.gps_longitude_status == "Mixed" || root.gps_altitude_status == "Mixed";
                         action_clicked => { root.remove_gps_information(); }
+                        section_right_clicked(section) => { root.exif_section_right_clicked(section); }
                     }
-                    if root.exif_available: EditableInfoRow { label: "GPS Latitude"; value <=> root.gps_latitude; status <=> root.gps_latitude_status; dirty <=> root.gps_latitude_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "GPS Longitude"; value <=> root.gps_longitude; status <=> root.gps_longitude_status; dirty <=> root.gps_longitude_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.exif_available: EditableInfoRow { label: "GPS Altitude"; value <=> root.gps_altitude; status <=> root.gps_altitude_status; dirty <=> root.gps_altitude_dirty; value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "GPS Latitude"; metadata_key: "gps_latitude"; value <=> root.gps_latitude; status <=> root.gps_latitude_status; dirty <=> root.gps_latitude_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "GPS Longitude"; metadata_key: "gps_longitude"; value <=> root.gps_longitude; status <=> root.gps_longitude_status; dirty <=> root.gps_longitude_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "GPS Altitude"; metadata_key: "gps_altitude"; value <=> root.gps_altitude; status <=> root.gps_altitude_status; dirty <=> root.gps_altitude_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                 }
             }
         }
@@ -348,18 +363,20 @@ export component MetadataPanel inherits Rectangle {
         x: parent.width - 292px;
         y: 30px;
         width: 280px;
-        height: 129px;
+        height: root.selected_media_kind == "jpeg" ? 161px : 65px;
         background: #ffffff;
         border-width: 1px;
         border-color: #cfd8dc;
         border-radius: 3px;
 
-        MenuRow { y: 1px; title: "Set Taken Date from Filename"; clicked => { root.tools_menu_visible = false; root.fill_taken_date_from_filename(); } }
-        Rectangle { y: 32px; width: 100%; height: 1px; background: #edf0f2; }
-        MenuRow { y: 33px; title: "Set Taken Date from File Timestamp"; clicked => { root.tools_menu_visible = false; root.fill_taken_date_from_created_date(); } }
-        Rectangle { y: 64px; width: 100%; height: 1px; background: #edf0f2; }
-        MenuRow { y: 65px; title: "Set Modified Date from Created Date"; clicked => { root.tools_menu_visible = false; root.set_modified_date_from_created_date(); } }
-        Rectangle { y: 96px; width: 100%; height: 1px; background: #edf0f2; }
-        MenuRow { y: 97px; title: "Remove EXIF Tags"; danger: true; clicked => { root.tools_menu_visible = false; root.remove_exif_tags(); } }
+        MenuRow { y: 1px; title: "Set Filename from Media Date"; clicked => { root.tools_menu_visible = false; root.set_filename_from_media_date(); } }
+        if root.selected_media_kind == "jpeg": Rectangle { y: 32px; width: 100%; height: 1px; background: #edf0f2; }
+        if root.selected_media_kind == "jpeg": MenuRow { y: 33px; title: "Set Taken Date from Filename"; clicked => { root.tools_menu_visible = false; root.fill_taken_date_from_filename(); } }
+        if root.selected_media_kind == "jpeg": Rectangle { y: 64px; width: 100%; height: 1px; background: #edf0f2; }
+        if root.selected_media_kind == "jpeg": MenuRow { y: 65px; title: "Set Taken Date from File Timestamp"; clicked => { root.tools_menu_visible = false; root.fill_taken_date_from_created_date(); } }
+        Rectangle { y: root.selected_media_kind == "jpeg" ? 96px : 32px; width: 100%; height: 1px; background: #edf0f2; }
+        MenuRow { y: root.selected_media_kind == "jpeg" ? 97px : 33px; title: "Set Modified Date from Created Date"; clicked => { root.tools_menu_visible = false; root.set_modified_date_from_created_date(); } }
+        if root.selected_media_kind == "jpeg": Rectangle { y: 128px; width: 100%; height: 1px; background: #edf0f2; }
+        if root.selected_media_kind == "jpeg": MenuRow { y: 129px; title: "Remove EXIF Tags"; danger: true; clicked => { root.tools_menu_visible = false; root.remove_exif_tags(); } }
     }
 }
