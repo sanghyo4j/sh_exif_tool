@@ -184,6 +184,7 @@ export component MetadataPanel inherits Rectangle {
     callback revert_changes();
     callback fill_taken_date_from_filename();
     callback fill_taken_date_from_created_date();
+    callback shift_media_date();
     callback set_modified_date_from_created_date();
     callback set_filename_from_media_date();
     callback remove_exif_tags();
@@ -405,7 +406,7 @@ export component MetadataPanel inherits Rectangle {
         x: parent.width - 292px;
         y: 30px;
         width: 280px;
-        height: root.selected_media_kind == "jpeg" ? 161px : root.selected_file_count > 0 ? 129px : 65px;
+        height: root.selected_media_kind == "jpeg" ? 193px : root.selected_file_count > 0 ? 161px : 65px;
         background: #ffffff;
         border-width: 1px;
         border-color: #cfd8dc;
@@ -416,9 +417,11 @@ export component MetadataPanel inherits Rectangle {
         if root.selected_file_count > 0: MenuRow { y: 33px; title: "Set Date from Filename"; clicked => { root.tools_menu_visible = false; root.fill_taken_date_from_filename(); } }
         if root.selected_file_count > 0: Rectangle { y: 64px; width: 100%; height: 1px; background: #edf0f2; }
         if root.selected_file_count > 0: MenuRow { y: 65px; title: "Set Date from File Timestamp"; clicked => { root.tools_menu_visible = false; root.fill_taken_date_from_created_date(); } }
-        Rectangle { y: root.selected_file_count > 0 ? 96px : 32px; width: 100%; height: 1px; background: #edf0f2; }
-        MenuRow { y: root.selected_file_count > 0 ? 97px : 33px; title: "Set Modified Date from Created Date"; clicked => { root.tools_menu_visible = false; root.set_modified_date_from_created_date(); } }
-        if root.selected_media_kind == "jpeg": Rectangle { y: 128px; width: 100%; height: 1px; background: #edf0f2; }
-        if root.selected_media_kind == "jpeg": MenuRow { y: 129px; title: "Remove EXIF Tags"; danger: true; clicked => { root.tools_menu_visible = false; root.remove_exif_tags(); } }
+        if root.selected_file_count > 0: Rectangle { y: 96px; width: 100%; height: 1px; background: #edf0f2; }
+        if root.selected_file_count > 0: MenuRow { y: 97px; title: "Shift Media Date..."; clicked => { root.tools_menu_visible = false; root.shift_media_date(); } }
+        Rectangle { y: root.selected_file_count > 0 ? 128px : 32px; width: 100%; height: 1px; background: #edf0f2; }
+        MenuRow { y: root.selected_file_count > 0 ? 129px : 33px; title: "Set Modified Date from Created Date"; clicked => { root.tools_menu_visible = false; root.set_modified_date_from_created_date(); } }
+        if root.selected_media_kind == "jpeg": Rectangle { y: 160px; width: 100%; height: 1px; background: #edf0f2; }
+        if root.selected_media_kind == "jpeg": MenuRow { y: 161px; title: "Remove EXIF Tags"; danger: true; clicked => { root.tools_menu_visible = false; root.remove_exif_tags(); } }
     }
 }

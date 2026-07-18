@@ -1,6 +1,6 @@
 pub mod app;
 
-use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime, TimeZone};
 use slint::{language::ColorScheme, ComponentHandle};
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -184,7 +184,6 @@ impl GuiRunner for SlintRunner {
                     ui.set_current_path(app.current_path.as_str().into());
                     ui.set_item_count(app.file_count() as i32);
                     ui.set_files(app.get_ui_model());
-                    ui.set_table_rows(app.get_table_model());
                     set_selected_files(&ui, &app);
                     drop(app);
                     schedule_scan();
@@ -202,10 +201,15 @@ impl GuiRunner for SlintRunner {
                     return;
                 }
                 if let Some(ui) = ui_handle.upgrade() {
-                    let app = app_handle.borrow();
+                    let mut app = app_handle.borrow_mut();
+                    if app.show_only_missing_media_date {
+                        // Rows can disappear as their Media Date is discovered. Numeric
+                        // selections would otherwise point at a different file.
+                        app.select_ui_index(-1, false, false);
+                    }
+                    ui.set_item_count(app.file_count() as i32);
                     ui.set_files(app.get_ui_model());
-                    ui.set_table_rows(app.get_table_model());
-                    set_selected_media_details(&ui, &app);
+                    set_selected_files(&ui, &app);
                 }
             });
         }
@@ -219,6 +223,17 @@ impl GuiRunner for SlintRunner {
             {
                 let mut app = app_handle.borrow_mut();
                 app.file_filter = filter;
+                app.selected_indices.clear();
+            }
+            refresh(None);
+        });
+
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
+        ui.on_set_show_only_missing_media_date(move |enabled| {
+            {
+                let mut app = app_handle.borrow_mut();
+                app.show_only_missing_media_date = enabled;
                 app.selected_indices.clear();
             }
             refresh(None);
@@ -330,7 +345,6 @@ impl GuiRunner for SlintRunner {
                 let mut app = app_handle.borrow_mut();
                 app.select_files_without_exif();
                 ui.set_files(app.get_ui_model());
-                ui.set_table_rows(app.get_table_model());
                 set_selected_files(&ui, &app);
             }
         });
@@ -360,7 +374,6 @@ impl GuiRunner for SlintRunner {
                 };
                 {
                     let mut app = app_handle.borrow_mut();
-                    app.current_path = ui.get_current_path().to_string();
                     app.load_folder();
                 }
                 refresh(selected_path);
@@ -638,6 +651,110 @@ impl GuiRunner for SlintRunner {
         let app_handle = app.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
         let ui_handle = ui.as_weak();
+        ui.on_request_shift_media_date(move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                let selected_paths = {
+                    let app = app_handle.borrow();
+                    selected_file_paths(&app)
+                };
+                if selected_paths.is_empty() {
+                    show_message(&ui, "Unable to Shift Media Date", "Select one or more media files first.");
+                    return;
+                }
+                ui.set_shift_media_date_subtract(false);
+                ui.set_shift_media_date_days("0".into());
+                ui.set_shift_media_date_hours("0".into());
+                ui.set_shift_media_date_minutes("0".into());
+                ui.set_shift_media_date_seconds("0".into());
+                let preview = build_shift_media_date_preview(
+                    &selected_paths,
+                    &pending_taken_dates.borrow(),
+                    "0", "0", "0", "0", false,
+                );
+                ui.set_shift_media_date_preview(preview.into());
+                ui.set_shift_media_date_visible(true);
+            }
+        });
+
+        let app_handle = app.clone();
+        let pending_taken_dates = pending_filename_taken_dates.clone();
+        ui.on_update_shift_media_date_preview(move |days, hours, minutes, seconds, subtract| {
+            let selected_paths = {
+                let app = app_handle.borrow();
+                selected_file_paths(&app)
+            };
+            build_shift_media_date_preview(
+                &selected_paths,
+                &pending_taken_dates.borrow(),
+                days.as_str(), hours.as_str(), minutes.as_str(), seconds.as_str(), subtract,
+            ).into()
+        });
+
+        let app_handle = app.clone();
+        let pending_taken_dates = pending_filename_taken_dates.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_apply_shift_media_date(move |days, hours, minutes, seconds, subtract| {
+            let Some(ui) = ui_handle.upgrade() else { return false; };
+            let duration = match parse_media_date_shift(days.as_str(), hours.as_str(), minutes.as_str(), seconds.as_str()) {
+                Ok(duration) if duration != ChronoDuration::zero() => duration,
+                Ok(_) => {
+                    ui.set_shift_media_date_preview("Enter a non-zero time shift.".into());
+                    return false;
+                }
+                Err(err) => {
+                    ui.set_shift_media_date_preview(err.into());
+                    return false;
+                }
+            };
+            let selected_paths = {
+                let app = app_handle.borrow();
+                selected_file_paths(&app)
+            };
+            let existing_pending = pending_taken_dates.borrow().clone();
+            let mut staged = existing_pending.clone();
+            let mut shifted = Vec::new();
+            let mut skipped_count = 0usize;
+            for path in &selected_paths {
+                if !is_jpeg_path(path) && !is_png_path(path) && !is_mp4_path(path) {
+                    skipped_count += 1;
+                    continue;
+                }
+                let current = media_date_for_shift(path, &existing_pending);
+                let Some(new_date) = shift_display_datetime(&current, duration, subtract) else {
+                    skipped_count += 1;
+                    continue;
+                };
+                staged.insert(path.clone(), new_date.clone());
+                shifted.push((path.clone(), new_date));
+            }
+            if shifted.is_empty() {
+                ui.set_shift_media_date_preview("No selected file has a usable Media Date.".into());
+                return false;
+            }
+
+            *pending_taken_dates.borrow_mut() = staged;
+            if shifted.len() == 1 {
+                ui.set_taken_date(shifted[0].1.clone().into());
+                ui.set_taken_date_status("Modified".into());
+            } else {
+                ui.set_taken_date("".into());
+                ui.set_taken_date_status("Mixed".into());
+            }
+            ui.set_taken_date_dirty(true);
+            ui.set_metadata_dirty(true);
+
+            let message = if skipped_count == 0 {
+                format!("Shifted {} date(s). Ctrl+S to save.", shifted.len())
+            } else {
+                format!("Shifted {} date(s); skipped {}. Ctrl+S to save.", shifted.len(), skipped_count)
+            };
+            show_toast(&ui, &message);
+            true
+        });
+
+        let app_handle = app.clone();
+        let pending_taken_dates = pending_filename_taken_dates.clone();
+        let ui_handle = ui.as_weak();
         ui.on_fill_taken_date_from_filename(move || {
             if let Some(ui) = ui_handle.upgrade() {
                 let date_label = if matches!(ui.get_selected_media_kind().as_str(), "mp4" | "png") {
@@ -724,17 +841,9 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if skipped_count == 0 {
-                    show_message(
-                        &ui,
-                        &format!("{date_label} Staged"),
-                        &format!("{date_label} was parsed for {parsed_count} files. Save to apply."),
-                    );
+                    show_toast(&ui, &format!("Parsed {parsed_count} date(s). Ctrl+S to save."));
                 } else {
-                    show_message(
-                        &ui,
-                        &format!("{date_label} Staged"),
-                        &format!("{date_label} was parsed for {parsed_count} files. {skipped_count} files could not be parsed. Save to apply."),
-                    );
+                    show_toast(&ui, &format!("Parsed {parsed_count}; skipped {skipped_count}. Ctrl+S to save."));
                 }
             }
         });
@@ -799,11 +908,7 @@ impl GuiRunner for SlintRunner {
                         ui.set_exif_available(true);
                     }
                     update_metadata_dirty_state(&ui);
-                    show_message(
-                        &ui,
-                        "Date Staged",
-                        "The earlier of File Created and File Modified was selected. Save to apply.",
-                    );
+                    show_toast(&ui, "Date staged. Ctrl+S to save.");
                     return;
                 }
 
@@ -832,7 +937,7 @@ impl GuiRunner for SlintRunner {
                         "The earlier file timestamp was staged for {staged_count} files. {skipped_count} files were skipped. Save to apply."
                     )
                 };
-                show_message(&ui, "Dates Staged", &message);
+                show_toast(&ui, &message);
             }
         });
 
@@ -894,9 +999,9 @@ impl GuiRunner for SlintRunner {
                 ui.set_metadata_dirty(true);
 
                 if skipped_count == 0 {
-                    show_message(&ui, "Modified Date Staged", &format!("Modified Date was staged for {staged_count} files. Save to apply."));
+                    show_toast(&ui, &format!("Staged {staged_count} modified date(s). Ctrl+S to save."));
                 } else {
-                    show_message(&ui, "Modified Date Staged", &format!("Modified Date was staged for {staged_count} files. {skipped_count} files could not be staged. Save to apply."));
+                    show_toast(&ui, &format!("Staged {staged_count}; skipped {skipped_count}. Ctrl+S to save."));
                 }
             }
         });
@@ -2241,6 +2346,97 @@ fn collect_dirty_exif_metadata(
     metadata
 }
 
+fn parse_media_date_shift(days: &str, hours: &str, minutes: &str, seconds: &str) -> Result<ChronoDuration, String> {
+    fn parse_part(value: &str, label: &str) -> Result<i128, String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Ok(0);
+        }
+        let parsed = trimmed
+            .parse::<i128>()
+            .map_err(|_| format!("{label} must be a non-negative whole number."))?;
+        if parsed < 0 {
+            return Err(format!("{label} must be a non-negative whole number."));
+        }
+        Ok(parsed)
+    }
+
+    let days = parse_part(days, "Days")?;
+    let hours = parse_part(hours, "Hours")?;
+    let minutes = parse_part(minutes, "Minutes")?;
+    let seconds = parse_part(seconds, "Seconds")?;
+    let total = days
+        .checked_mul(86_400)
+        .and_then(|value| value.checked_add(hours.checked_mul(3_600)?))
+        .and_then(|value| value.checked_add(minutes.checked_mul(60)?))
+        .and_then(|value| value.checked_add(seconds))
+        .ok_or_else(|| "The requested time shift is too large.".to_string())?;
+    let seconds = i64::try_from(total).map_err(|_| "The requested time shift is too large.".to_string())?;
+    ChronoDuration::try_seconds(seconds).ok_or_else(|| "The requested time shift is too large.".to_string())
+}
+
+fn media_date_for_shift(path: &std::path::Path, pending: &HashMap<PathBuf, String>) -> String {
+    if let Some(value) = pending.get(path) {
+        return value.clone();
+    }
+    if is_mp4_path(path) || is_png_path(path) {
+        scan_media_file(path).media_date
+    } else if is_jpeg_path(path) {
+        read_exif_metadata(path).taken_date
+    } else {
+        String::new()
+    }
+}
+
+fn shift_display_datetime(value: &str, duration: ChronoDuration, subtract: bool) -> Option<String> {
+    let datetime = parse_display_datetime_or_date(value.trim())?;
+    let shifted = if subtract {
+        datetime.checked_sub_signed(duration)?
+    } else {
+        datetime.checked_add_signed(duration)?
+    };
+    Some(shifted.format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
+fn build_shift_media_date_preview(
+    paths: &[PathBuf],
+    pending: &HashMap<PathBuf, String>,
+    days: &str,
+    hours: &str,
+    minutes: &str,
+    seconds: &str,
+    subtract: bool,
+) -> String {
+    let duration = match parse_media_date_shift(days, hours, minutes, seconds) {
+        Ok(duration) => duration,
+        Err(err) => return err,
+    };
+    let mut lines = Vec::new();
+    let mut valid_count = 0usize;
+    let mut skipped_count = 0usize;
+    for path in paths {
+        if !is_jpeg_path(path) && !is_png_path(path) && !is_mp4_path(path) {
+            skipped_count += 1;
+            continue;
+        }
+        let current = media_date_for_shift(path, pending);
+        let Some(shifted) = shift_display_datetime(&current, duration, subtract) else {
+            skipped_count += 1;
+            continue;
+        };
+        valid_count += 1;
+        if lines.len() < 3 {
+            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("(unknown)");
+            lines.push(format!("{name}: {current}  ->  {shifted}"));
+        }
+    }
+    if lines.is_empty() {
+        return format!("No usable Media Date found.  Skipped: {skipped_count}");
+    }
+    lines.push(format!("Ready: {valid_count} file(s)   Skipped: {skipped_count}"));
+    lines.join("\n")
+}
+
 fn parse_timestamp(value: &str) -> Result<SystemTime, String> {
     if value.trim().is_empty() || value == "N/A" || value == "-" {
         return Err("Invalid timestamp format.".to_string());
@@ -2679,6 +2875,8 @@ mod tests {
         auto_format_date_edit,
         earliest_available_timestamp,
         filename_from_media_date,
+        parse_media_date_shift,
+        shift_display_datetime,
     };
     use std::time::{Duration, SystemTime};
 
@@ -2692,6 +2890,24 @@ mod tests {
         );
         assert_eq!(earliest_available_timestamp(Some(created), None), Some(created));
         assert_eq!(earliest_available_timestamp(None, Some(modified)), Some(modified));
+    }
+
+    #[test]
+    fn shifts_media_dates_across_day_and_month_boundaries() {
+        let shift = parse_media_date_shift("57", "10", "0", "0").unwrap();
+        assert_eq!(
+            shift_display_datetime("2015-05-15 03:00:00", shift, false).as_deref(),
+            Some("2015-07-11 13:00:00")
+        );
+        assert_eq!(
+            shift_display_datetime("2015-07-11 13:00:00", shift, true).as_deref(),
+            Some("2015-05-15 03:00:00")
+        );
+    }
+
+    #[test]
+    fn rejects_negative_media_date_shift_parts() {
+        assert!(parse_media_date_shift("0", "-1", "0", "0").is_err());
     }
 
     #[test]

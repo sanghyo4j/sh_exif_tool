@@ -1,4 +1,4 @@
-import { Button, HorizontalBox, Palette } from "std-widgets.slint";
+import { Button, HorizontalBox, LineEdit, Palette } from "std-widgets.slint";
 import { FileEntry } from "types.slint";
 import { HDivider, StrongVDivider } from "components/dividers.slint";
 import { PathBar } from "components/path_bar.slint";
@@ -17,7 +17,7 @@ export component MainWindow inherits Window {
     default-font-size: 10pt;
     title: "Rust EXIF Tool";
 
-    in-out property <string> current_path: "C:/";
+    in property <string> current_path: "C:/";
     in-out property <[FileEntry]> files;
     in-out property <[[StandardListViewItem]]> table_rows;
     in-out property <int> selected_index: -1;
@@ -132,12 +132,20 @@ export component MainWindow inherits Window {
     in-out property <bool> confirm_delete_visible: false;
     in-out property <bool> confirm_metadata_paste_visible: false;
     in-out property <bool> confirm_trailing_rename_visible: false;
+    in-out property <bool> shift_media_date_visible: false;
+    in-out property <bool> shift_media_date_subtract: false;
+    in-out property <string> shift_media_date_days: "0";
+    in-out property <string> shift_media_date_hours: "0";
+    in-out property <string> shift_media_date_minutes: "0";
+    in-out property <string> shift_media_date_seconds: "0";
+    in-out property <string> shift_media_date_preview: "";
     in-out property <bool> toast_visible: false;
     in-out property <string> toast_text: "";
     in-out property <bool> file_context_menu_visible: false;
     in-out property <bool> exif_context_menu_visible: false;
     in-out property <bool> exif_context_paste_enabled: false;
     in-out property <int> file_filter: 0;
+    in-out property <bool> show_only_missing_media_date: false;
     in-out property <bool> backup_before_changes: false;
     in-out property <bool> show_extension_in_file_name: false;
 
@@ -167,6 +175,7 @@ export component MainWindow inherits Window {
     callback table_row_selected(int, bool, bool);
     callback select_all_table_rows();
     callback set_file_filter(int);
+    callback set_show_only_missing_media_date(bool);
     callback set_show_extension_in_file_name(bool);
     callback select_files_without_exif();
     callback exif_tag_right_clicked(string, string);
@@ -176,6 +185,9 @@ export component MainWindow inherits Window {
     callback confirm_metadata_paste(bool);
     callback request_move_trailing_numbers();
     callback confirm_move_trailing_numbers();
+    callback request_shift_media_date();
+    callback update_shift_media_date_preview(string, string, string, string, bool) -> string;
+    callback apply_shift_media_date(string, string, string, string, bool) -> bool;
 
     MenuBar {
         Menu {
@@ -266,46 +278,53 @@ export component MainWindow inherits Window {
         Menu {
             title: "&View";
 
-            Menu {
-                title: "File Filter";
-
-                MenuItem {
-                    title: "Supported Media";
-                    checkable: true;
-                    checked: root.file_filter == 0;
-                    activated => {
-                        root.file_filter = 0;
-                        root.set_file_filter(0);
-                    }
-                }
-                MenuItem {
-                    title: "Images";
-                    checkable: true;
-                    checked: root.file_filter == 1;
-                    activated => {
-                        root.file_filter = 1;
-                        root.set_file_filter(1);
-                    }
-                }
-                MenuItem {
-                    title: "Videos";
-                    checkable: true;
-                    checked: root.file_filter == 2;
-                    activated => {
-                        root.file_filter = 2;
-                        root.set_file_filter(2);
-                    }
-                }
-                MenuItem {
-                    title: "All Files";
-                    checkable: true;
-                    checked: root.file_filter == 3;
-                    activated => {
-                        root.file_filter = 3;
-                        root.set_file_filter(3);
-                    }
+            MenuItem {
+                title: "Supported Media";
+                checkable: true;
+                checked: root.file_filter == 0;
+                activated => {
+                    root.file_filter = 0;
+                    root.set_file_filter(0);
                 }
             }
+            MenuItem {
+                title: "Images";
+                checkable: true;
+                checked: root.file_filter == 1;
+                activated => {
+                    root.file_filter = 1;
+                    root.set_file_filter(1);
+                }
+            }
+            MenuItem {
+                title: "Videos";
+                checkable: true;
+                checked: root.file_filter == 2;
+                activated => {
+                    root.file_filter = 2;
+                    root.set_file_filter(2);
+                }
+            }
+            MenuItem {
+                title: "All Files";
+                checkable: true;
+                checked: root.file_filter == 3;
+                activated => {
+                    root.file_filter = 3;
+                    root.set_file_filter(3);
+                }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: "Show Only Missing Media Date";
+                checkable: true;
+                checked: root.show_only_missing_media_date;
+                activated => {
+                    root.show_only_missing_media_date = !root.show_only_missing_media_date;
+                    root.set_show_only_missing_media_date(root.show_only_missing_media_date);
+                }
+            }
+            MenuSeparator {}
             MenuItem {
                 title: "Show Extension in Metadata File Name";
                 checkable: true;
@@ -420,7 +439,7 @@ export component MainWindow inherits Window {
         }
 
         key-pressed(event) => {
-            if (root.message_visible || root.confirm_delete_visible || root.confirm_metadata_paste_visible || root.confirm_trailing_rename_visible) {
+            if (root.message_visible || root.confirm_delete_visible || root.confirm_metadata_paste_visible || root.confirm_trailing_rename_visible || root.shift_media_date_visible) {
                 return reject;
             }
 
@@ -704,6 +723,11 @@ export component MainWindow inherits Window {
                     root.fill_taken_date_from_created_date();
                     metadata_panel.clear_editor_focus();
                 }
+                shift_media_date() => {
+                    root.editing_path = false;
+                    metadata_panel.clear_editor_focus();
+                    root.request_shift_media_date();
+                }
                 set_modified_date_from_created_date() => {
                     root.editing_path = false;
                     root.set_modified_date_from_created_date();
@@ -836,6 +860,101 @@ export component MainWindow inherits Window {
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
                 root.file_context_menu_visible = false;
+            }
+        }
+    }
+
+    if shift_media_date_visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000066;
+        forward-focus: shift_dialog_focus;
+
+        init => { shift_dialog_focus.focus(); }
+
+        shift_dialog_focus := FocusScope {
+            x: 0px; y: 0px; width: 0px; height: 0px;
+            capture-key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.shift_media_date_visible = false;
+                    return accept;
+                }
+                reject
+            }
+        }
+
+        TouchArea { width: 100%; height: 100%; }
+
+        Rectangle {
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            width: min(610px, root.width - 48px);
+            height: 390px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #cfd8dc;
+            border-radius: 6px;
+
+            Text {
+                x: 22px; y: 16px; width: parent.width - 44px; height: 30px;
+                text: "Shift Media Date";
+                color: #263238; font-size: 15px; font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            Text {
+                x: 22px; y: 54px; width: 72px; height: 28px;
+                text: "Operation"; color: #455a64;
+                font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center;
+            }
+
+            Rectangle {
+                x: 104px; y: 54px; width: 82px; height: 28px;
+                background: !root.shift_media_date_subtract ? #eaf4ff : #ffffff;
+                border-width: 1px; border-color: #9db4c2; border-radius: 3px;
+                Text { width: 100%; height: 100%; text: "Add"; color: #263238; horizontal-alignment: center; vertical-alignment: center; }
+                TouchArea { width: 100%; height: 100%; clicked => {
+                    root.shift_media_date_subtract = false;
+                    root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, root.shift_media_date_hours, root.shift_media_date_minutes, root.shift_media_date_seconds, false);
+                } }
+            }
+            Rectangle {
+                x: 194px; y: 54px; width: 82px; height: 28px;
+                background: root.shift_media_date_subtract ? #eaf4ff : #ffffff;
+                border-width: 1px; border-color: #9db4c2; border-radius: 3px;
+                Text { width: 100%; height: 100%; text: "Subtract"; color: #263238; horizontal-alignment: center; vertical-alignment: center; }
+                TouchArea { width: 100%; height: 100%; clicked => {
+                    root.shift_media_date_subtract = true;
+                    root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, root.shift_media_date_hours, root.shift_media_date_minutes, root.shift_media_date_seconds, true);
+                } }
+            }
+
+            Text { x: 22px; y: 102px; width: 70px; height: 22px; text: "Days"; color: #455a64; vertical-alignment: center; }
+            Text { x: 154px; y: 102px; width: 70px; height: 22px; text: "Hours"; color: #455a64; vertical-alignment: center; }
+            Text { x: 286px; y: 102px; width: 70px; height: 22px; text: "Minutes"; color: #455a64; vertical-alignment: center; }
+            Text { x: 418px; y: 102px; width: 70px; height: 22px; text: "Seconds"; color: #455a64; vertical-alignment: center; }
+
+            LineEdit { x: 22px; y: 126px; width: 110px; height: 30px; text <=> root.shift_media_date_days; edited(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(value, root.shift_media_date_hours, root.shift_media_date_minutes, root.shift_media_date_seconds, root.shift_media_date_subtract); } }
+            LineEdit { x: 154px; y: 126px; width: 110px; height: 30px; text <=> root.shift_media_date_hours; edited(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, value, root.shift_media_date_minutes, root.shift_media_date_seconds, root.shift_media_date_subtract); } }
+            LineEdit { x: 286px; y: 126px; width: 110px; height: 30px; text <=> root.shift_media_date_minutes; edited(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, root.shift_media_date_hours, value, root.shift_media_date_seconds, root.shift_media_date_subtract); } }
+            LineEdit { x: 418px; y: 126px; width: 110px; height: 30px; text <=> root.shift_media_date_seconds; edited(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, root.shift_media_date_hours, root.shift_media_date_minutes, value, root.shift_media_date_subtract); } }
+
+            Text { x: 22px; y: 174px; width: parent.width - 44px; height: 22px; text: "Preview"; color: #263238; font-weight: 700; vertical-alignment: center; }
+            Rectangle { x: 22px; y: 200px; width: parent.width - 44px; height: 118px; background: #f6f8fa; border-width: 1px; border-color: #dde4e8; border-radius: 3px;
+                Text { x: 12px; y: 8px; width: parent.width - 24px; height: parent.height - 16px; text: root.shift_media_date_preview; color: #37474f; font-size: max(9pt, (FontSettings.font_size_pt - 1) * 1pt); wrap: word-wrap; }
+            }
+
+            Rectangle { x: parent.width - 190px; y: parent.height - 48px; width: 76px; height: 30px; background: cancel_shift.has-hover ? #f3f6f8 : #ffffff; border-width: 1px; border-color: #b8c2cc; border-radius: 3px;
+                Text { width: 100%; height: 100%; text: "Cancel"; color: #263238; horizontal-alignment: center; vertical-alignment: center; }
+                cancel_shift := TouchArea { width: 100%; height: 100%; clicked => { root.shift_media_date_visible = false; } }
+            }
+            Rectangle { x: parent.width - 102px; y: parent.height - 48px; width: 80px; height: 30px; background: apply_shift.has-hover ? #eaf4ff : #ffffff; border-width: 1px; border-color: #8aa8ba; border-radius: 3px;
+                Text { width: 100%; height: 100%; text: "Apply"; color: #1f3440; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                apply_shift := TouchArea { width: 100%; height: 100%; clicked => {
+                    if (root.apply_shift_media_date(root.shift_media_date_days, root.shift_media_date_hours, root.shift_media_date_minutes, root.shift_media_date_seconds, root.shift_media_date_subtract)) {
+                        root.shift_media_date_visible = false;
+                    }
+                } }
             }
         }
     }

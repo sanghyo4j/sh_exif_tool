@@ -28,7 +28,7 @@ component IconButton inherits Rectangle {
 }
 
 export component PathBar inherits Rectangle {
-    in-out property <string> current_path;
+    in property <string> current_path;
     in-out property <bool> editing;
 
     callback change_dir(string);
@@ -107,7 +107,6 @@ export component PathBar inherits Rectangle {
                 }
 
                 accepted(new_path) => {
-                    root.current_path = new_path;
                     root.editing = false;
                     root.change_dir(new_path);
                 }

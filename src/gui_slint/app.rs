@@ -21,6 +21,7 @@ pub struct SlintApp {
     pub files: Vec<FileSystemEntry>,
     pub selected_indices: Vec<i32>,
     pub file_filter: i32,
+    pub show_only_missing_media_date: bool,
     pub scan_results: Arc<Mutex<HashMap<PathBuf, CachedMediaScan>>>,
     pub scan_epoch: Arc<AtomicU64>,
     selection_anchor: Option<i32>,
@@ -38,6 +39,7 @@ impl SlintApp {
             files: Vec::new(),
             selected_indices: Vec::new(),
             file_filter: 0,
+            show_only_missing_media_date: false,
             scan_results: Arc::new(Mutex::new(HashMap::new())),
             scan_epoch: Arc::new(AtomicU64::new(0)),
             selection_anchor: None,
@@ -83,13 +85,15 @@ impl SlintApp {
             metadata_status: "-".into(),
         });
 
-        for (visible_index, f) in self.visible_files().into_iter().enumerate() {
+        let visible_files = self.visible_files();
+        let cache = self.scan_results.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (visible_index, f) in visible_files.into_iter().enumerate() {
             let name_str = f.path.file_name()
                 .map(|os_str| os_str.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
             let ui_index = i32::try_from(visible_index + 1).unwrap_or(i32::MAX);
             
-            let scan = self.scan_result_for(f);
+            let scan = scan_result_from_cache(&cache, f);
             ui_items.push(UiFileEntry {
                 name: name_str.into(),
                 size: if f.is_dir { "-".into() } else { format_file_size(f.size).into() },
@@ -106,6 +110,7 @@ impl SlintApp {
         ModelRc::new(VecModel::from(ui_items))
     }
 
+    #[allow(dead_code)]
     pub fn get_table_model(&self) -> ModelRc<ModelRc<StandardListViewItem>> {
         let mut rows: Vec<ModelRc<StandardListViewItem>> = Vec::new();
 
@@ -310,9 +315,9 @@ impl SlintApp {
             .iter()
             .filter_map(|index| self.path_for_ui_index(*index))
             .collect();
+        let visible_files = self.visible_files();
         let cache = self.scan_results.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut jobs: Vec<_> = self
-            .visible_files()
+        let mut jobs: Vec<_> = visible_files
             .into_iter()
             .filter(|entry| !entry.is_dir)
             .filter(|entry| {
@@ -336,24 +341,54 @@ impl SlintApp {
 
     fn scan_result_for(&self, entry: &FileSystemEntry) -> Option<MediaScanResult> {
         let cache = self.scan_results.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.get(&entry.path)
-            .filter(|cached| cached.size == entry.size && cached.modified == entry.modified)
-            .map(|cached| cached.result.clone())
+        scan_result_from_cache(&cache, entry)
     }
 
     fn visible_files(&self) -> Vec<&FileSystemEntry> {
+        let cache = self.scan_results.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         self.files
             .iter()
             .filter(|entry| {
-                entry.is_dir || match self.file_filter {
+                if entry.is_dir {
+                    return true;
+                }
+                let matches_type_filter = match self.file_filter {
                     0 => is_image_file(&entry.path) || is_video_file(&entry.path),
                     1 => is_image_file(&entry.path),
                     2 => is_video_file(&entry.path),
                     _ => true,
+                };
+                if !matches_type_filter {
+                    return false;
                 }
+                if !self.show_only_missing_media_date {
+                    return true;
+                }
+                if !is_image_file(&entry.path) && !is_video_file(&entry.path) {
+                    return false;
+                }
+                let scan = scan_result_from_cache(&cache, entry);
+                media_date_is_missing(scan.as_ref())
             })
             .collect()
     }
+}
+
+fn scan_result_from_cache(
+    cache: &HashMap<PathBuf, CachedMediaScan>,
+    entry: &FileSystemEntry,
+) -> Option<MediaScanResult> {
+    cache
+        .get(&entry.path)
+        .filter(|cached| cached.size == entry.size && cached.modified == entry.modified)
+        .map(|cached| cached.result.clone())
+}
+
+fn media_date_is_missing(scan: Option<&MediaScanResult>) -> bool {
+    scan.is_none_or(|result| {
+        let value = result.media_date.trim();
+        value.is_empty() || matches!(value, "-" | "N/A")
+    })
 }
 
 fn format_time(t: SystemTime) -> String {
@@ -394,7 +429,8 @@ fn is_png_file(path: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_image_file, is_video_file};
+    use super::{is_image_file, is_video_file, media_date_is_missing};
+    use crate::media::MediaScanResult;
     use std::path::Path;
 
     #[test]
@@ -405,6 +441,18 @@ mod tests {
         }
         assert!(!is_image_file(Path::new("notes.txt")));
         assert!(!is_video_file(Path::new("notes.txt")));
+    }
+
+    #[test]
+    fn missing_media_date_filter_keeps_pending_and_empty_dates_only() {
+        let result = |media_date: &str| MediaScanResult {
+            media_date: media_date.to_string(),
+            ..MediaScanResult::default()
+        };
+        assert!(media_date_is_missing(None));
+        assert!(media_date_is_missing(Some(&result("-"))));
+        assert!(media_date_is_missing(Some(&result("N/A"))));
+        assert!(!media_date_is_missing(Some(&result("2014-02-04 12:00:00"))));
     }
 }
 
