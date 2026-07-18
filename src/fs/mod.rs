@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
@@ -52,6 +53,137 @@ pub fn rename_entry(current_path: &Path, new_name: &str) -> Result<PathBuf, Stri
 
     std::fs::rename(current_path, &new_path).map_err(|err| err.to_string())?;
     Ok(new_path)
+}
+
+pub fn trailing_number_rename_candidate_count(paths: &[PathBuf]) -> Result<usize, String> {
+    Ok(build_trailing_number_rename_plan(paths)?.len())
+}
+
+pub fn move_trailing_numbers_to_front(paths: &[PathBuf]) -> Result<usize, String> {
+    let plan = build_trailing_number_rename_plan(paths)?;
+    if plan.is_empty() {
+        return Ok(0);
+    }
+
+    let mut staged = Vec::with_capacity(plan.len());
+    for (index, (source, target)) in plan.into_iter().enumerate() {
+        let directory = source
+            .parent()
+            .ok_or_else(|| format!("Could not resolve the folder for {}.", source.display()))?;
+        let mut attempt = 0usize;
+        let temporary = loop {
+            let candidate = directory.join(format!(
+                ".sh_exif_tool_rename_{}_{}_{}.tmp",
+                std::process::id(),
+                index,
+                attempt
+            ));
+            if !candidate.exists() {
+                break candidate;
+            }
+            attempt += 1;
+        };
+
+        if let Err(err) = std::fs::rename(&source, &temporary) {
+            for (previous_source, _, previous_temporary) in staged.iter().rev() {
+                let _ = std::fs::rename(previous_temporary, previous_source);
+            }
+            return Err(format!("Failed to stage {}: {err}", source.display()));
+        }
+        staged.push((source, target, temporary));
+    }
+
+    let mut committed = 0usize;
+    for (_, target, temporary) in &staged {
+        if let Err(err) = std::fs::rename(temporary, target) {
+            for (_, committed_target, committed_temporary) in staged[..committed].iter().rev() {
+                let _ = std::fs::rename(committed_target, committed_temporary);
+            }
+            for (source, _, staged_temporary) in staged.iter().rev() {
+                if staged_temporary.exists() {
+                    let _ = std::fs::rename(staged_temporary, source);
+                }
+            }
+            return Err(format!("Failed to rename to {}: {err}", target.display()));
+        }
+        committed += 1;
+    }
+
+    Ok(staged.len())
+}
+
+fn build_trailing_number_rename_plan(paths: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    let mut plan = Vec::new();
+    for source in paths {
+        if !source.is_file() {
+            continue;
+        }
+        let Some(target_name) = move_trailing_number_to_front_name(&source) else {
+            continue;
+        };
+        let directory = source
+            .parent()
+            .ok_or_else(|| format!("Could not resolve the folder for {}.", source.display()))?;
+        plan.push((source.clone(), directory.join(target_name)));
+    }
+
+    plan.sort_by(|left, right| left.0.cmp(&right.0));
+    let source_keys: HashSet<String> = plan
+        .iter()
+        .map(|(source, _)| comparable_path_key(source))
+        .collect();
+    let mut target_keys = HashSet::new();
+    for (_, target) in &plan {
+        let target_key = comparable_path_key(target);
+        if !target_keys.insert(target_key.clone()) {
+            return Err(format!("Multiple files would become {}.", target.display()));
+        }
+        if target.exists() && !source_keys.contains(&target_key) {
+            return Err(format!("A target file already exists: {}", target.display()));
+        }
+    }
+
+    Ok(plan)
+}
+
+fn move_trailing_number_to_front_name(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let extension = path.extension().and_then(|value| value.to_str());
+    let digit_start = stem
+        .char_indices()
+        .rev()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .map(|(index, _)| index)
+        .last()?;
+    let number = &stem[digit_start..];
+    if !matches!(number.len(), 2 | 3) {
+        return None;
+    }
+
+    let before_number = &stem[..digit_start];
+    let separator = before_number.chars().next_back()?;
+    if !matches!(separator, '_' | '-' | ' ') {
+        return None;
+    }
+    let base_end = before_number.len() - separator.len_utf8();
+    let base = before_number[..base_end].trim_end_matches(['_', '-', ' ']);
+    if base.is_empty() {
+        return None;
+    }
+
+    Some(match extension {
+        Some(extension) => format!("{number}_{base}.{extension}"),
+        None => format!("{number}_{base}"),
+    })
+}
+
+fn comparable_path_key(path: &Path) -> String {
+    let value = path.to_string_lossy().to_string();
+    if cfg!(windows) {
+        value.to_lowercase()
+    } else {
+        value
+    }
 }
 
 pub fn save_file_copy(source_path: &Path) -> Result<PathBuf, String> {
@@ -558,6 +690,50 @@ fn open_in_file_manager_impl(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moves_only_delimited_two_or_three_digit_trailing_numbers() {
+        assert_eq!(
+            move_trailing_number_to_front_name(Path::new("xxxx_xxxx_001.jpg")).as_deref(),
+            Some("001_xxxx_xxxx.jpg")
+        );
+        assert_eq!(
+            move_trailing_number_to_front_name(Path::new("xxxx-acbd-25.png")).as_deref(),
+            Some("25_xxxx-acbd.png")
+        );
+        assert_eq!(move_trailing_number_to_front_name(Path::new("20140809_131712.jpg")), None);
+        assert_eq!(move_trailing_number_to_front_name(Path::new("photo_1.jpg")), None);
+        assert_eq!(move_trailing_number_to_front_name(Path::new("photo_1000.jpg")), None);
+        assert_eq!(move_trailing_number_to_front_name(Path::new("photo123.jpg")), None);
+    }
+
+    #[test]
+    fn renames_selected_matching_files_only() {
+        let directory = std::env::temp_dir().join(format!(
+            "sh_exif_tool_trailing_rename_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("xxxx_xxxx_001.jpg"), b"one").unwrap();
+        std::fs::write(directory.join("xxxx_acbd_25.jpg"), b"two").unwrap();
+        std::fs::write(directory.join("20140809_131712.jpg"), b"date").unwrap();
+
+        let selected = vec![
+            directory.join("xxxx_xxxx_001.jpg"),
+            directory.join("20140809_131712.jpg"),
+        ];
+        assert_eq!(trailing_number_rename_candidate_count(&selected).unwrap(), 1);
+        assert_eq!(move_trailing_numbers_to_front(&selected).unwrap(), 1);
+        assert!(directory.join("001_xxxx_xxxx.jpg").is_file());
+        assert!(directory.join("xxxx_acbd_25.jpg").is_file());
+        assert!(directory.join("20140809_131712.jpg").is_file());
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[cfg(windows)]
     #[test]

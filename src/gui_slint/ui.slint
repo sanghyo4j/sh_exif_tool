@@ -5,7 +5,7 @@ import { PathBar } from "components/path_bar.slint";
 import { FileTable } from "components/file_table.slint";
 import { CustomFileTable } from "components/custom_file_table.slint";
 import { MetadataPanel } from "components/metadata_panel.slint";
-import { FontSettings } from "theme.slint";
+import { FontSettings, MetadataContextMenuState } from "theme.slint";
 
 export { FileEntry, Palette, FontSettings }
 
@@ -54,6 +54,10 @@ export component MainWindow inherits Window {
     in-out property <string> gps_latitude: "";
     in-out property <string> gps_longitude: "";
     in-out property <string> gps_altitude: "";
+    in-out property <string> date_time_original: "";
+    in-out property <string> date_time_digitized: "";
+    in-out property <string> image_date_time: "";
+    in-out property <bool> exif_date_sources_visible: false;
     in-out property <string> selected_name_status: "";
     in-out property <string> selected_created_status: "";
     in-out property <string> selected_modified_status: "";
@@ -127,9 +131,12 @@ export component MainWindow inherits Window {
     in-out property <string> message_text: "";
     in-out property <bool> confirm_delete_visible: false;
     in-out property <bool> confirm_metadata_paste_visible: false;
+    in-out property <bool> confirm_trailing_rename_visible: false;
     in-out property <bool> toast_visible: false;
     in-out property <string> toast_text: "";
     in-out property <bool> file_context_menu_visible: false;
+    in-out property <bool> exif_context_menu_visible: false;
+    in-out property <bool> exif_context_paste_enabled: false;
     in-out property <int> file_filter: 0;
     in-out property <bool> backup_before_changes: false;
     in-out property <bool> show_extension_in_file_name: false;
@@ -155,14 +162,20 @@ export component MainWindow inherits Window {
     callback set_modified_date_from_created_date();
     callback set_filename_from_media_date();
     callback metadata_value_edited();
+    callback taken_date_input_edited() -> int;
     callback table_row_clicked(int);
     callback table_row_selected(int, bool, bool);
+    callback select_all_table_rows();
     callback set_file_filter(int);
     callback set_show_extension_in_file_name(bool);
     callback select_files_without_exif();
     callback exif_tag_right_clicked(string, string);
     callback exif_section_right_clicked(string);
+    callback exif_context_copy();
+    callback exif_context_paste();
     callback confirm_metadata_paste(bool);
+    callback request_move_trailing_numbers();
+    callback confirm_move_trailing_numbers();
 
     MenuBar {
         Menu {
@@ -359,6 +372,19 @@ export component MainWindow inherits Window {
         }
 
         Menu {
+            title: "&Advanced";
+
+            MenuItem {
+                title: "Move Trailing Number to Front...";
+                activated => {
+                    root.file_context_menu_visible = false;
+                    root.editing_path = false;
+                    root.request_move_trailing_numbers();
+                }
+            }
+        }
+
+        Menu {
             title: "&Help";
 
             MenuItem { title: "&About"; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
@@ -394,7 +420,7 @@ export component MainWindow inherits Window {
         }
 
         key-pressed(event) => {
-            if (root.message_visible || root.confirm_delete_visible || root.confirm_metadata_paste_visible) {
+            if (root.message_visible || root.confirm_delete_visible || root.confirm_metadata_paste_visible || root.confirm_trailing_rename_visible) {
                 return reject;
             }
 
@@ -498,6 +524,10 @@ export component MainWindow inherits Window {
                 row_activated(index) => {
                     root.open_dir(index);
                 }
+                select_all_requested() => {
+                    root.editing_path = false;
+                    root.select_all_table_rows();
+                }
                 rename_requested(index) => {
                     root.selected_index = index;
                     metadata_panel.focus_file_name();
@@ -556,6 +586,7 @@ export component MainWindow inherits Window {
                 y: 0px;
                 width: max(320px, root.width - 756px);
                 height: 100%;
+                selected_file_count: root.selected_file_count;
                 selected_name <=> root.selected_name;
                 selected_created <=> root.selected_created;
                 selected_modified <=> root.selected_modified;
@@ -582,6 +613,10 @@ export component MainWindow inherits Window {
                 gps_latitude <=> root.gps_latitude;
                 gps_longitude <=> root.gps_longitude;
                 gps_altitude <=> root.gps_altitude;
+                date_time_original <=> root.date_time_original;
+                date_time_digitized <=> root.date_time_digitized;
+                image_date_time <=> root.image_date_time;
+                exif_date_sources_visible <=> root.exif_date_sources_visible;
                 selected_name_status <=> root.selected_name_status;
                 selected_created_status <=> root.selected_created_status;
                 selected_modified_status <=> root.selected_modified_status;
@@ -661,20 +696,26 @@ export component MainWindow inherits Window {
                 }
                 fill_taken_date_from_filename() => {
                     root.editing_path = false;
-                    content_focus.focus();
                     root.fill_taken_date_from_filename();
+                    metadata_panel.clear_editor_focus();
                 }
                 fill_taken_date_from_created_date() => {
                     root.editing_path = false;
                     root.fill_taken_date_from_created_date();
+                    metadata_panel.clear_editor_focus();
                 }
                 set_modified_date_from_created_date() => {
                     root.editing_path = false;
                     root.set_modified_date_from_created_date();
+                    metadata_panel.clear_editor_focus();
                 }
                 set_filename_from_media_date() => {
                     root.editing_path = false;
                     root.set_filename_from_media_date();
+                    metadata_panel.clear_editor_focus();
+                }
+                taken_date_edited() => {
+                    root.taken_date_input_edited()
                 }
                 remove_exif_tags() => {
                     root.editing_path = false;
@@ -725,6 +766,43 @@ export component MainWindow inherits Window {
         }
     }
 
+    if root.exif_context_menu_visible: TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.exif_context_menu_visible = false; }
+    }
+
+    if root.exif_context_menu_visible: Rectangle {
+        x: root.width - 176px;
+        y: min(root.height - 91px, max(42px, MetadataContextMenuState.y));
+        width: 152px;
+        height: 65px;
+        background: #ffffff;
+        border-width: 1px;
+        border-color: #cfd8dc;
+        border-radius: 3px;
+
+        Rectangle {
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: 31px;
+            background: copy_area.has-hover ? #edf4f8 : #ffffff;
+            Text { x: 14px; width: parent.width - 28px; height: 100%; text: "Copy"; color: #263238; vertical-alignment: center; }
+            copy_area := TouchArea { width: 100%; height: 100%; clicked => { root.exif_context_menu_visible = false; root.exif_context_copy(); } }
+        }
+        Rectangle { x: 1px; y: 32px; width: parent.width - 2px; height: 1px; background: #edf0f2; }
+        Rectangle {
+            x: 1px;
+            y: 33px;
+            width: parent.width - 2px;
+            height: 31px;
+            background: root.exif_context_paste_enabled && paste_area.has-hover ? #edf4f8 : #ffffff;
+            Text { x: 14px; width: parent.width - 28px; height: 100%; text: "Paste"; color: root.exif_context_paste_enabled ? #263238 : #aeb7bc; vertical-alignment: center; }
+            paste_area := TouchArea { enabled: root.exif_context_paste_enabled; width: 100%; height: 100%; clicked => { root.exif_context_menu_visible = false; root.exif_context_paste(); } }
+        }
+    }
+
     if root.file_context_menu_visible: TouchArea {
         y: 1px;
         width: 100%;
@@ -762,7 +840,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if message_visible || confirm_delete_visible || confirm_metadata_paste_visible: Rectangle {
+    if message_visible || confirm_delete_visible || confirm_metadata_paste_visible || confirm_trailing_rename_visible: Rectangle {
         width: 100%;
         height: 100%;
         background: #00000066;
@@ -779,14 +857,14 @@ export component MainWindow inherits Window {
             height: 0px;
 
             capture-key-pressed(event) => {
-                if (!root.confirm_delete_visible && !root.confirm_metadata_paste_visible && (event.text == Key.Return || event.text == " ")) {
+                if (!root.confirm_delete_visible && !root.confirm_metadata_paste_visible && !root.confirm_trailing_rename_visible && (event.text == Key.Return || event.text == " ")) {
                     root.message_visible = false;
                     root.message_title = "Operation Failed";
                     root.message_text = "";
                     return accept;
                 }
 
-                if (!root.confirm_delete_visible && !root.confirm_metadata_paste_visible && event.text == Key.Escape) {
+                if (!root.confirm_delete_visible && !root.confirm_metadata_paste_visible && !root.confirm_trailing_rename_visible && event.text == Key.Escape) {
                     root.message_visible = false;
                     root.message_title = "Operation Failed";
                     root.message_text = "";
@@ -817,6 +895,19 @@ export component MainWindow inherits Window {
                 if (root.confirm_metadata_paste_visible && (event.text == "N" || event.text == "n" || event.text == Key.Escape)) {
                     root.confirm_metadata_paste_visible = false;
                     root.confirm_metadata_paste(false);
+                    return accept;
+                }
+
+                if (root.confirm_trailing_rename_visible && (event.text == "Y" || event.text == "y" || event.text == Key.Return)) {
+                    root.confirm_trailing_rename_visible = false;
+                    root.confirm_move_trailing_numbers();
+                    return accept;
+                }
+
+                if (root.confirm_trailing_rename_visible && (event.text == "N" || event.text == "n" || event.text == Key.Escape)) {
+                    root.confirm_trailing_rename_visible = false;
+                    root.message_title = "Operation Failed";
+                    root.message_text = "";
                     return accept;
                 }
 
@@ -862,7 +953,7 @@ export component MainWindow inherits Window {
                 wrap: word-wrap;
             }
 
-            if !confirm_delete_visible && !confirm_metadata_paste_visible: Rectangle {
+            if !confirm_delete_visible && !confirm_metadata_paste_visible && !confirm_trailing_rename_visible: Rectangle {
                 x: parent.width - 92px;
                 y: parent.height - 44px;
                 width: 72px;
@@ -896,7 +987,7 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if confirm_delete_visible || confirm_metadata_paste_visible: Rectangle {
+            if confirm_delete_visible || confirm_metadata_paste_visible || confirm_trailing_rename_visible: Rectangle {
                 x: parent.width - 172px;
                 y: parent.height - 44px;
                 width: 72px;
@@ -925,6 +1016,10 @@ export component MainWindow inherits Window {
                             if (root.confirm_metadata_paste_visible) {
                                 root.confirm_metadata_paste_visible = false;
                                 root.confirm_metadata_paste(false);
+                            } else if (root.confirm_trailing_rename_visible) {
+                                root.confirm_trailing_rename_visible = false;
+                                root.message_title = "Operation Failed";
+                                root.message_text = "";
                             } else {
                                 root.confirm_delete_visible = false;
                                 root.message_title = "Operation Failed";
@@ -935,7 +1030,7 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if confirm_delete_visible || confirm_metadata_paste_visible: Rectangle {
+            if confirm_delete_visible || confirm_metadata_paste_visible || confirm_trailing_rename_visible: Rectangle {
                 x: parent.width - 92px;
                 y: parent.height - 44px;
                 width: 72px;
@@ -964,6 +1059,11 @@ export component MainWindow inherits Window {
                             if (root.confirm_metadata_paste_visible) {
                                 root.confirm_metadata_paste_visible = false;
                                 root.confirm_metadata_paste(true);
+                            } else if (root.confirm_trailing_rename_visible) {
+                                root.confirm_trailing_rename_visible = false;
+                                root.message_title = "Operation Failed";
+                                root.message_text = "";
+                                root.confirm_move_trailing_numbers();
                             } else {
                                 root.confirm_delete_visible = false;
                                 root.message_title = "Operation Failed";
@@ -1009,7 +1109,9 @@ export component MainWindow inherits Window {
             x: 10px;
             width: max(0px, parent.width - font_size_status.width - 24px);
             height: 100%;
-            text: "Files: " + item_count;
+            text: root.selected_file_count > 0
+                ? root.selected_file_count + " selected / " + root.item_count + (root.item_count == 1 ? " file" : " files")
+                : root.item_count + (root.item_count == 1 ? " file" : " files");
             font-size: FontSettings.font_size_pt * 1pt;
             color: #666666;
             vertical-alignment: center;

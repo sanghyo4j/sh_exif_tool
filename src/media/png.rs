@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use chrono::NaiveDateTime;
+use chrono::{NaiveDate, NaiveDateTime};
 
 use crate::exif::exif_backup_path;
 
@@ -34,6 +34,8 @@ pub(super) fn write_media_date(
 ) -> Result<(), String> {
     let bytes = fs::read(path).map_err(|err| err.to_string())?;
     let creation_time = display_to_creation_time(display_value)?;
+    let expected_display = creation_time_to_display(&creation_time)
+        .ok_or_else(|| "PNG Media Date normalization failed.".to_string())?;
     let updated = replace_or_insert_creation_time_chunk(&bytes, &creation_time)?;
     if backup_before_changes {
         let backup_path = exif_backup_path(path);
@@ -48,7 +50,7 @@ pub(super) fn write_media_date(
     }
 
     let written = read_png_creation_time(path);
-    if written.as_deref() != Some(display_value) {
+    if written.as_deref() != Some(expected_display.as_str()) {
         let _ = fs::write(path, &bytes);
         return Err("PNG Creation Time verification failed.".to_string());
     }
@@ -184,8 +186,15 @@ fn text_chunk_value<'a>(data: &'a [u8], keyword: &[u8]) -> Option<&'a str> {
 }
 
 fn display_to_creation_time(display_value: &str) -> Result<String, String> {
-    let datetime = NaiveDateTime::parse_from_str(display_value.trim(), DISPLAY_DATETIME_FORMAT)
-        .map_err(|_| "PNG Media Date must be formatted as YYYY-MM-DD HH:MM:SS.".to_string())?;
+    let value = display_value.trim();
+    let datetime = NaiveDateTime::parse_from_str(value, DISPLAY_DATETIME_FORMAT)
+        .ok()
+        .or_else(|| {
+            NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+        })
+        .ok_or_else(|| "PNG Media Date must be formatted as YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.".to_string())?;
     Ok(datetime.format(WINDOWS_CREATION_TIME_FORMAT).to_string())
 }
 
@@ -245,6 +254,14 @@ fn png_crc32(chunk_type: &[u8; 4], data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_a_media_date_without_a_time() {
+        assert_eq!(
+            display_to_creation_time("2014-02-04").unwrap(),
+            "2014:02:04 00:00:00"
+        );
+    }
     use crate::media::scan_media_file;
 
     #[test]

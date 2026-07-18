@@ -11,6 +11,9 @@ const DEFAULT_WRITABLE_ASCII_LEN: usize = 64;
 pub struct ExifMetadata {
     pub has_exif: bool,
     pub taken_date: String,
+    pub date_time_original: String,
+    pub date_time_digitized: String,
+    pub image_date_time: String,
     pub camera_make: String,
     pub camera_model: String,
     pub lens_model: String,
@@ -36,6 +39,9 @@ impl Default for ExifMetadata {
         Self {
             has_exif: false,
             taken_date: empty_value(),
+            date_time_original: empty_value(),
+            date_time_digitized: empty_value(),
+            image_date_time: empty_value(),
             camera_make: empty_value(),
             camera_model: empty_value(),
             lens_model: empty_value(),
@@ -1127,12 +1133,10 @@ fn parse_tiff(data: &[u8]) -> Option<ExifMetadata> {
             0x0112 => meta.orientation = entry.as_short().map(format_orientation).unwrap_or_else(empty_value),
             0x0131 => meta.software = entry.as_ascii().unwrap_or_else(empty_value),
             0x0132 => {
-                if meta.taken_date.is_empty() {
-                    meta.taken_date = entry
-                        .as_ascii()
-                        .map(|value| exif_datetime_to_display(&value))
-                        .unwrap_or_else(empty_value);
-                }
+                meta.image_date_time = entry
+                    .as_ascii()
+                    .map(|value| exif_datetime_to_display(&value))
+                    .unwrap_or_else(empty_value);
             }
             0x013b => meta.artist = entry.as_ascii().unwrap_or_else(empty_value),
             0x8769 => exif_ifd = entry.as_long().map(|v| v as usize),
@@ -1144,6 +1148,16 @@ fn parse_tiff(data: &[u8]) -> Option<ExifMetadata> {
     if let Some(offset) = exif_ifd {
         parse_exif_ifd(data, offset, endian, &mut meta);
     }
+
+    meta.taken_date = [
+        &meta.date_time_original,
+        &meta.date_time_digitized,
+        &meta.image_date_time,
+    ]
+    .into_iter()
+    .find(|value| !value.is_empty())
+    .cloned()
+    .unwrap_or_else(empty_value);
 
     if let Some(offset) = gps_ifd {
         parse_gps_ifd(data, offset, endian, &mut meta);
@@ -1175,18 +1189,16 @@ fn parse_exif_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMet
             0x829d => meta.aperture = entry.as_rational().map(format_aperture).unwrap_or_else(empty_value),
             0x8827 => meta.iso_speed = entry.as_short().map(|v| v.to_string()).unwrap_or_else(empty_value),
             0x9003 => {
-                meta.taken_date = entry
+                meta.date_time_original = entry
                     .as_ascii()
                     .map(|value| exif_datetime_to_display(&value))
                     .unwrap_or_else(empty_value)
             }
             0x9004 => {
-                if meta.taken_date.is_empty() {
-                    meta.taken_date = entry
-                        .as_ascii()
-                        .map(|value| exif_datetime_to_display(&value))
-                        .unwrap_or_else(empty_value);
-                }
+                meta.date_time_digitized = entry
+                    .as_ascii()
+                    .map(|value| exif_datetime_to_display(&value))
+                    .unwrap_or_else(empty_value);
             }
             0x9207 => meta.metering_mode = entry.as_short().map(format_metering).unwrap_or_else(empty_value),
             0x9209 => meta.flash_fired = entry.as_short().map(format_flash).unwrap_or_else(empty_value),
@@ -1732,6 +1744,37 @@ mod tests {
     }
 
     #[test]
+    fn retains_individual_exif_date_sources_and_prefers_original() {
+        let source = "2012:08:27 00:29:55";
+        let mut tiff = build_basic_tiff(&ExifMetadata {
+            has_exif: true,
+            taken_date: "2012-08-27 00:29:55".to_string(),
+            ..ExifMetadata::default()
+        })
+        .unwrap();
+        let offsets: Vec<usize> = tiff
+            .windows(source.len())
+            .enumerate()
+            .filter_map(|(index, value)| (value == source.as_bytes()).then_some(index))
+            .collect();
+        assert_eq!(offsets.len(), 3);
+
+        for (offset, value) in offsets.into_iter().zip([
+            "2014:01:30 09:10:00",
+            "2013:12:20 15:30:00",
+            "2013:12:21 16:40:00",
+        ]) {
+            tiff[offset..offset + value.len()].copy_from_slice(value.as_bytes());
+        }
+
+        let metadata = parse_tiff(&tiff).unwrap();
+        assert_eq!(metadata.image_date_time, "2014-01-30 09:10:00");
+        assert_eq!(metadata.date_time_original, "2013-12-20 15:30:00");
+        assert_eq!(metadata.date_time_digitized, "2013-12-21 16:40:00");
+        assert_eq!(metadata.taken_date, "2013-12-20 15:30:00");
+    }
+
+    #[test]
     fn accepts_exif_datetime_when_converting_for_write() {
         assert_eq!(
             display_datetime_to_exif("2012:08:27 00:29:55").unwrap(),
@@ -1898,6 +1941,9 @@ mod tests {
         let metadata = ExifMetadata {
             has_exif: true,
             taken_date: "2026-05-09 12:34:56".to_string(),
+            date_time_original: String::new(),
+            date_time_digitized: String::new(),
+            image_date_time: String::new(),
             camera_make: "Sony".to_string(),
             camera_model: "A7C".to_string(),
             lens_model: "FE 35mm F1.8".to_string(),

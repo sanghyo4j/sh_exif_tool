@@ -286,6 +286,13 @@ impl SlintApp {
         &self.selected_indices
     }
 
+    pub fn select_all_visible_entries(&mut self) {
+        self.selected_indices = (1..=self.visible_files().len())
+            .filter_map(|index| i32::try_from(index).ok())
+            .collect();
+        self.selection_anchor = self.selected_indices.first().copied();
+    }
+
     pub fn select_files_without_exif(&mut self) {
         self.selected_indices = self
             .visible_files()

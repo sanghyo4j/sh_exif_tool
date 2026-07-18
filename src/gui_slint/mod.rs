@@ -36,7 +36,17 @@ use crate::exif::{
     write_taken_date,
     ExifMetadata,
 };
-use crate::fs::{copy_file_times, copy_file_to_folder, move_file_to_recycle_bin, open_in_file_manager, rename_entry, save_file_copy, set_file_times};
+use crate::fs::{
+    copy_file_times,
+    copy_file_to_folder,
+    move_file_to_recycle_bin,
+    move_trailing_numbers_to_front,
+    open_in_file_manager,
+    rename_entry,
+    save_file_copy,
+    set_file_times,
+    trailing_number_rename_candidate_count,
+};
 use crate::media::{scan_media_file, write_mp4_media_date, write_png_media_date, MediaScanJob};
 use crate::GuiRunner;
 
@@ -47,12 +57,21 @@ pub struct SlintRunner;
 #[derive(Clone)]
 enum ExifClipboard {
     Tag {
-        source_path: PathBuf,
+        value: String,
+    },
+    Section {
+        section: String,
+        values: Vec<(String, String)>,
+    },
+}
+
+#[derive(Clone)]
+enum ExifContextTarget {
+    Tag {
         key: String,
         value: String,
     },
     Section {
-        source_path: PathBuf,
         section: String,
         values: Vec<(String, String)>,
     },
@@ -116,7 +135,9 @@ impl GuiRunner for SlintRunner {
         let pending_filename_taken_dates = Rc::new(RefCell::new(HashMap::<PathBuf, String>::new()));
         let pending_modified_dates = Rc::new(RefCell::new(HashMap::<PathBuf, SystemTime>::new()));
         let exif_clipboard = Rc::new(RefCell::new(None::<ExifClipboard>));
+        let exif_context_target = Rc::new(RefCell::new(None::<ExifContextTarget>));
         let pending_exif_paste = Rc::new(RefCell::new(None::<PendingExifPaste>));
+        let previous_taken_date_input = Rc::new(RefCell::new(String::new()));
         let scan_results_dirty = Arc::new(AtomicBool::new(false));
         let (scan_batch_sender, scan_batch_receiver) = std::sync::mpsc::channel();
 
@@ -205,85 +226,88 @@ impl GuiRunner for SlintRunner {
 
         let app_handle = app.clone();
         let clipboard = exif_clipboard.clone();
-        let pending_paste = pending_exif_paste.clone();
+        let context_target = exif_context_target.clone();
         let ui_handle = ui.as_weak();
         ui.on_exif_tag_right_clicked(move |key, value| {
             let Some(ui) = ui_handle.upgrade() else { return; };
-            let Some(path) = app_handle.borrow().path_for_ui_index(ui.get_selected_index()) else { return; };
+            let Some(_path) = app_handle.borrow().path_for_ui_index(ui.get_selected_index()) else { return; };
             let key = key.to_string();
             let value = value.to_string();
-            if !is_writable_exif_key(&key) {
-                show_toast(&ui, "This EXIF tag is read-only.");
-                return;
-            }
-            let paste = match clipboard.borrow().clone() {
-                Some(ExifClipboard::Tag { source_path, key: source_key, value: source_value })
-                    if source_path != path || source_key != key =>
-                {
-                    Some(vec![(key.clone(), source_value)])
-                }
-                _ => None,
-            };
-
-            if let Some(values) = paste {
-                if stage_or_confirm_exif_paste(&ui, values, &pending_paste) {
-                    clipboard.borrow_mut().take();
-                }
-            } else {
-                *clipboard.borrow_mut() = Some(ExifClipboard::Tag {
-                    source_path: path,
-                    key: key.clone(),
-                    value: value.clone(),
-                });
-                let display_value = if value.is_empty() { "(empty)" } else { value.as_str() };
-                show_toast(
-                    &ui,
-                    &format!("Copied: '{}: {}'", exif_key_label(&key), display_value),
-                );
-            }
+            let paste_enabled = is_writable_exif_key(&key)
+                && matches!(*clipboard.borrow(), Some(ExifClipboard::Tag { .. }));
+            *context_target.borrow_mut() = Some(ExifContextTarget::Tag { key, value });
+            ui.set_exif_context_paste_enabled(paste_enabled);
+            ui.set_exif_context_menu_visible(true);
         });
 
         let app_handle = app.clone();
         let clipboard = exif_clipboard.clone();
-        let pending_paste = pending_exif_paste.clone();
+        let context_target = exif_context_target.clone();
         let ui_handle = ui.as_weak();
         ui.on_exif_section_right_clicked(move |section| {
             let Some(ui) = ui_handle.upgrade() else { return; };
-            let Some(path) = app_handle.borrow().path_for_ui_index(ui.get_selected_index()) else { return; };
+            let Some(_path) = app_handle.borrow().path_for_ui_index(ui.get_selected_index()) else { return; };
             let section = section.to_string();
             let current_values = collect_exif_section(&ui, &section);
             if current_values.is_empty() {
                 show_toast(&ui, "This EXIF section is read-only.");
                 return;
             }
-            let paste = match clipboard.borrow().clone() {
-                Some(ExifClipboard::Section { source_path, section: source_section, values })
-                    if source_section == section && source_path != path => Some(values),
-                _ => None,
-            };
+            let paste_enabled = matches!(
+                &*clipboard.borrow(),
+                Some(ExifClipboard::Section { section: source_section, .. }) if source_section == &section
+            ) && is_writable_exif_section(&section);
+            *context_target.borrow_mut() = Some(ExifContextTarget::Section { section, values: current_values });
+            ui.set_exif_context_paste_enabled(paste_enabled);
+            ui.set_exif_context_menu_visible(true);
+        });
 
-            if let Some(values) = paste {
-                if stage_or_confirm_exif_paste(&ui, values, &pending_paste) {
-                    clipboard.borrow_mut().take();
+        let clipboard = exif_clipboard.clone();
+        let context_target = exif_context_target.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_exif_context_copy(move || {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(target) = context_target.borrow().clone() else { return; };
+            match target {
+                ExifContextTarget::Tag { key, value } => {
+                    *clipboard.borrow_mut() = Some(ExifClipboard::Tag {
+                        value: value.clone(),
+                    });
+                    let display_value = if value.is_empty() { "(empty)" } else { value.as_str() };
+                    show_toast(&ui, &format!("Copied: '{}: {}'", exif_key_label(&key), display_value));
                 }
-            } else {
-                *clipboard.borrow_mut() = Some(ExifClipboard::Section {
-                    source_path: path,
-                    section: section.clone(),
-                    values: current_values,
-                });
-                show_toast(
-                    &ui,
-                    &format!(
-                        "Copied: '{} section ({} tags)'",
-                        exif_section_label(&section),
-                        collect_exif_section(&ui, &section).len()
-                    ),
-                );
+                ExifContextTarget::Section { section, values } => {
+                    let count = values.len();
+                    *clipboard.borrow_mut() = Some(ExifClipboard::Section {
+                        section: section.clone(),
+                        values,
+                    });
+                    show_toast(&ui, &format!("Copied: '{} section ({} tags)'", exif_section_label(&section), count));
+                }
             }
         });
 
         let clipboard = exif_clipboard.clone();
+        let context_target = exif_context_target.clone();
+        let pending_paste = pending_exif_paste.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_exif_context_paste(move || {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(target) = context_target.borrow().clone() else { return; };
+            let values = match (target, clipboard.borrow().clone()) {
+                (ExifContextTarget::Tag { key, .. }, Some(ExifClipboard::Tag { value, .. }))
+                    if is_writable_exif_key(&key) => Some(vec![(key, value)]),
+                (
+                    ExifContextTarget::Section { section, .. },
+                    Some(ExifClipboard::Section { section: source_section, values, .. }),
+                ) if section == source_section && is_writable_exif_section(&section) => Some(values),
+                _ => None,
+            };
+            if let Some(values) = values {
+                stage_or_confirm_exif_paste(&ui, values, &pending_paste);
+            }
+        });
+
         let pending_paste = pending_exif_paste.clone();
         let ui_handle = ui.as_weak();
         ui.on_confirm_metadata_paste(move |confirmed| {
@@ -292,7 +316,6 @@ impl GuiRunner for SlintRunner {
             if confirmed {
                 if let Some(pending) = pending {
                     apply_exif_paste(&ui, &pending.values);
-                    clipboard.borrow_mut().take();
                     show_toast(&ui, "Pasted. Save to apply.");
                 }
             }
@@ -498,6 +521,23 @@ impl GuiRunner for SlintRunner {
         });
 
         let app_handle = app.clone();
+        let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_modified_dates_handle = pending_modified_dates.clone();
+        let ui_handle = ui.as_weak();
+        let schedule_scan = schedule_media_scan.clone();
+        ui.on_select_all_table_rows(move || {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            pending_taken_dates.borrow_mut().clear();
+            pending_modified_dates_handle.borrow_mut().clear();
+            let mut app = app_handle.borrow_mut();
+            app.select_all_visible_entries();
+            ui.set_files(app.get_ui_model());
+            set_selected_files(&ui, &app);
+            drop(app);
+            schedule_scan();
+        });
+
+        let app_handle = app.clone();
         let refresh = refresh_ui.clone();
         ui.on_go_parent(move || {
             {
@@ -699,44 +739,100 @@ impl GuiRunner for SlintRunner {
             }
         });
 
+        let app_handle = app.clone();
+        let pending_taken_dates = pending_filename_taken_dates.clone();
         let ui_handle = ui.as_weak();
         ui.on_fill_taken_date_from_created_date(move || {
             if let Some(ui) = ui_handle.upgrade() {
-                if ui.get_selected_index() < 0 || ui.get_selected_is_dir() {
-                    show_message(&ui, "Unable to Set Taken Date", "Select a file before setting Taken Date.");
+                let selected_paths = {
+                    let app = app_handle.borrow();
+                    selected_file_paths(&app)
+                };
+                if selected_paths.is_empty() {
+                    show_message(
+                        &ui,
+                        "Unable to Set Date",
+                        "Select one or more media files before setting the date.",
+                    );
                     return;
                 }
 
-                let created = ui.get_selected_created().to_string();
-                let modified = ui.get_selected_modified().to_string();
-
-                let created_time = match parse_timestamp(&created) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        show_message(&ui, "Unable to Set Taken Date", &err);
-                        return;
+                let mut pending = HashMap::new();
+                let mut unavailable_count = 0usize;
+                let mut later_count = 0usize;
+                for path in &selected_paths {
+                    if !is_jpeg_path(path) && !is_png_path(path) && !is_mp4_path(path) {
+                        unavailable_count += 1;
+                        continue;
                     }
-                };
-
-                let modified_time = match parse_timestamp(&modified) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        show_message(&ui, "Unable to Set Taken Date", &err);
-                        return;
+                    let Some(timestamp) = earliest_file_timestamp(path) else {
+                        unavailable_count += 1;
+                        continue;
+                    };
+                    let existing_taken_date = if is_mp4_path(path) || is_png_path(path) {
+                        scan_media_file(path).media_date
+                    } else {
+                        read_exif_metadata(path).taken_date
+                    };
+                    if should_apply_taken_date_candidate(&existing_taken_date, &timestamp) {
+                        pending.insert(path.clone(), timestamp);
+                    } else {
+                        later_count += 1;
                     }
-                };
+                }
 
-                let timestamp = if modified_time < created_time {
-                    modified
+                if pending.is_empty() {
+                    let message = if later_count > 0 {
+                        "The earlier file timestamp is later than the existing Taken Date."
+                    } else {
+                        "Created and Modified timestamps could not be read from the selected media files."
+                    };
+                    show_message(&ui, "Date Ignored", message);
+                    return;
+                }
+
+                if selected_paths.len() == 1 {
+                    let timestamp = pending.values().next().cloned().unwrap_or_default();
+                    pending_taken_dates.borrow_mut().clear();
+                    ui.set_taken_date(timestamp.into());
+                    if is_jpeg_path(&selected_paths[0]) && !ui.get_exif_available() {
+                        ui.set_exif_available(true);
+                    }
+                    update_metadata_dirty_state(&ui);
+                    show_message(
+                        &ui,
+                        "Date Staged",
+                        "The earlier of File Created and File Modified was selected. Save to apply.",
+                    );
+                    return;
+                }
+
+                let staged_count = pending.len();
+                *pending_taken_dates.borrow_mut() = pending;
+                ui.set_taken_date("".into());
+                ui.set_taken_date_status("Mixed".into());
+                ui.set_taken_date_dirty(true);
+                ui.set_metadata_dirty(true);
+                if pending_taken_dates
+                    .borrow()
+                    .keys()
+                    .any(|path| is_jpeg_path(path))
+                    && !ui.get_exif_available()
+                {
+                    ui.set_exif_available(true);
+                }
+
+                let skipped_count = unavailable_count + later_count;
+                let message = if skipped_count == 0 {
+                    format!(
+                        "The earlier file timestamp was staged for {staged_count} files. Save to apply."
+                    )
                 } else {
-                    created
+                    format!(
+                        "The earlier file timestamp was staged for {staged_count} files. {skipped_count} files were skipped. Save to apply."
+                    )
                 };
-                if !should_apply_taken_date_candidate(ui.get_taken_date().as_str(), &timestamp) {
-                    show_message(&ui, "Taken Date Ignored", "File timestamp is later than the existing Taken Date.");
-                    return;
-                }
-                ui.set_taken_date(timestamp.into());
-                update_metadata_dirty_state(&ui);
+                show_message(&ui, "Dates Staged", &message);
             }
         });
 
@@ -999,6 +1095,62 @@ impl GuiRunner for SlintRunner {
 
         let app_handle = app.clone();
         let ui_handle = ui.as_weak();
+        ui.on_request_move_trailing_numbers(move || {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            let paths = selected_file_paths(&app_handle.borrow());
+            if paths.is_empty() {
+                show_message(&ui, "No Files Selected", "Select one or more files first.");
+                return;
+            }
+            match trailing_number_rename_candidate_count(&paths) {
+                Ok(0) => show_message(
+                    &ui,
+                    "No Matching Files",
+                    "None of the selected files end with a delimited 2- or 3-digit number.",
+                ),
+                Ok(count) => {
+                    ui.set_message_title("Confirm Filename Change".into());
+                    ui.set_message_text(
+                        format!(
+                            "Move the trailing 2- or 3-digit number to the front for {count} selected file(s)? (Y/N)"
+                        )
+                        .into(),
+                    );
+                    ui.set_confirm_trailing_rename_visible(true);
+                }
+                Err(err) => show_message(&ui, "Filename Change Failed", &err),
+            }
+        });
+
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_confirm_move_trailing_numbers(move || {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            let result = {
+                let mut app = app_handle.borrow_mut();
+                let paths = selected_file_paths(&app);
+                move_trailing_numbers_to_front(&paths).map(|count| {
+                    app.load_folder();
+                    count
+                })
+            };
+
+            match result {
+                Ok(count) => {
+                    refresh(None);
+                    show_message(
+                        &ui,
+                        "Filename Change Complete",
+                        &format!("Renamed {count} file(s)."),
+                    );
+                }
+                Err(err) => show_message(&ui, "Filename Change Failed", &err),
+            }
+        });
+
+        let app_handle = app.clone();
+        let ui_handle = ui.as_weak();
         ui.on_open_in_explorer(move || {
             if let Some(ui) = ui_handle.upgrade() {
                 let path = {
@@ -1042,6 +1194,8 @@ impl GuiRunner for SlintRunner {
                     }
                     return;
                 }
+
+                trim_taken_date_before_save(&ui);
 
                 let selected_path = {
                     let app = app_handle.borrow();
@@ -1271,6 +1425,22 @@ impl GuiRunner for SlintRunner {
             }
         });
 
+        let previous_input = previous_taken_date_input.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_taken_date_input_edited(move || {
+            let Some(ui) = ui_handle.upgrade() else { return -1; };
+            let current = ui.get_taken_date().to_string();
+            let formatted = auto_format_date_edit(&previous_input.borrow(), &current);
+            *previous_input.borrow_mut() = formatted.clone();
+            if formatted != current {
+                let formatted_cursor_position = i32::try_from(formatted.len()).unwrap_or(i32::MAX);
+                ui.set_taken_date(formatted.into());
+                formatted_cursor_position
+            } else {
+                -1
+            }
+        });
+
         ui.run()?;
         Ok(())
     }
@@ -1463,7 +1633,25 @@ fn set_loaded_media_date(ui: &MainWindow, media_date: String) {
 }
 
 fn set_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
+    let date_sources: Vec<&str> = [
+        metadata.date_time_original.as_str(),
+        metadata.date_time_digitized.as_str(),
+        metadata.image_date_time.as_str(),
+    ]
+    .into_iter()
+    .filter(|value| !value.is_empty())
+    .collect();
+    let has_conflicting_date_sources = date_sources
+        .first()
+        .is_some_and(|first| date_sources.iter().skip(1).any(|value| value != first));
+
     ui.set_exif_available(metadata.has_exif);
+    ui.set_date_time_original(metadata.date_time_original.into());
+    ui.set_date_time_digitized(metadata.date_time_digitized.into());
+    ui.set_image_date_time(metadata.image_date_time.into());
+    ui.set_exif_date_sources_visible(
+        ui.get_selected_file_count() == 1 && has_conflicting_date_sources,
+    );
     ui.set_taken_date(metadata.taken_date.into());
     ui.set_camera_make(metadata.camera_make.into());
     ui.set_camera_model(metadata.camera_model.into());
@@ -1601,6 +1789,9 @@ fn join_metadata(values: &[ExifMetadata]) -> ExifMetadata {
     ExifMetadata {
         has_exif: values.iter().any(|metadata| metadata.has_exif),
         taken_date: joined_selection_value(values.iter().map(|metadata| metadata.taken_date.clone()).collect()),
+        date_time_original: joined_selection_value(values.iter().map(|metadata| metadata.date_time_original.clone()).collect()),
+        date_time_digitized: joined_selection_value(values.iter().map(|metadata| metadata.date_time_digitized.clone()).collect()),
+        image_date_time: joined_selection_value(values.iter().map(|metadata| metadata.image_date_time.clone()).collect()),
         camera_make: joined_selection_value(values.iter().map(|metadata| metadata.camera_make.clone()).collect()),
         camera_model: joined_selection_value(values.iter().map(|metadata| metadata.camera_model.clone()).collect()),
         lens_model: joined_selection_value(values.iter().map(|metadata| metadata.lens_model.clone()).collect()),
@@ -1963,6 +2154,9 @@ fn collect_current_exif_metadata(ui: &MainWindow) -> ExifMetadata {
     ExifMetadata {
         has_exif: true,
         taken_date: ui.get_taken_date().to_string(),
+        date_time_original: ui.get_date_time_original().to_string(),
+        date_time_digitized: ui.get_date_time_digitized().to_string(),
+        image_date_time: ui.get_image_date_time().to_string(),
         camera_make: ui.get_camera_make().to_string(),
         camera_model: ui.get_camera_model().to_string(),
         lens_model: ui.get_lens_model().to_string(),
@@ -2070,6 +2264,112 @@ fn parse_display_datetime_or_date(value: &str) -> Option<NaiveDateTime> {
                 .ok()
                 .and_then(|date| date.and_hms_opt(0, 0, 0))
         })
+}
+
+fn earliest_file_timestamp(path: &std::path::Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let timestamp = earliest_available_timestamp(
+        metadata.created().ok(),
+        metadata.modified().ok(),
+    )?;
+    let datetime: chrono::DateTime<Local> = timestamp.into();
+    Some(datetime.format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
+fn earliest_available_timestamp(
+    created: Option<SystemTime>,
+    modified: Option<SystemTime>,
+) -> Option<SystemTime> {
+    match (created, modified) {
+        (Some(created), Some(modified)) => Some(created.min(modified)),
+        (Some(created), None) => Some(created),
+        (None, Some(modified)) => Some(modified),
+        (None, None) => None,
+    }
+}
+
+fn auto_format_date_input(value: &str) -> String {
+    let date_end = value
+        .char_indices()
+        .find_map(|(index, ch)| (ch.is_whitespace() || ch == 'T').then_some(index))
+        .unwrap_or(value.len());
+    let date = &value[..date_end];
+    let suffix = &value[date_end..];
+    if date.is_empty()
+        || !date.bytes().all(|byte| byte.is_ascii_digit() || byte == b'-')
+    {
+        return value.to_string();
+    }
+
+    let digits: String = date.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    if digits.len() < 4 || digits.len() > 8 {
+        return value.to_string();
+    }
+
+    let formatted_date = match digits.len() {
+        4 => format!("{digits}-"),
+        5 => format!("{}-{}", &digits[..4], &digits[4..]),
+        6 => format!("{}-{}-", &digits[..4], &digits[4..]),
+        _ => format!("{}-{}-{}", &digits[..4], &digits[4..6], &digits[6..]),
+    };
+    let formatted_suffix = if suffix.is_empty() {
+        String::new()
+    } else {
+        let separator_len = suffix
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(0);
+        let separator = &suffix[..separator_len];
+        let time = &suffix[separator_len..];
+        if time.is_empty() {
+            suffix.to_string()
+        } else if time.bytes().all(|byte| byte.is_ascii_digit() || byte == b':') {
+            let digits: String = time.chars().filter(|ch| ch.is_ascii_digit()).collect();
+            if digits.len() > 6 {
+                suffix.to_string()
+            } else {
+                let formatted_time = match digits.len() {
+                    0 | 1 => digits,
+                    2 => format!("{digits}:"),
+                    3 => format!("{}:{}", &digits[..2], &digits[2..]),
+                    4 => format!("{}:{}:", &digits[..2], &digits[2..]),
+                    _ => format!("{}:{}:{}", &digits[..2], &digits[2..4], &digits[4..]),
+                };
+                format!("{separator}{formatted_time}")
+            }
+        } else {
+            suffix.to_string()
+        }
+    };
+
+    format!("{formatted_date}{formatted_suffix}")
+}
+
+fn auto_format_date_edit(previous: &str, current: &str) -> String {
+    if previous
+        .strip_suffix('-')
+        .or_else(|| previous.strip_suffix(':'))
+        .is_some_and(|without_separator| without_separator == current)
+    {
+        current.to_string()
+    } else {
+        auto_format_date_input(current)
+    }
+}
+
+fn trim_taken_date_before_save(ui: &MainWindow) {
+    let current = ui.get_taken_date().to_string();
+    let trimmed = current.trim();
+    let normalized = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| trimmed.to_string());
+    if normalized != current {
+        ui.set_taken_date(normalized.into());
+        update_metadata_dirty_state(ui);
+    }
 }
 
 fn should_apply_taken_date_candidate(existing: &str, candidate: &str) -> bool {
@@ -2257,11 +2557,16 @@ fn collect_exif_section(ui: &MainWindow, section: &str) -> Vec<(String, String)>
         "camera" => &["taken_date", "camera_make", "camera_model", "lens_model", "software", "artist"],
         "exposure" => &["shutter_speed", "aperture", "iso_speed", "focal_length", "flash_fired", "metering_mode"],
         "image" => &["orientation", "color_space"],
+        "location" => &["gps_latitude", "gps_longitude", "gps_altitude"],
         _ => &[],
     };
     keys.iter()
         .map(|key| ((*key).to_string(), get_exif_value(ui, key)))
         .collect()
+}
+
+fn is_writable_exif_section(section: &str) -> bool {
+    matches!(section, "camera" | "exposure" | "image")
 }
 
 fn is_writable_exif_key(key: &str) -> bool {
@@ -2287,6 +2592,9 @@ fn is_writable_exif_key(key: &str) -> bool {
 fn exif_key_label(key: &str) -> &'static str {
     match key {
         "taken_date" => "Taken Date",
+        "date_time_original" => "DateTime Original",
+        "date_time_digitized" => "DateTime Digitized",
+        "image_date_time" => "Image DateTime",
         "camera_make" => "Camera Make",
         "camera_model" => "Camera Model",
         "lens_model" => "Lens Model",
@@ -2309,6 +2617,7 @@ fn exif_section_label(section: &str) -> &'static str {
         "camera" => "CAMERA",
         "exposure" => "EXPOSURE",
         "image" => "IMAGE",
+        "location" => "LOCATION",
         _ => "EXIF",
     }
 }
@@ -2365,7 +2674,67 @@ fn set_exif_value(ui: &MainWindow, key: &str, value: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::filename_from_media_date;
+    use super::{
+        auto_format_date_input,
+        auto_format_date_edit,
+        earliest_available_timestamp,
+        filename_from_media_date,
+    };
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn chooses_the_earlier_available_file_timestamp() {
+        let created = SystemTime::UNIX_EPOCH + Duration::from_secs(200);
+        let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        assert_eq!(
+            earliest_available_timestamp(Some(created), Some(modified)),
+            Some(modified)
+        );
+        assert_eq!(earliest_available_timestamp(Some(created), None), Some(created));
+        assert_eq!(earliest_available_timestamp(None, Some(modified)), Some(modified));
+    }
+
+    #[test]
+    fn automatically_inserts_date_hyphens_while_typing_or_pasting() {
+        assert_eq!(auto_format_date_input("2014"), "2014-");
+        assert_eq!(auto_format_date_input("20260"), "2026-0");
+        assert_eq!(auto_format_date_input("2026-05"), "2026-05-");
+        assert_eq!(auto_format_date_input("2026-050"), "2026-05-0");
+        assert_eq!(auto_format_date_input("20260509"), "2026-05-09");
+        assert_eq!(auto_format_date_input("2026--05"), "2026-05-");
+        assert_eq!(
+            auto_format_date_input("20260509 12:34:56"),
+            "2026-05-09 12:34:56"
+        );
+        assert_eq!(auto_format_date_input("2026-05-09"), "2026-05-09");
+        assert_eq!(
+            auto_format_date_input("2026-05-09 12"),
+            "2026-05-09 12:"
+        );
+        assert_eq!(
+            auto_format_date_input("2026-05-09 12:34"),
+            "2026-05-09 12:34:"
+        );
+        assert_eq!(
+            auto_format_date_input("2026-05-09 123456"),
+            "2026-05-09 12:34:56"
+        );
+        assert_eq!(
+            auto_format_date_input("2026-05-09 12::34"),
+            "2026-05-09 12:34:"
+        );
+    }
+
+    #[test]
+    fn allows_backspace_to_remove_an_automatically_inserted_hyphen() {
+        assert_eq!(auto_format_date_edit("2014-", "2014"), "2014");
+        assert_eq!(auto_format_date_edit("2014-05-", "2014-05"), "2014-05");
+        assert_eq!(auto_format_date_edit("201", "2014"), "2014-");
+        assert_eq!(
+            auto_format_date_edit("2014-05-09 12:", "2014-05-09 12"),
+            "2014-05-09 12"
+        );
+    }
 
     #[test]
     fn filename_from_media_date_uses_compact_date_and_avoids_collisions() {

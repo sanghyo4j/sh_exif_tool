@@ -2,7 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
 use super::MediaScanResult;
 
@@ -24,8 +24,9 @@ pub(super) fn scan(file: &mut File) -> Result<MediaScanResult, String> {
 }
 
 pub(super) fn write_media_date(path: &Path, display_value: &str) -> Result<(), String> {
-    let datetime = NaiveDateTime::parse_from_str(display_value.trim(), DISPLAY_DATETIME_FORMAT)
-        .map_err(|_| "MP4 Media Date must be formatted as YYYY-MM-DD HH:MM:SS.".to_string())?;
+    let datetime = parse_display_datetime_or_date(display_value)
+        .ok_or_else(|| "MP4 Media Date must be formatted as YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.".to_string())?;
+    let expected_display = datetime.format(DISPLAY_DATETIME_FORMAT).to_string();
     let local_datetime = Local
         .from_local_datetime(&datetime)
         .single()
@@ -90,7 +91,7 @@ pub(super) fn write_media_date(path: &Path, display_value: &str) -> Result<(), S
     }
     let mut verification_file = File::open(path).map_err(|err| err.to_string())?;
     let written = scan(&mut verification_file)?.media_date;
-    if written != display_value.trim() {
+    if written != expected_display {
         drop(verification_file);
         let _ = rollback_creation_time_values(
             path,
@@ -112,6 +113,17 @@ pub(super) fn write_media_date(path: &Path, display_value: &str) -> Result<(), S
         return Err(err);
     }
     Ok(())
+}
+
+fn parse_display_datetime_or_date(value: &str) -> Option<NaiveDateTime> {
+    let value = value.trim();
+    NaiveDateTime::parse_from_str(value, DISPLAY_DATETIME_FORMAT)
+        .ok()
+        .or_else(|| {
+            NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+        })
 }
 
 #[derive(Default)]
@@ -374,6 +386,17 @@ fn read_quicktime_creation_date(file: &mut File, start: u64, end: u64) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_a_media_date_without_a_time() {
+        assert_eq!(
+            parse_display_datetime_or_date("2014-02-04")
+                .unwrap()
+                .format(DISPLAY_DATETIME_FORMAT)
+                .to_string(),
+            "2014-02-04 00:00:00"
+        );
+    }
     use crate::media::scan_media_file;
 
     fn atom(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {

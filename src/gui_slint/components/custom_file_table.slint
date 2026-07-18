@@ -56,6 +56,7 @@ export component CustomFileTable inherits Rectangle {
     callback row_selected(int, bool, bool);
     callback row_clicked(int);
     callback row_activated(int);
+    callback select_all_requested();
     callback rename_requested(int);
     callback reload_requested();
     callback copy_requested();
@@ -186,6 +187,11 @@ export component CustomFileTable inherits Rectangle {
         height: 0px;
 
         key-pressed(event) => {
+            if ((event.text == "A" || event.text == "a") && event.modifiers.control) {
+                root.context_menu_visible = false;
+                root.select_all_requested();
+                return accept;
+            }
             if (event.text == Key.UpArrow) {
                 if (root.selected_index > 0) { root.selected_index -= 1; root.row_selected(root.selected_index, false, false); }
                 return accept;
