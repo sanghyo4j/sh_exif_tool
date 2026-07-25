@@ -2,6 +2,8 @@ mod jpeg;
 mod mp4;
 mod png;
 
+pub(crate) use png::PngDateSources;
+
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -60,6 +62,31 @@ pub fn write_png_media_date(
     backup_before_changes: bool,
 ) -> Result<(), String> {
     png::write_media_date(path, display_value, backup_before_changes)
+}
+
+pub(crate) fn read_png_date_sources(path: &Path) -> png::PngDateSources {
+    png::read_date_sources(path)
+}
+
+pub(crate) fn write_png_date_sources(
+    path: &Path,
+    creation_time: Option<&str>,
+    exif_date_time_original: Option<&str>,
+    backup_before_changes: bool,
+) -> Result<(), String> {
+    png::write_date_sources(
+        path,
+        creation_time,
+        exif_date_time_original,
+        backup_before_changes,
+    )
+}
+
+pub(crate) fn remove_png_date_metadata(
+    path: &Path,
+    backup_before_changes: bool,
+) -> Result<(), String> {
+    png::remove_date_metadata(path, backup_before_changes)
 }
 
 pub fn write_mp4_media_date(path: &Path, display_value: &str) -> Result<(), String> {

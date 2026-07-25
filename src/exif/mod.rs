@@ -404,6 +404,53 @@ pub fn remove_gps_information(path: &Path) -> Result<(), String> {
     fs::write(path, bytes).map_err(|err| err.to_string())
 }
 
+pub fn remove_exif_metadata(path: &Path, backup_before_changes: bool) -> Result<(), String> {
+    let original = fs::read(path).map_err(|err| err.to_string())?;
+    if original.len() < 4 || original[0] != 0xff || original[1] != 0xd8 {
+        return Err("Only JPEG files are supported for EXIF removal.".to_string());
+    }
+
+    let mut updated = original.clone();
+    let mut removed = false;
+    while let Some((start, end)) = find_exif_app1_range(&updated) {
+        updated.drain(start..end);
+        removed = true;
+    }
+    if !removed {
+        return Ok(());
+    }
+
+    let original_file_metadata = fs::metadata(path).map_err(|err| err.to_string())?;
+    let original_created = original_file_metadata.created().ok();
+    let original_modified = original_file_metadata.modified().ok();
+
+    if !backup_before_changes {
+        fs::write(path, &updated).map_err(|err| err.to_string())?;
+        if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
+            let _ = fs::write(path, &original);
+            let _ = crate::fs::set_file_times(path, original_created, original_modified);
+            return Err(err);
+        }
+        return Ok(());
+    }
+
+    let backup_path = exif_backup_path(path);
+    if backup_path.exists() {
+        return Err(format!("Backup file already exists: {}", backup_path.display()));
+    }
+    fs::rename(path, &backup_path).map_err(|err| err.to_string())?;
+    if let Err(err) = fs::write(path, updated) {
+        let _ = fs::rename(&backup_path, path);
+        return Err(err.to_string());
+    }
+    if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
+        let _ = fs::remove_file(path);
+        let _ = fs::rename(&backup_path, path);
+        return Err(err);
+    }
+    Ok(())
+}
+
 pub fn rewrite_basic_exif_metadata(
     path: &Path,
     metadata: &ExifMetadata,
@@ -1087,6 +1134,223 @@ pub fn display_datetime_to_exif(value: &str) -> Result<String, String> {
         .ok_or_else(|| "Expected date format: YYYY-MM-DD HH:MM:SS".to_string())
 }
 
+pub(crate) fn read_exif_tiff_metadata(tiff: &[u8]) -> ExifMetadata {
+    parse_tiff(tiff).unwrap_or_default()
+}
+
+pub(crate) fn create_date_only_exif_tiff(display_value: &str) -> Result<Vec<u8>, String> {
+    let mut tiff = Vec::with_capacity(14);
+    tiff.extend_from_slice(b"II");
+    tiff.extend_from_slice(&42u16.to_le_bytes());
+    tiff.extend_from_slice(&8u32.to_le_bytes());
+    tiff.extend_from_slice(&0u16.to_le_bytes());
+    tiff.extend_from_slice(&0u32.to_le_bytes());
+    rewrite_exif_tiff_dates(&tiff, display_value)
+}
+
+pub(crate) fn rewrite_exif_tiff_dates(
+    tiff: &[u8],
+    display_value: &str,
+) -> Result<Vec<u8>, String> {
+    let exif_value = display_datetime_to_exif(display_value)?;
+    let mut date_bytes = exif_value.into_bytes();
+    date_bytes.push(0);
+
+    let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid PNG eXIf TIFF header.".to_string())?;
+    if read_u16(tiff, 2, endian) != Some(42) {
+        return Err("Invalid PNG eXIf TIFF marker.".to_string());
+    }
+    let old_ifd0_offset = read_u32(tiff, 4, endian)
+        .map(|value| value as usize)
+        .ok_or_else(|| "Invalid PNG eXIf IFD0 offset.".to_string())?;
+    let old_ifd0 = raw_ifd_entries(tiff, old_ifd0_offset, endian)?;
+    let old_next_ifd = raw_ifd_next_offset(tiff, old_ifd0_offset, old_ifd0.len(), endian)?;
+    let old_exif_offset = read_ifd_entries(tiff, old_ifd0_offset, endian)
+        .and_then(|entries| {
+            entries
+                .into_iter()
+                .find(|entry| entry.tag == 0x8769)
+                .and_then(|entry| entry.as_long())
+                .map(|value| value as usize)
+        });
+    let old_exif = match old_exif_offset {
+        Some(offset) => raw_ifd_entries(tiff, offset, endian)?,
+        None => Vec::new(),
+    };
+    let old_exif_next = match old_exif_offset {
+        Some(offset) => raw_ifd_next_offset(tiff, offset, old_exif.len(), endian)?,
+        None => 0,
+    };
+
+    let mut ifd0_entries: Vec<(u16, [u8; 12])> = old_ifd0
+        .into_iter()
+        .filter(|(tag, _)| *tag != 0x8769)
+        .collect();
+    let mut exif_entries: Vec<(u16, [u8; 12])> = old_exif
+        .into_iter()
+        .filter(|(tag, _)| *tag != 0x9003)
+        .collect();
+
+    let mut output = tiff.to_vec();
+    if output.len() % 2 != 0 {
+        output.push(0);
+    }
+    let new_ifd0_offset = output.len();
+    let ifd0_count = ifd0_entries
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| "PNG eXIf contains too many IFD0 entries.".to_string())?;
+    let ifd0_table_len = 2usize
+        .checked_add(ifd0_count.checked_mul(12).ok_or_else(|| "PNG eXIf IFD0 is too large.".to_string())?)
+        .and_then(|value| value.checked_add(4))
+        .ok_or_else(|| "PNG eXIf IFD0 is too large.".to_string())?;
+    let new_exif_offset = new_ifd0_offset
+        .checked_add(ifd0_table_len)
+        .map(|value| (value + 1) & !1)
+        .ok_or_else(|| "PNG eXIf is too large.".to_string())?;
+
+    ifd0_entries.push((
+        0x8769,
+        make_tiff_entry(0x8769, 4, 1, new_exif_offset as u32, endian),
+    ));
+    ifd0_entries.sort_by_key(|(tag, _)| *tag);
+    append_raw_ifd(&mut output, new_ifd0_offset, &ifd0_entries, old_next_ifd, endian)?;
+    while output.len() < new_exif_offset {
+        output.push(0);
+    }
+
+    let exif_count = exif_entries
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| "PNG eXIf contains too many Exif IFD entries.".to_string())?;
+    let exif_table_len = 2usize
+        .checked_add(exif_count.checked_mul(12).ok_or_else(|| "PNG eXIf Exif IFD is too large.".to_string())?)
+        .and_then(|value| value.checked_add(4))
+        .ok_or_else(|| "PNG eXIf Exif IFD is too large.".to_string())?;
+    let date_offset = new_exif_offset
+        .checked_add(exif_table_len)
+        .ok_or_else(|| "PNG eXIf is too large.".to_string())?;
+    exif_entries.push((
+        0x9003,
+        make_tiff_entry(0x9003, 2, date_bytes.len() as u32, date_offset as u32, endian),
+    ));
+    exif_entries.sort_by_key(|(tag, _)| *tag);
+    append_raw_ifd(&mut output, new_exif_offset, &exif_entries, old_exif_next, endian)?;
+    output.extend_from_slice(&date_bytes);
+    write_u32_at(&mut output, 4, new_ifd0_offset as u32, endian)?;
+    Ok(output)
+}
+
+fn raw_ifd_entries(
+    tiff: &[u8],
+    offset: usize,
+    endian: Endian,
+) -> Result<Vec<(u16, [u8; 12])>, String> {
+    let count = read_u16(tiff, offset, endian)
+        .map(|value| value as usize)
+        .ok_or_else(|| "Invalid PNG eXIf IFD entry count.".to_string())?;
+    let mut entries = Vec::with_capacity(count);
+    for index in 0..count {
+        let start = offset
+            .checked_add(2)
+            .and_then(|value| value.checked_add(index.checked_mul(12)?))
+            .ok_or_else(|| "Invalid PNG eXIf IFD offset.".to_string())?;
+        let raw: [u8; 12] = tiff
+            .get(start..start + 12)
+            .ok_or_else(|| "PNG eXIf IFD entry is truncated.".to_string())?
+            .try_into()
+            .map_err(|_| "PNG eXIf IFD entry is invalid.".to_string())?;
+        let tag = read_u16(&raw, 0, endian).ok_or_else(|| "Invalid PNG eXIf tag.".to_string())?;
+        entries.push((tag, raw));
+    }
+    Ok(entries)
+}
+
+fn raw_ifd_next_offset(
+    tiff: &[u8],
+    offset: usize,
+    count: usize,
+    endian: Endian,
+) -> Result<u32, String> {
+    let position = offset
+        .checked_add(2)
+        .and_then(|value| value.checked_add(count.checked_mul(12)?))
+        .ok_or_else(|| "Invalid PNG eXIf next IFD offset.".to_string())?;
+    read_u32(tiff, position, endian).ok_or_else(|| "PNG eXIf next IFD offset is truncated.".to_string())
+}
+
+fn make_tiff_entry(
+    tag: u16,
+    field_type: u16,
+    count: u32,
+    value: u32,
+    endian: Endian,
+) -> [u8; 12] {
+    let mut entry = [0u8; 12];
+    write_u16_bytes(&mut entry[0..2], tag, endian);
+    write_u16_bytes(&mut entry[2..4], field_type, endian);
+    write_u32_bytes(&mut entry[4..8], count, endian);
+    write_u32_bytes(&mut entry[8..12], value, endian);
+    entry
+}
+
+fn append_raw_ifd(
+    output: &mut Vec<u8>,
+    offset: usize,
+    entries: &[(u16, [u8; 12])],
+    next_ifd: u32,
+    endian: Endian,
+) -> Result<(), String> {
+    if entries.len() > u16::MAX as usize {
+        return Err("PNG eXIf IFD has too many entries.".to_string());
+    }
+    while output.len() < offset {
+        output.push(0);
+    }
+    if output.len() != offset {
+        return Err("PNG eXIf IFD append offset is invalid.".to_string());
+    }
+    let mut count = [0u8; 2];
+    write_u16_bytes(&mut count, entries.len() as u16, endian);
+    output.extend_from_slice(&count);
+    for (_, entry) in entries {
+        output.extend_from_slice(entry);
+    }
+    let mut next = [0u8; 4];
+    write_u32_bytes(&mut next, next_ifd, endian);
+    output.extend_from_slice(&next);
+    Ok(())
+}
+
+fn write_u32_at(
+    output: &mut [u8],
+    offset: usize,
+    value: u32,
+    endian: Endian,
+) -> Result<(), String> {
+    let target = output
+        .get_mut(offset..offset + 4)
+        .ok_or_else(|| "PNG eXIf TIFF header is truncated.".to_string())?;
+    write_u32_bytes(target, value, endian);
+    Ok(())
+}
+
+fn write_u16_bytes(target: &mut [u8], value: u16, endian: Endian) {
+    let bytes = match endian {
+        Endian::Little => value.to_le_bytes(),
+        Endian::Big => value.to_be_bytes(),
+    };
+    target.copy_from_slice(&bytes);
+}
+
+fn write_u32_bytes(target: &mut [u8], value: u32, endian: Endian) {
+    let bytes = match endian {
+        Endian::Little => value.to_le_bytes(),
+        Endian::Big => value.to_be_bytes(),
+    };
+    target.copy_from_slice(&bytes);
+}
+
 fn parse_compact_filename_datetime(value: &str) -> Option<NaiveDateTime> {
     let padded = match value.len() {
         14 => value.to_string(),
@@ -1744,6 +2008,27 @@ mod tests {
     }
 
     #[test]
+    fn png_date_rewrite_preserves_existing_exif_metadata() {
+        let original = build_basic_tiff(&ExifMetadata {
+            has_exif: true,
+            taken_date: "2015-12-26 03:53:22".to_string(),
+            camera_make: "Preserved Camera".to_string(),
+            camera_model: "Preserved Model".to_string(),
+            ..ExifMetadata::default()
+        })
+        .unwrap();
+
+        let rewritten = rewrite_exif_tiff_dates(&original, "2016-01-02 11:22:33").unwrap();
+        let metadata = read_exif_tiff_metadata(&rewritten);
+
+        assert_eq!(metadata.camera_make, "Preserved Camera");
+        assert_eq!(metadata.camera_model, "Preserved Model");
+        assert_eq!(metadata.date_time_original, "2016-01-02 11:22:33");
+        assert_eq!(metadata.date_time_digitized, "2015-12-26 03:53:22");
+        assert_eq!(metadata.image_date_time, "2015-12-26 03:53:22");
+    }
+
+    #[test]
     fn retains_individual_exif_date_sources_and_prefers_original() {
         let source = "2012:08:27 00:29:55";
         let mut tiff = build_basic_tiff(&ExifMetadata {
@@ -2142,6 +2427,39 @@ mod tests {
         let written = read_exif_metadata(&path);
         assert_eq!(written.camera_make, "Canon");
         assert_eq!(written.camera_model, "HTC-X315E");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn removes_every_exif_app1_segment_but_preserves_other_app1_data() {
+        let path = std::env::temp_dir().join(format!(
+            "sh_exif_tool_remove_all_exif_{}.jpg",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let first = minimal_jpeg_with_camera_make("Canon");
+        let exif_segment = &first[2..first.len() - 2];
+        let xmp_payload = b"http://ns.adobe.com/xap/1.0/\0<xmp>keep</xmp>";
+        let xmp_len = u16::try_from(xmp_payload.len() + 2).unwrap();
+        let mut jpeg = vec![0xff, 0xd8];
+        jpeg.extend_from_slice(exif_segment);
+        jpeg.extend_from_slice(&[0xff, 0xe1]);
+        jpeg.extend_from_slice(&xmp_len.to_be_bytes());
+        jpeg.extend_from_slice(xmp_payload);
+        jpeg.extend_from_slice(exif_segment);
+        jpeg.extend_from_slice(&[0xff, 0xd9]);
+        std::fs::write(&path, jpeg).unwrap();
+
+        remove_exif_metadata(&path, false).unwrap();
+
+        let updated = std::fs::read(&path).unwrap();
+        assert!(find_exif_app1_range(&updated).is_none());
+        assert!(updated
+            .windows(xmp_payload.len())
+            .any(|window| window == xmp_payload));
+        assert!(!read_exif_metadata(&path).has_exif);
 
         let _ = std::fs::remove_file(path);
     }

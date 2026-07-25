@@ -1,5 +1,5 @@
 import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
-import { SectionHeader, EditableInfoRow, ReadOnlyInfoRow, ExifAvailabilityRow, CreateExifRow } from "info_row.slint";
+import { SectionHeader, EditableInfoRow, ReadOnlyInfoRow, CreateExifRow } from "info_row.slint";
 import { FontSettings } from "../theme.slint";
 
 component ToolButton inherits Rectangle {
@@ -132,6 +132,8 @@ export component MetadataPanel inherits Rectangle {
     in-out property <string> date_time_original;
     in-out property <string> date_time_digitized;
     in-out property <string> image_date_time;
+    in-out property <string> png_creation_time;
+    in-out property <bool> png_date_sources_conflict: false;
     in-out property <bool> exif_date_sources_visible: false;
     in-out property <string> selected_name_status;
     in-out property <string> selected_created_status;
@@ -179,6 +181,8 @@ export component MetadataPanel inherits Rectangle {
     in-out property <bool> gps_latitude_dirty: false;
     in-out property <bool> gps_longitude_dirty: false;
     in-out property <bool> gps_altitude_dirty: false;
+    in-out property <bool> png_creation_time_dirty: false;
+    in-out property <bool> png_exif_date_time_original_dirty: false;
 
     callback apply_changes();
     callback revert_changes();
@@ -186,12 +190,15 @@ export component MetadataPanel inherits Rectangle {
     callback fill_taken_date_from_created_date();
     callback shift_media_date();
     callback set_modified_date_from_created_date();
+    callback set_file_dates_from_media_date();
     callback set_filename_from_media_date();
     callback remove_exif_tags();
     callback remove_gps_information();
     callback create_exif_structure();
     callback metadata_edited();
     callback taken_date_edited() -> int;
+    callback png_creation_time_edited() -> int;
+    callback png_exif_date_time_original_edited() -> int;
     callback shortcut_requested(string);
     callback exif_tag_right_clicked(string, string);
     callback exif_section_right_clicked(string);
@@ -204,6 +211,10 @@ export component MetadataPanel inherits Rectangle {
 
     public function clear_editor_focus() {
         focus_sink.focus();
+    }
+
+    public function close_tools_menu() {
+        root.tools_menu_visible = false;
     }
 
     background: #fcfcfc;
@@ -312,12 +323,15 @@ export component MetadataPanel inherits Rectangle {
 
                     if root.selected_media_kind == "png": SectionHeader { title: "IMAGE"; }
                     if root.selected_media_kind == "png": ReadOnlyInfoRow { label: "Media Type"; value: root.selected_media_type; }
-                    if root.selected_media_kind == "png": EditableInfoRow { label: "Media Date"; date_input: true; value <=> root.taken_date; status <=> root.taken_date_status; dirty <=> root.taken_date_dirty; date_value_edited() => { root.taken_date_edited() } value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-
-                    if root.selected_media_kind == "jpeg": ExifAvailabilityRow {
-                        label: "EXIF Tag Available";
-                        available: root.exif_available;
-                    }
+                    if root.selected_media_kind == "png": SectionHeader { title: "PNG METADATA"; }
+                    if root.selected_media_kind == "png" && root.selected_file_count == 1: EditableInfoRow { label: "Creation Time"; metadata_key: "png_creation_time"; date_input: true; value <=> root.png_creation_time; dirty <=> root.png_creation_time_dirty; date_value_edited() => { root.png_creation_time_edited() } value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "png" && root.selected_file_count > 1: ReadOnlyInfoRow { label: "Creation Time"; metadata_key: "png_creation_time"; value: root.png_creation_time; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
+                    if root.selected_media_kind == "png": SectionHeader { title: "EXIF METADATA"; }
+                    if root.selected_media_kind == "png" && root.selected_file_count == 1: EditableInfoRow { label: "DateTime Original"; metadata_key: "date_time_original"; date_input: true; value <=> root.date_time_original; dirty <=> root.png_exif_date_time_original_dirty; date_value_edited() => { root.png_exif_date_time_original_edited() } value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "png" && root.selected_file_count > 1: ReadOnlyInfoRow { label: "DateTime Original"; metadata_key: "date_time_original"; value: root.date_time_original; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
+                    if root.selected_media_kind == "png": ReadOnlyInfoRow { label: "DateTime Digitized"; metadata_key: "date_time_digitized"; value: root.date_time_digitized == "" ? "-" : root.date_time_digitized; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
+                    if root.selected_media_kind == "png": ReadOnlyInfoRow { label: "Image Modified"; metadata_key: "image_date_time"; value: root.image_date_time == "" ? "-" : root.image_date_time; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
+                    if root.selected_media_kind == "png" && root.selected_file_count == 1 && root.png_date_sources_conflict: ReadOnlyInfoRow { label: "Status"; value: "Date sources conflict"; }
 
                     if root.selected_media_kind == "jpeg" && !root.exif_available: CreateExifRow {
                         create_requested => { root.create_exif_structure(); }
@@ -334,7 +348,7 @@ export component MetadataPanel inherits Rectangle {
                     if root.selected_media_kind == "jpeg" && root.exif_available && root.exif_date_sources_visible: SectionHeader { title: "EXIF DATE SOURCES"; }
                     if root.selected_media_kind == "jpeg" && root.exif_available && root.exif_date_sources_visible && root.date_time_original != "": ReadOnlyInfoRow { label: "DateTime Original"; metadata_key: "date_time_original"; value: root.date_time_original; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
                     if root.selected_media_kind == "jpeg" && root.exif_available && root.exif_date_sources_visible && root.date_time_digitized != "": ReadOnlyInfoRow { label: "DateTime Digitized"; metadata_key: "date_time_digitized"; value: root.date_time_digitized; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
-                    if root.selected_media_kind == "jpeg" && root.exif_available && root.exif_date_sources_visible && root.image_date_time != "": ReadOnlyInfoRow { label: "Image DateTime"; metadata_key: "image_date_time"; value: root.image_date_time; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available && root.exif_date_sources_visible && root.image_date_time != "": ReadOnlyInfoRow { label: "Image Modified"; metadata_key: "image_date_time"; value: root.image_date_time; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
 
                     if root.selected_media_kind == "jpeg" && root.exif_available: SectionHeader { title: "EXPOSURE"; metadata_section: "exposure"; section_right_clicked(section) => { root.exif_section_right_clicked(section); } }
                     if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Shutter Speed"; metadata_key: "shutter_speed"; value <=> root.shutter_speed; status <=> root.shutter_speed_status; dirty <=> root.shutter_speed_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
@@ -406,7 +420,7 @@ export component MetadataPanel inherits Rectangle {
         x: parent.width - 292px;
         y: 30px;
         width: 280px;
-        height: root.selected_media_kind == "jpeg" ? 193px : root.selected_file_count > 0 ? 161px : 65px;
+        height: (root.selected_media_kind == "jpeg" || root.selected_media_kind == "png") ? 225px : root.selected_file_count > 0 ? 193px : 65px;
         background: #ffffff;
         border-width: 1px;
         border-color: #cfd8dc;
@@ -421,7 +435,9 @@ export component MetadataPanel inherits Rectangle {
         if root.selected_file_count > 0: MenuRow { y: 97px; title: "Shift Media Date..."; clicked => { root.tools_menu_visible = false; root.shift_media_date(); } }
         Rectangle { y: root.selected_file_count > 0 ? 128px : 32px; width: 100%; height: 1px; background: #edf0f2; }
         MenuRow { y: root.selected_file_count > 0 ? 129px : 33px; title: "Set Modified Date from Created Date"; clicked => { root.tools_menu_visible = false; root.set_modified_date_from_created_date(); } }
-        if root.selected_media_kind == "jpeg": Rectangle { y: 160px; width: 100%; height: 1px; background: #edf0f2; }
-        if root.selected_media_kind == "jpeg": MenuRow { y: 161px; title: "Remove EXIF Tags"; danger: true; clicked => { root.tools_menu_visible = false; root.remove_exif_tags(); } }
+        if root.selected_file_count > 0: Rectangle { y: 160px; width: 100%; height: 1px; background: #edf0f2; }
+        if root.selected_file_count > 0: MenuRow { y: 161px; title: "Set File Dates from Media Date"; clicked => { root.tools_menu_visible = false; root.set_file_dates_from_media_date(); } }
+        if root.selected_media_kind == "jpeg" || root.selected_media_kind == "png": Rectangle { y: 192px; width: 100%; height: 1px; background: #edf0f2; }
+        if root.selected_media_kind == "jpeg" || root.selected_media_kind == "png": MenuRow { y: 193px; title: "Remove Metadata Tags"; danger: true; clicked => { root.tools_menu_visible = false; root.remove_exif_tags(); } }
     }
 }

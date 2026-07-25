@@ -2,10 +2,9 @@ pub mod app;
 
 use chrono::{Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime, TimeZone};
 use slint::{language::ColorScheme, ComponentHandle};
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +15,7 @@ use crate::exif::{
     exif_backup_path,
     is_generated_new_exif_path,
     read_exif_metadata,
+    remove_exif_metadata,
     remove_gps_information,
     rewrite_basic_exif_metadata,
     rewrite_generated_basic_exif_metadata,
@@ -47,7 +47,16 @@ use crate::fs::{
     set_file_times,
     trailing_number_rename_candidate_count,
 };
-use crate::media::{scan_media_file, write_mp4_media_date, write_png_media_date, MediaScanJob};
+use crate::media::{
+    read_png_date_sources,
+    remove_png_date_metadata,
+    scan_media_file,
+    write_png_date_sources,
+    write_mp4_media_date,
+    write_png_media_date,
+    MediaScanJob,
+    PngDateSources,
+};
 use crate::GuiRunner;
 
 slint::include_modules!();
@@ -133,11 +142,16 @@ impl GuiRunner for SlintRunner {
         let app = Rc::new(RefCell::new(SlintApp::new()));
         let copied_files = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
         let pending_filename_taken_dates = Rc::new(RefCell::new(HashMap::<PathBuf, String>::new()));
+        let pending_created_dates = Rc::new(RefCell::new(HashMap::<PathBuf, SystemTime>::new()));
         let pending_modified_dates = Rc::new(RefCell::new(HashMap::<PathBuf, SystemTime>::new()));
+        let pending_exif_removals = Rc::new(RefCell::new(HashSet::<PathBuf>::new()));
         let exif_clipboard = Rc::new(RefCell::new(None::<ExifClipboard>));
         let exif_context_target = Rc::new(RefCell::new(None::<ExifContextTarget>));
         let pending_exif_paste = Rc::new(RefCell::new(None::<PendingExifPaste>));
         let previous_taken_date_input = Rc::new(RefCell::new(String::new()));
+        let previous_png_creation_time_input = Rc::new(RefCell::new(String::new()));
+        let previous_png_exif_original_input = Rc::new(RefCell::new(String::new()));
+        let date_overwrite_confirmed = Rc::new(Cell::new(false));
         let scan_results_dirty = Arc::new(AtomicBool::new(false));
         let (scan_batch_sender, scan_batch_receiver) = std::sync::mpsc::channel();
 
@@ -248,7 +262,10 @@ impl GuiRunner for SlintRunner {
             let Some(_path) = app_handle.borrow().path_for_ui_index(ui.get_selected_index()) else { return; };
             let key = key.to_string();
             let value = value.to_string();
-            let paste_enabled = is_writable_exif_key(&key)
+            let paste_enabled = (is_writable_exif_key(&key)
+                || (ui.get_selected_media_kind().as_str() == "png"
+                    && ui.get_selected_file_count() == 1
+                    && is_writable_png_key(&key)))
                 && matches!(*clipboard.borrow(), Some(ExifClipboard::Tag { .. }));
             *context_target.borrow_mut() = Some(ExifContextTarget::Tag { key, value });
             ui.set_exif_context_paste_enabled(paste_enabled);
@@ -516,13 +533,17 @@ impl GuiRunner for SlintRunner {
 
         let app_handle = app.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
+        let pending_exif_removals_handle = pending_exif_removals.clone();
         let ui_handle = ui.as_weak();
         let schedule_scan = schedule_media_scan.clone();
         ui.on_table_row_selected(move |index, ctrl, shift| {
             if let Some(ui) = ui_handle.upgrade() {
                 pending_taken_dates.borrow_mut().clear();
+                pending_created_dates_handle.borrow_mut().clear();
                 pending_modified_dates_handle.borrow_mut().clear();
+                pending_exif_removals_handle.borrow_mut().clear();
                 let mut app = app_handle.borrow_mut();
                 app.select_ui_index(index, ctrl, shift);
                 ui.set_selected_index(index);
@@ -535,13 +556,17 @@ impl GuiRunner for SlintRunner {
 
         let app_handle = app.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
+        let pending_exif_removals_handle = pending_exif_removals.clone();
         let ui_handle = ui.as_weak();
         let schedule_scan = schedule_media_scan.clone();
         ui.on_select_all_table_rows(move || {
             let Some(ui) = ui_handle.upgrade() else { return; };
             pending_taken_dates.borrow_mut().clear();
+            pending_created_dates_handle.borrow_mut().clear();
             pending_modified_dates_handle.borrow_mut().clear();
+            pending_exif_removals_handle.borrow_mut().clear();
             let mut app = app_handle.borrow_mut();
             app.select_all_visible_entries();
             ui.set_files(app.get_ui_model());
@@ -563,15 +588,63 @@ impl GuiRunner for SlintRunner {
             refresh(None);
         });
 
+        let app_handle = app.clone();
+        let pending_exif_removals_handle = pending_exif_removals.clone();
         let ui_handle = ui.as_weak();
         ui.on_remove_exif_tags(move || {
-            if let Some(ui) = ui_handle.upgrade() {
-                if ui.get_selected_index() >= 0 && !ui.get_selected_is_dir() {
-                    ui.set_metadata_dirty(true);
-                    set_exif_metadata(&ui, ExifMetadata::default());
-                    update_metadata_dirty_state(&ui);
-                }
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            let selected_paths = {
+                let app = app_handle.borrow();
+                selected_file_paths(&app)
+            };
+            if selected_paths.is_empty() {
+                show_message(
+                    &ui,
+                    "Remove Metadata Failed",
+                    "Select JPEG or PNG files first.",
+                );
+                return;
             }
+            if selected_paths
+                .iter()
+                .any(|path| !is_jpeg_path(path) && !is_png_path(path))
+            {
+                show_message(
+                    &ui,
+                    "Remove Metadata Failed",
+                    "Metadata removal is supported for JPEG and PNG files only.",
+                );
+                return;
+            }
+
+            let removals: HashSet<_> = selected_paths
+                .into_iter()
+                .filter(|path| {
+                    if is_png_path(path) {
+                        read_png_date_sources(path).has_existing_date()
+                    } else {
+                        read_exif_metadata(path).has_exif
+                    }
+                })
+                .collect();
+            if removals.is_empty() {
+                show_message(
+                    &ui,
+                    "Remove Metadata",
+                    "The selected files do not contain removable metadata.",
+                );
+                return;
+            }
+
+            let staged_count = removals.len();
+            *pending_exif_removals_handle.borrow_mut() = removals;
+            set_exif_metadata(&ui, ExifMetadata::default());
+            ui.set_exif_available(false);
+            ui.set_metadata_dirty(true);
+            show_toast(
+                &ui,
+                &format!("Staged metadata removal for {staged_count} file(s). Ctrl+S to save."),
+            );
         });
 
         let app_handle = app.clone();
@@ -734,7 +807,7 @@ impl GuiRunner for SlintRunner {
 
             *pending_taken_dates.borrow_mut() = staged;
             if shifted.len() == 1 {
-                ui.set_taken_date(shifted[0].1.clone().into());
+                stage_taken_date_in_ui(&ui, &shifted[0].1);
                 ui.set_taken_date_status("Modified".into());
             } else {
                 ui.set_taken_date("".into());
@@ -798,7 +871,7 @@ impl GuiRunner for SlintRunner {
                     }
 
                     pending_taken_dates.borrow_mut().clear();
-                    ui.set_taken_date(datetime.into());
+                    stage_taken_date_in_ui(&ui, &datetime);
                     if ui.get_selected_media_kind().as_str() == "jpeg" && !ui.get_exif_available() {
                         // Stage a new EXIF structure in the UI. The file is still only
                         // changed when Apply/Ctrl+S is invoked.
@@ -903,7 +976,7 @@ impl GuiRunner for SlintRunner {
                 if selected_paths.len() == 1 {
                     let timestamp = pending.values().next().cloned().unwrap_or_default();
                     pending_taken_dates.borrow_mut().clear();
-                    ui.set_taken_date(timestamp.into());
+                    stage_taken_date_in_ui(&ui, &timestamp);
                     if is_jpeg_path(&selected_paths[0]) && !ui.get_exif_available() {
                         ui.set_exif_available(true);
                     }
@@ -1007,13 +1080,112 @@ impl GuiRunner for SlintRunner {
         });
 
         let app_handle = app.clone();
-        let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_set_file_dates_from_media_date(move || {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            if ui.get_selected_file_count() == 0 {
+                show_message(
+                    &ui,
+                    "Unable to Set File Dates",
+                    "Select files before setting file dates.",
+                );
+                return;
+            }
+            if ui.get_selected_recyclable_count() != ui.get_selected_file_count() {
+                show_message(
+                    &ui,
+                    "Unable to Set File Dates",
+                    "Please select files only.",
+                );
+                return;
+            }
+
+            let selected_paths = {
+                let app = app_handle.borrow();
+                selected_file_paths(&app)
+            };
+            if selected_paths.is_empty() {
+                show_message(
+                    &ui,
+                    "Unable to Set File Dates",
+                    "Selected files could not be resolved.",
+                );
+                return;
+            }
+
+            let mut pending_created = HashMap::new();
+            let mut pending_modified = HashMap::new();
+            let mut display_dates = Vec::new();
+            for path in &selected_paths {
+                let media_date = scan_media_file(path).media_date;
+                if let Ok(timestamp) = parse_timestamp(&media_date) {
+                    pending_created.insert(path.clone(), timestamp);
+                    pending_modified.insert(path.clone(), timestamp);
+                    display_dates.push(media_date);
+                }
+            }
+
+            if pending_created.is_empty() {
+                show_message(
+                    &ui,
+                    "Unable to Set File Dates",
+                    "No selected file has a usable Media Date.",
+                );
+                return;
+            }
+
+            let staged_count = pending_created.len();
+            let skipped_count = selected_paths.len().saturating_sub(staged_count);
+            *pending_created_dates_handle.borrow_mut() = pending_created;
+            *pending_modified_dates_handle.borrow_mut() = pending_modified;
+
+            if selected_paths.len() == 1 {
+                let display_date = display_dates.pop().unwrap_or_default();
+                ui.set_selected_created(display_date.clone().into());
+                ui.set_selected_modified(display_date.into());
+                ui.set_selected_created_status("".into());
+                ui.set_selected_modified_status("".into());
+            } else {
+                ui.set_selected_created("".into());
+                ui.set_selected_modified("".into());
+                ui.set_selected_created_status("Mixed".into());
+                ui.set_selected_modified_status("Mixed".into());
+            }
+            ui.set_selected_created_dirty(true);
+            ui.set_selected_modified_dirty(true);
+            ui.set_metadata_dirty(true);
+
+            if skipped_count == 0 {
+                show_toast(
+                    &ui,
+                    &format!(
+                        "Staged Created and Modified dates for {staged_count} file(s). Ctrl+S to save."
+                    ),
+                );
+            } else {
+                show_toast(
+                    &ui,
+                    &format!(
+                        "Staged {staged_count}; skipped {skipped_count} without Media Date. Ctrl+S to save."
+                    ),
+                );
+            }
+        });
+
+        let app_handle = app.clone();
+        let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_created_dates_handle = pending_created_dates.clone();
+        let pending_modified_dates_handle = pending_modified_dates.clone();
+        let pending_exif_removals_handle = pending_exif_removals.clone();
         let ui_handle = ui.as_weak();
         ui.on_revert_changes(move || {
             if let Some(ui) = ui_handle.upgrade() {
                 pending_taken_dates.borrow_mut().clear();
+                pending_created_dates_handle.borrow_mut().clear();
                 pending_modified_dates_handle.borrow_mut().clear();
+                pending_exif_removals_handle.borrow_mut().clear();
                 let metadata = {
                     let app = app_handle.borrow();
                     let index = ui.get_selected_index();
@@ -1221,6 +1393,7 @@ impl GuiRunner for SlintRunner {
                         )
                         .into(),
                     );
+                    ui.set_confirm_yes_selected(true);
                     ui.set_confirm_trailing_rename_visible(true);
                 }
                 Err(err) => show_message(&ui, "Filename Change Failed", &err),
@@ -1269,10 +1442,25 @@ impl GuiRunner for SlintRunner {
             }
         });
 
+        let overwrite_confirmed = date_overwrite_confirmed.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_confirm_date_overwrite(move |confirmed| {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            ui.set_message_title("Operation Failed".into());
+            ui.set_message_text("".into());
+            if confirmed {
+                overwrite_confirmed.set(true);
+                ui.invoke_apply_changes();
+            }
+        });
+
         let app_handle = app.clone();
         let refresh = refresh_ui.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
+        let pending_exif_removals_handle = pending_exif_removals.clone();
+        let overwrite_confirmed = date_overwrite_confirmed.clone();
         let ui_handle = ui.as_weak();
         ui.on_apply_changes(move || {
             if let Some(ui) = ui_handle.upgrade() {
@@ -1301,6 +1489,7 @@ impl GuiRunner for SlintRunner {
                 }
 
                 trim_taken_date_before_save(&ui);
+                trim_png_date_sources_before_save(&ui);
 
                 let selected_path = {
                     let app = app_handle.borrow();
@@ -1312,9 +1501,38 @@ impl GuiRunner for SlintRunner {
                     selected_file_paths(&app)
                 };
 
+                let has_staged_png_overwrite = selected_paths.iter().any(|path| {
+                    if !is_png_path(path) {
+                        return false;
+                    }
+                    let sources = read_png_date_sources(path);
+                    let synchronized_change = pending_taken_dates.borrow().contains_key(path)
+                        || (selected_paths.len() == 1 && ui.get_taken_date_dirty());
+                    (synchronized_change && sources.has_existing_date())
+                        || (selected_paths.len() == 1
+                            && ((ui.get_png_creation_time_dirty()
+                                && !sources.creation_time.is_empty())
+                                || (ui.get_png_exif_date_time_original_dirty()
+                                    && !sources.date_time_original.is_empty())))
+                });
+                if has_staged_png_overwrite && !overwrite_confirmed.replace(false) {
+                    ui.set_message_title("Confirm Date Overwrite".into());
+                    ui.set_message_text(
+                        "Existing date metadata may be overwritten. Continue? (Y/N)".into(),
+                    );
+                    ui.set_confirm_yes_selected(true);
+                    ui.set_confirm_date_overwrite_visible(true);
+                    return;
+                }
+                overwrite_confirmed.set(false);
+
                 if selected_paths.len() > 1 {
                     let mut refresh_path = selected_path.clone();
+                    let pending_exif_removals_snapshot =
+                        pending_exif_removals_handle.borrow().clone();
                     let pending_taken_dates_snapshot = pending_taken_dates.borrow().clone();
+                    let pending_created_dates_snapshot =
+                        pending_created_dates_handle.borrow().clone();
                     let pending_modified_dates_snapshot = pending_modified_dates_handle.borrow().clone();
                     let pending_taken_dates_arg = if pending_taken_dates_snapshot.is_empty() {
                         None
@@ -1326,8 +1544,29 @@ impl GuiRunner for SlintRunner {
                     } else {
                         Some(&pending_modified_dates_snapshot)
                     };
+                    let pending_created_dates_arg = if pending_created_dates_snapshot.is_empty() {
+                        None
+                    } else {
+                        Some(&pending_created_dates_snapshot)
+                    };
                     for path in &selected_paths {
-                        match apply_metadata_changes_to_path(&ui, path, pending_taken_dates_arg, pending_modified_dates_arg) {
+                        if pending_exif_removals_snapshot.contains(path) {
+                            if let Err(err) = remove_supported_metadata(
+                                path,
+                                ui.get_backup_before_changes(),
+                            ) {
+                                show_message(&ui, "Remove Metadata Failed", &err);
+                                return;
+                            }
+                            continue;
+                        }
+                        match apply_metadata_changes_to_path(
+                            &ui,
+                            path,
+                            pending_taken_dates_arg,
+                            pending_created_dates_arg,
+                            pending_modified_dates_arg,
+                        ) {
                             Ok(Some(new_path)) => {
                                 refresh_path = Some(new_path);
                             }
@@ -1341,7 +1580,9 @@ impl GuiRunner for SlintRunner {
 
                     store_current_as_original(&ui);
                     pending_taken_dates.borrow_mut().clear();
+                    pending_created_dates_handle.borrow_mut().clear();
                     pending_modified_dates_handle.borrow_mut().clear();
+                    pending_exif_removals_handle.borrow_mut().clear();
                     update_metadata_dirty_state(&ui);
                     {
                         let mut app = app_handle.borrow_mut();
@@ -1352,6 +1593,29 @@ impl GuiRunner for SlintRunner {
                 }
 
                 let apply_path = selected_path.clone();
+                if let Some(path) = apply_path.as_ref() {
+                    if pending_exif_removals_handle.borrow().contains(path) {
+                        if let Err(err) =
+                            remove_supported_metadata(path, ui.get_backup_before_changes())
+                        {
+                            show_message(&ui, "Remove Metadata Failed", &err);
+                            return;
+                        }
+                        store_current_as_original(&ui);
+                        pending_taken_dates.borrow_mut().clear();
+                        pending_created_dates_handle.borrow_mut().clear();
+                        pending_modified_dates_handle.borrow_mut().clear();
+                        pending_exif_removals_handle.borrow_mut().clear();
+                        update_metadata_dirty_state(&ui);
+                        {
+                            let mut app = app_handle.borrow_mut();
+                            app.load_folder();
+                        }
+                        refresh(selected_path);
+                        show_toast(&ui, "Metadata tags were removed.");
+                        return;
+                    }
+                }
                 if ui.get_selected_media_kind().as_str() == "mp4" && ui.get_taken_date_dirty() {
                     let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
@@ -1368,7 +1632,11 @@ impl GuiRunner for SlintRunner {
                     ui.set_original_taken_date(ui.get_taken_date());
                     ui.set_taken_date_dirty(false);
                     update_metadata_dirty_state(&ui);
-                } else if ui.get_selected_media_kind().as_str() == "png" && ui.get_taken_date_dirty() {
+                } else if ui.get_selected_media_kind().as_str() == "png"
+                    && (ui.get_taken_date_dirty()
+                        || ui.get_png_creation_time_dirty()
+                        || ui.get_png_exif_date_time_original_dirty())
+                {
                     let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
@@ -1377,16 +1645,38 @@ impl GuiRunner for SlintRunner {
                         show_message(&ui, "Apply Failed", "Selected file is not a PNG image.");
                         return;
                     }
-                    if let Err(err) = write_png_media_date(
-                        path,
-                        ui.get_taken_date().as_str(),
-                        ui.get_backup_before_changes(),
-                    ) {
+                    let result = if ui.get_taken_date_dirty() {
+                        write_png_media_date(
+                            path,
+                            ui.get_taken_date().as_str(),
+                            ui.get_backup_before_changes(),
+                        )
+                    } else {
+                        let creation = ui
+                            .get_png_creation_time_dirty()
+                            .then(|| ui.get_png_creation_time());
+                        let original = ui
+                            .get_png_exif_date_time_original_dirty()
+                            .then(|| ui.get_date_time_original());
+                        write_png_date_sources(
+                            path,
+                            creation.as_ref().map(|value| value.as_str()),
+                            original.as_ref().map(|value| value.as_str()),
+                            ui.get_backup_before_changes(),
+                        )
+                    };
+                    if let Err(err) = result {
                         show_message(&ui, "Apply Failed", &err);
                         return;
                     }
-                    ui.set_original_taken_date(ui.get_taken_date());
-                    ui.set_taken_date_dirty(false);
+                    if ui.get_taken_date_dirty() {
+                        let synchronized = ui.get_taken_date();
+                        ui.set_png_creation_time(synchronized.clone());
+                        ui.set_date_time_original(synchronized.clone());
+                        ui.set_original_taken_date(synchronized);
+                        ui.set_taken_date_dirty(false);
+                    }
+                    update_png_date_source_conflict(&ui);
                     update_metadata_dirty_state(&ui);
                 } else if has_exif_metadata_changes(&ui) {
                     let Some(path) = apply_path.as_ref() else {
@@ -1513,7 +1803,21 @@ impl GuiRunner for SlintRunner {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
                     };
-                    if let Err(err) = apply_metadata_changes_to_path(&ui, path, None, None) {
+                    let pending_created_dates_snapshot =
+                        pending_created_dates_handle.borrow().clone();
+                    let pending_modified_dates_snapshot =
+                        pending_modified_dates_handle.borrow().clone();
+                    let pending_created_dates_arg = (!pending_created_dates_snapshot.is_empty())
+                        .then_some(&pending_created_dates_snapshot);
+                    let pending_modified_dates_arg = (!pending_modified_dates_snapshot.is_empty())
+                        .then_some(&pending_modified_dates_snapshot);
+                    if let Err(err) = apply_metadata_changes_to_path(
+                        &ui,
+                        path,
+                        None,
+                        pending_created_dates_arg,
+                        pending_modified_dates_arg,
+                    ) {
                         show_message(&ui, "Apply Failed", &err);
                         return;
                     }
@@ -1521,6 +1825,10 @@ impl GuiRunner for SlintRunner {
 
                 // Other metadata fields are UI-only until their EXIF writers are implemented.
                 store_current_as_original(&ui);
+                pending_taken_dates.borrow_mut().clear();
+                pending_created_dates_handle.borrow_mut().clear();
+                pending_modified_dates_handle.borrow_mut().clear();
+                pending_exif_removals_handle.borrow_mut().clear();
                 update_metadata_dirty_state(&ui);
                 {
                     let mut app = app_handle.borrow_mut();
@@ -1541,6 +1849,66 @@ impl GuiRunner for SlintRunner {
                 let formatted_cursor_position = i32::try_from(formatted.len()).unwrap_or(i32::MAX);
                 ui.set_taken_date(formatted.into());
                 formatted_cursor_position
+            } else {
+                -1
+            }
+        });
+
+        let previous_input = previous_png_creation_time_input.clone();
+        let mirrored_previous_input = previous_png_exif_original_input.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_png_creation_time_input_edited(move || {
+            let Some(ui) = ui_handle.upgrade() else { return -1; };
+            let current = ui.get_png_creation_time().to_string();
+            let previous = previous_input.borrow().clone();
+            let formatted = auto_format_date_edit(&previous, &current);
+            let opposite = ui.get_date_time_original().to_string();
+            let should_follow = should_mirror_png_date_source(
+                ui.get_original_png_exif_date_time_original().as_str(),
+                &opposite,
+                &previous,
+            );
+            *previous_input.borrow_mut() = formatted.clone();
+            if formatted != current {
+                ui.set_png_creation_time(formatted.clone().into());
+            }
+            if should_follow {
+                ui.set_date_time_original(formatted.clone().into());
+                *mirrored_previous_input.borrow_mut() = formatted.clone();
+            }
+            update_png_date_source_conflict(&ui);
+            if formatted != current {
+                i32::try_from(formatted.len()).unwrap_or(i32::MAX)
+            } else {
+                -1
+            }
+        });
+
+        let previous_input = previous_png_exif_original_input.clone();
+        let mirrored_previous_input = previous_png_creation_time_input.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_png_exif_date_time_original_input_edited(move || {
+            let Some(ui) = ui_handle.upgrade() else { return -1; };
+            let current = ui.get_date_time_original().to_string();
+            let previous = previous_input.borrow().clone();
+            let formatted = auto_format_date_edit(&previous, &current);
+            let opposite = ui.get_png_creation_time().to_string();
+            let should_follow = should_mirror_png_date_source(
+                ui.get_original_png_creation_time().as_str(),
+                &opposite,
+                &previous,
+            );
+            *previous_input.borrow_mut() = formatted.clone();
+            if formatted != current {
+                ui.set_date_time_original(formatted.clone().into());
+            }
+            if should_follow {
+                ui.set_png_creation_time(formatted.clone().into());
+                *mirrored_previous_input.borrow_mut() = formatted.clone();
+            }
+            update_png_date_source_conflict(&ui);
+            if formatted != current {
+                i32::try_from(formatted.len()).unwrap_or(i32::MAX)
             } else {
                 -1
             }
@@ -1588,6 +1956,7 @@ fn set_selected_file(ui: &MainWindow, app: &SlintApp, index: i32) {
     }
     if let Some(path) = app.path_for_ui_index(index).filter(|path| path.is_file() && is_png_path(path)) {
         set_loaded_media_date(ui, scan_media_file(&path).media_date);
+        set_loaded_png_date_sources(ui, &path);
     }
 }
 
@@ -1608,6 +1977,7 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
     let mut modified_values = Vec::new();
     let mut has_dir = false;
     let mut metadata_values = Vec::new();
+    let mut png_date_sources = Vec::new();
 
     for index in indices {
         if let Some((name, created, modified, is_dir)) = app.ui_details_for_index(*index) {
@@ -1627,6 +1997,13 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
             .map(|path| read_exif_metadata(&path))
             .unwrap_or_default();
         metadata_values.push(metadata);
+
+        if let Some(path) = app
+            .path_for_ui_index(*index)
+            .filter(|path| path.is_file() && is_png_path(path))
+        {
+            png_date_sources.push(read_png_date_sources(&path));
+        }
     }
 
     ui.set_selected_index(*indices.last().unwrap_or(&-1));
@@ -1650,6 +2027,9 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
 
     set_loaded_exif_metadata(ui, join_metadata(&metadata_values));
     set_joined_metadata_statuses(ui, &metadata_values);
+    if ui.get_selected_media_kind().as_str() == "png" {
+        set_joined_png_date_sources(ui, &png_date_sources);
+    }
 }
 
 fn clear_selected_file(ui: &MainWindow) {
@@ -1737,6 +2117,89 @@ fn set_loaded_media_date(ui: &MainWindow, media_date: String) {
     );
 }
 
+fn stage_taken_date_in_ui(ui: &MainWindow, value: &str) {
+    ui.set_taken_date(value.into());
+    if ui.get_selected_media_kind().as_str() == "png" {
+        ui.set_png_creation_time(value.into());
+        ui.set_date_time_original(value.into());
+        update_png_date_source_conflict(ui);
+    }
+}
+
+fn set_loaded_png_date_sources(ui: &MainWindow, path: &std::path::Path) {
+    let sources = read_png_date_sources(path);
+    ui.set_png_creation_time(sources.creation_time.clone().into());
+    ui.set_original_png_creation_time(sources.creation_time.into());
+    ui.set_date_time_original(sources.date_time_original.clone().into());
+    ui.set_original_png_exif_date_time_original(sources.date_time_original.into());
+    ui.set_date_time_digitized(sources.date_time_digitized.into());
+    ui.set_image_date_time(sources.image_date_time.into());
+    ui.set_png_creation_time_dirty(false);
+    ui.set_png_exif_date_time_original_dirty(false);
+    update_png_date_source_conflict(ui);
+}
+
+fn set_joined_png_date_sources(ui: &MainWindow, sources: &[PngDateSources]) {
+    fn multiple_value(values: Vec<String>) -> String {
+        let display = selection_display(values);
+        if display.status == "Mixed" {
+            "<Multiple values>".to_string()
+        } else if display.value.is_empty() {
+            "-".to_string()
+        } else {
+            display.value
+        }
+    }
+
+    let creation_time = multiple_value(
+        sources
+            .iter()
+            .map(|source| source.creation_time.clone())
+            .collect(),
+    );
+    let date_time_original = multiple_value(
+        sources
+            .iter()
+            .map(|source| source.date_time_original.clone())
+            .collect(),
+    );
+    ui.set_png_creation_time(creation_time.clone().into());
+    ui.set_original_png_creation_time(creation_time.into());
+    ui.set_date_time_original(date_time_original.clone().into());
+    ui.set_original_png_exif_date_time_original(date_time_original.into());
+    ui.set_date_time_digitized(
+        multiple_value(
+            sources
+                .iter()
+                .map(|source| source.date_time_digitized.clone())
+                .collect(),
+        )
+        .into(),
+    );
+    ui.set_image_date_time(
+        multiple_value(
+            sources
+                .iter()
+                .map(|source| source.image_date_time.clone())
+                .collect(),
+        )
+        .into(),
+    );
+    ui.set_png_creation_time_dirty(false);
+    ui.set_png_exif_date_time_original_dirty(false);
+    ui.set_png_date_sources_conflict(false);
+}
+
+fn update_png_date_source_conflict(ui: &MainWindow) {
+    let creation = ui.get_png_creation_time();
+    let original = ui.get_date_time_original();
+    ui.set_png_date_sources_conflict(
+        !creation.trim().is_empty()
+            && !original.trim().is_empty()
+            && creation != original,
+    );
+}
+
 fn set_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
     let date_sources: Vec<&str> = [
         metadata.date_time_original.as_str(),
@@ -1751,6 +2214,10 @@ fn set_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
         .is_some_and(|first| date_sources.iter().skip(1).any(|value| value != first));
 
     ui.set_exif_available(metadata.has_exif);
+    ui.set_png_creation_time("".into());
+    ui.set_original_png_creation_time("".into());
+    ui.set_original_png_exif_date_time_original("".into());
+    ui.set_png_date_sources_conflict(false);
     ui.set_date_time_original(metadata.date_time_original.into());
     ui.set_date_time_digitized(metadata.date_time_digitized.into());
     ui.set_image_date_time(metadata.image_date_time.into());
@@ -2019,6 +2486,19 @@ fn is_mp4_path(path: &std::path::Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
 }
 
+fn remove_supported_metadata(
+    path: &std::path::Path,
+    backup_before_changes: bool,
+) -> Result<(), String> {
+    if is_png_path(path) {
+        remove_png_date_metadata(path, backup_before_changes)
+    } else if is_jpeg_path(path) {
+        remove_exif_metadata(path, backup_before_changes)
+    } else {
+        Err("Metadata removal is supported for JPEG and PNG files only.".to_string())
+    }
+}
+
 fn selected_recyclable_paths(app: &SlintApp) -> Vec<PathBuf> {
     app.selected_indices()
         .iter()
@@ -2040,6 +2520,7 @@ fn apply_metadata_changes_to_path(
     ui: &MainWindow,
     path: &std::path::Path,
     pending_taken_dates: Option<&HashMap<PathBuf, String>>,
+    pending_created_dates: Option<&HashMap<PathBuf, SystemTime>>,
     pending_modified_dates: Option<&HashMap<PathBuf, SystemTime>>,
 ) -> Result<Option<PathBuf>, String> {
     let taken_date_override = pending_taken_dates
@@ -2058,7 +2539,7 @@ fn apply_metadata_changes_to_path(
         {
             write_mp4_media_date(path, ui.get_taken_date().as_str())?;
         }
-        write_dirty_file_times(ui, path, pending_modified_dates)?;
+        write_dirty_file_times(ui, path, pending_created_dates, pending_modified_dates)?;
         return Ok(None);
     }
     if is_png_path(path) {
@@ -2074,7 +2555,7 @@ fn apply_metadata_changes_to_path(
                 ui.get_backup_before_changes(),
             )?;
         }
-        write_dirty_file_times(ui, path, pending_modified_dates)?;
+        write_dirty_file_times(ui, path, pending_created_dates, pending_modified_dates)?;
         return Ok(None);
     }
 
@@ -2120,7 +2601,12 @@ fn apply_metadata_changes_to_path(
     };
 
     let file_time_path = target_path.as_deref().unwrap_or(path);
-    write_dirty_file_times(ui, file_time_path, pending_modified_dates)?;
+    write_dirty_file_times(
+        ui,
+        file_time_path,
+        pending_created_dates,
+        pending_modified_dates,
+    )?;
     Ok(target_path)
 }
 
@@ -2204,20 +2690,31 @@ fn write_dirty_gps_tags(ui: &MainWindow, path: &std::path::Path) -> Result<(), S
 fn write_dirty_file_times(
     ui: &MainWindow,
     path: &std::path::Path,
+    pending_created_dates: Option<&HashMap<PathBuf, SystemTime>>,
     pending_modified_dates: Option<&HashMap<PathBuf, SystemTime>>,
 ) -> Result<(), String> {
+    let pending_created_time = pending_created_dates.and_then(|values| values.get(path).copied());
     let pending_modified_time = pending_modified_dates.and_then(|values| values.get(path).copied());
+    let has_pending_created_map = pending_created_dates.is_some();
     let has_pending_modified_map = pending_modified_dates.is_some();
 
-    if has_pending_modified_map && pending_modified_time.is_none() && !ui.get_selected_created_dirty() {
+    if (has_pending_created_map && pending_created_time.is_none())
+        || (has_pending_modified_map && pending_modified_time.is_none())
+    {
         return Ok(());
     }
 
-    if !ui.get_selected_created_dirty() && !ui.get_selected_modified_dirty() && pending_modified_time.is_none() {
+    if !ui.get_selected_created_dirty()
+        && !ui.get_selected_modified_dirty()
+        && pending_created_time.is_none()
+        && pending_modified_time.is_none()
+    {
         return Ok(());
     }
 
-    let created_time = if ui.get_selected_created_dirty() {
+    let created_time = if let Some(created_time) = pending_created_time {
+        Some(created_time)
+    } else if ui.get_selected_created_dirty() && !has_pending_created_map {
         Some(parse_timestamp(ui.get_selected_created().as_str())?)
     } else {
         None
@@ -2554,6 +3051,15 @@ fn auto_format_date_edit(previous: &str, current: &str) -> String {
     }
 }
 
+fn should_mirror_png_date_source(
+    original_opposite: &str,
+    current_opposite: &str,
+    previous_source: &str,
+) -> bool {
+    original_opposite.trim().is_empty()
+        && (current_opposite.trim().is_empty() || current_opposite == previous_source)
+}
+
 fn trim_taken_date_before_save(ui: &MainWindow) {
     let current = ui.get_taken_date().to_string();
     let trimmed = current.trim();
@@ -2566,6 +3072,30 @@ fn trim_taken_date_before_save(ui: &MainWindow) {
         ui.set_taken_date(normalized.into());
         update_metadata_dirty_state(ui);
     }
+}
+
+fn trim_png_date_sources_before_save(ui: &MainWindow) {
+    fn normalize(value: &str) -> String {
+        let trimmed = value.trim();
+        NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+            .ok()
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| trimmed.to_string())
+    }
+
+    let creation = ui.get_png_creation_time().to_string();
+    let normalized_creation = normalize(&creation);
+    if normalized_creation != creation {
+        ui.set_png_creation_time(normalized_creation.into());
+    }
+    let original = ui.get_date_time_original().to_string();
+    let normalized_original = normalize(&original);
+    if normalized_original != original {
+        ui.set_date_time_original(normalized_original.into());
+    }
+    update_png_date_source_conflict(ui);
+    update_metadata_dirty_state(ui);
 }
 
 fn should_apply_taken_date_candidate(existing: &str, candidate: &str) -> bool {
@@ -2607,6 +3137,8 @@ fn reset_metadata_dirty_flags(ui: &MainWindow) {
     ui.set_gps_latitude_dirty(false);
     ui.set_gps_longitude_dirty(false);
     ui.set_gps_altitude_dirty(false);
+    ui.set_png_creation_time_dirty(false);
+    ui.set_png_exif_date_time_original_dirty(false);
 }
 
 fn store_current_as_original(ui: &MainWindow) {
@@ -2632,6 +3164,8 @@ fn store_current_as_original(ui: &MainWindow) {
     ui.set_original_gps_latitude(ui.get_gps_latitude());
     ui.set_original_gps_longitude(ui.get_gps_longitude());
     ui.set_original_gps_altitude(ui.get_gps_altitude());
+    ui.set_original_png_creation_time(ui.get_png_creation_time());
+    ui.set_original_png_exif_date_time_original(ui.get_date_time_original());
 }
 
 fn update_metadata_dirty_state(ui: &MainWindow) {
@@ -2657,6 +3191,10 @@ fn update_metadata_dirty_state(ui: &MainWindow) {
     let gps_latitude_dirty = ui.get_gps_latitude() != ui.get_original_gps_latitude();
     let gps_longitude_dirty = ui.get_gps_longitude() != ui.get_original_gps_longitude();
     let gps_altitude_dirty = ui.get_gps_altitude() != ui.get_original_gps_altitude();
+    let png_creation_time_dirty =
+        ui.get_png_creation_time() != ui.get_original_png_creation_time();
+    let png_exif_date_time_original_dirty =
+        ui.get_date_time_original() != ui.get_original_png_exif_date_time_original();
 
     ui.set_selected_name_dirty(selected_name_dirty);
     ui.set_selected_created_dirty(selected_created_dirty);
@@ -2680,6 +3218,8 @@ fn update_metadata_dirty_state(ui: &MainWindow) {
     ui.set_gps_latitude_dirty(gps_latitude_dirty);
     ui.set_gps_longitude_dirty(gps_longitude_dirty);
     ui.set_gps_altitude_dirty(gps_altitude_dirty);
+    ui.set_png_creation_time_dirty(png_creation_time_dirty);
+    ui.set_png_exif_date_time_original_dirty(png_exif_date_time_original_dirty);
 
     ui.set_metadata_dirty(
         selected_name_dirty
@@ -2703,7 +3243,9 @@ fn update_metadata_dirty_state(ui: &MainWindow) {
             || color_space_dirty
             || gps_latitude_dirty
             || gps_longitude_dirty
-            || gps_altitude_dirty,
+            || gps_altitude_dirty
+            || png_creation_time_dirty
+            || png_exif_date_time_original_dirty,
     );
 }
 
@@ -2732,6 +3274,7 @@ fn stage_or_confirm_exif_paste(
         *pending.borrow_mut() = Some(PendingExifPaste { values });
         ui.set_message_title("Confirm Paste".into());
         ui.set_message_text("Destination contains a value. Paste anyway? (Y/N)".into());
+        ui.set_confirm_yes_selected(true);
         ui.set_confirm_metadata_paste_visible(true);
         false
     } else {
@@ -2785,12 +3328,17 @@ fn is_writable_exif_key(key: &str) -> bool {
     )
 }
 
+fn is_writable_png_key(key: &str) -> bool {
+    matches!(key, "png_creation_time" | "date_time_original")
+}
+
 fn exif_key_label(key: &str) -> &'static str {
     match key {
         "taken_date" => "Taken Date",
+        "png_creation_time" => "Creation Time",
         "date_time_original" => "DateTime Original",
         "date_time_digitized" => "DateTime Digitized",
-        "image_date_time" => "Image DateTime",
+        "image_date_time" => "Image Modified (DateTime)",
         "camera_make" => "Camera Make",
         "camera_model" => "Camera Model",
         "lens_model" => "Lens Model",
@@ -2821,6 +3369,10 @@ fn exif_section_label(section: &str) -> &'static str {
 fn get_exif_value(ui: &MainWindow, key: &str) -> String {
     match key {
         "taken_date" => ui.get_taken_date().to_string(),
+        "png_creation_time" => ui.get_png_creation_time().to_string(),
+        "date_time_original" => ui.get_date_time_original().to_string(),
+        "date_time_digitized" => ui.get_date_time_digitized().to_string(),
+        "image_date_time" => ui.get_image_date_time().to_string(),
         "camera_make" => ui.get_camera_make().to_string(),
         "camera_model" => ui.get_camera_model().to_string(),
         "lens_model" => ui.get_lens_model().to_string(),
@@ -2846,6 +3398,8 @@ fn get_exif_value(ui: &MainWindow, key: &str) -> String {
 fn set_exif_value(ui: &MainWindow, key: &str, value: &str) {
     match key {
         "taken_date" => ui.set_taken_date(value.into()),
+        "png_creation_time" => ui.set_png_creation_time(value.into()),
+        "date_time_original" => ui.set_date_time_original(value.into()),
         "camera_make" => ui.set_camera_make(value.into()),
         "camera_model" => ui.set_camera_model(value.into()),
         "lens_model" => ui.set_lens_model(value.into()),
@@ -2877,6 +3431,7 @@ mod tests {
         filename_from_media_date,
         parse_media_date_shift,
         shift_display_datetime,
+        should_mirror_png_date_source,
     };
     use std::time::{Duration, SystemTime};
 
@@ -2908,6 +3463,26 @@ mod tests {
     #[test]
     fn rejects_negative_media_date_shift_parts() {
         assert!(parse_media_date_shift("0", "-1", "0", "0").is_err());
+    }
+
+    #[test]
+    fn mirrors_png_date_edit_only_while_the_other_source_started_empty() {
+        assert!(should_mirror_png_date_source("", "", "2015-"));
+        assert!(should_mirror_png_date_source(
+            "",
+            "2015-12-",
+            "2015-12-"
+        ));
+        assert!(!should_mirror_png_date_source(
+            "2014-01-01 00:00:00",
+            "2014-01-01 00:00:00",
+            "2015-12-"
+        ));
+        assert!(!should_mirror_png_date_source(
+            "",
+            "2016-01-02 11:22:33",
+            "2015-12-"
+        ));
     }
 
     #[test]

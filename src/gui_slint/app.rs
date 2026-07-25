@@ -352,12 +352,7 @@ impl SlintApp {
                 if entry.is_dir {
                     return true;
                 }
-                let matches_type_filter = match self.file_filter {
-                    0 => is_image_file(&entry.path) || is_video_file(&entry.path),
-                    1 => is_image_file(&entry.path),
-                    2 => is_video_file(&entry.path),
-                    _ => true,
-                };
+                let matches_type_filter = matches_file_filter(self.file_filter, &entry.path);
                 if !matches_type_filter {
                     return false;
                 }
@@ -401,6 +396,17 @@ fn is_image_file(path: &std::path::Path) -> bool {
     is_jpeg_file(path) || is_png_file(path)
 }
 
+fn matches_file_filter(filter: i32, path: &std::path::Path) -> bool {
+    match filter {
+        0 => is_image_file(path) || is_video_file(path),
+        1 => is_image_file(path),
+        2 => is_video_file(path),
+        4 => is_jpeg_file(path),
+        5 => is_png_file(path),
+        _ => true,
+    }
+}
+
 fn is_video_file(path: &std::path::Path) -> bool {
     is_mp4_file(path)
 }
@@ -429,7 +435,7 @@ fn is_png_file(path: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_image_file, is_video_file, media_date_is_missing};
+    use super::{is_image_file, is_video_file, matches_file_filter, media_date_is_missing};
     use crate::media::MediaScanResult;
     use std::path::Path;
 
@@ -453,6 +459,15 @@ mod tests {
         assert!(media_date_is_missing(Some(&result("-"))));
         assert!(media_date_is_missing(Some(&result("N/A"))));
         assert!(!media_date_is_missing(Some(&result("2014-02-04 12:00:00"))));
+    }
+
+    #[test]
+    fn image_subfilters_separate_jpeg_and_png_files() {
+        assert!(matches_file_filter(4, Path::new("photo.jpg")));
+        assert!(matches_file_filter(4, Path::new("photo.JPEG")));
+        assert!(!matches_file_filter(4, Path::new("image.png")));
+        assert!(matches_file_filter(5, Path::new("image.PNG")));
+        assert!(!matches_file_filter(5, Path::new("photo.jpeg")));
     }
 }
 
