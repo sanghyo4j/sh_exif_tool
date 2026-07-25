@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn writes_and_reads_png_creation_time_media_date() {
         let path =
-            std::env::temp_dir().join(format!("sh_exif_tool_png_exif_{}.png", std::process::id()));
+            std::env::temp_dir().join(format!("sh148_exif_file_tool_png_exif_{}.png", std::process::id()));
         fs::write(&path, minimal_png()).unwrap();
 
         write_media_date(&path, "2012-08-15 02:30:00", true).unwrap();
@@ -579,7 +579,7 @@ mod tests {
     #[test]
     fn writes_png_media_date_without_backup_when_disabled() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_png_no_backup_{}.png",
+            "sh148_exif_file_tool_png_no_backup_{}.png",
             std::process::id()
         ));
         let backup_path = exif_backup_path(&path);
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn updates_both_png_date_sources_when_exif_already_exists() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_png_dual_date_{}.png",
+            "sh148_exif_file_tool_png_dual_date_{}.png",
             std::process::id()
         ));
         let _ = fs::remove_file(&path);
@@ -620,7 +620,7 @@ mod tests {
     #[test]
     fn edits_png_date_sources_independently() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_png_independent_date_{}.png",
+            "sh148_exif_file_tool_png_independent_date_{}.png",
             std::process::id()
         ));
         let _ = fs::remove_file(&path);
@@ -640,7 +640,7 @@ mod tests {
     #[test]
     fn removes_png_date_metadata_but_preserves_unrelated_text() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_png_remove_dates_{}.png",
+            "sh148_exif_file_tool_png_remove_dates_{}.png",
             std::process::id()
         ));
         let _ = fs::remove_file(&path);

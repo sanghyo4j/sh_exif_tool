@@ -2106,7 +2106,7 @@ mod tests {
     #[test]
     fn writes_existing_taken_date_tag_in_place() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_taken_date_test_{}.jpg",
+            "sh148_exif_file_tool_taken_date_test_{}.jpg",
             std::process::id()
         ));
         std::fs::write(&path, minimal_jpeg_with_datetime_original("2012:08:27 00:29:55"))
@@ -2123,7 +2123,7 @@ mod tests {
     #[test]
     fn writes_existing_camera_make_tag_in_place() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_camera_make_test_{}.jpg",
+            "sh148_exif_file_tool_camera_make_test_{}.jpg",
             std::process::id()
         ));
         std::fs::write(&path, minimal_jpeg_with_camera_make("Canon"))
@@ -2140,7 +2140,7 @@ mod tests {
     #[test]
     fn writes_existing_camera_model_tag_in_place() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_camera_model_test_{}.jpg",
+            "sh148_exif_file_tool_camera_model_test_{}.jpg",
             std::process::id()
         ));
         std::fs::write(&path, minimal_jpeg_with_camera_model("Canon"))
@@ -2157,7 +2157,7 @@ mod tests {
     #[test]
     fn generated_exif_file_allows_later_camera_model_write() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_generated_camera_model_test_{}.jpg",
+            "sh148_exif_file_tool_generated_camera_model_test_{}.jpg",
             std::process::id()
         ));
         let backup_path = exif_backup_path(&path);
@@ -2178,7 +2178,7 @@ mod tests {
     #[test]
     fn writes_existing_lens_model_tag_in_place() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_lens_model_test_{}.jpg",
+            "sh148_exif_file_tool_lens_model_test_{}.jpg",
             std::process::id()
         ));
         std::fs::write(&path, minimal_jpeg_with_lens_model("EF24-70mm"))
@@ -2195,7 +2195,7 @@ mod tests {
     #[test]
     fn removes_gps_information() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_remove_gps_test_{}.jpg",
+            "sh148_exif_file_tool_remove_gps_test_{}.jpg",
             std::process::id()
         ));
         std::fs::write(&path, minimal_jpeg_with_gps()).unwrap();
@@ -2218,7 +2218,7 @@ mod tests {
     #[test]
     fn creates_new_exif_file_when_jpeg_has_no_exif() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_no_exif_test_{}.jpg",
+            "sh148_exif_file_tool_no_exif_test_{}.jpg",
             std::process::id()
         ));
         std::fs::write(&path, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
@@ -2232,7 +2232,7 @@ mod tests {
             camera_make: "Sony".to_string(),
             camera_model: "A7C".to_string(),
             lens_model: "FE 35mm F1.8".to_string(),
-            software: "sh_exif_tool".to_string(),
+            software: "SH148 EXIF-File Tool".to_string(),
             artist: "tester".to_string(),
             shutter_speed: "1/125".to_string(),
             aperture: "f/2.8".to_string(),
@@ -2273,7 +2273,7 @@ mod tests {
     #[test]
     fn creates_exif_without_backup_when_disabled() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_no_backup_test_{}.jpg",
+            "sh148_exif_file_tool_no_backup_test_{}.jpg",
             std::process::id()
         ));
         let backup_path = exif_backup_path(&path);
@@ -2297,7 +2297,7 @@ mod tests {
     #[test]
     fn refuses_to_add_missing_tag_to_existing_exif() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_missing_tag_test_{}.jpg",
+            "sh148_exif_file_tool_missing_tag_test_{}.jpg",
             std::process::id()
         ));
         std::fs::write(&path, minimal_jpeg_with_camera_make("Canon")).unwrap();
@@ -2314,7 +2314,7 @@ mod tests {
     #[test]
     fn repairs_existing_exif_when_camera_model_tag_is_missing() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_repair_missing_camera_model_test_{}.jpg",
+            "sh148_exif_file_tool_repair_missing_camera_model_test_{}.jpg",
             std::process::id()
         ));
         let backup_path = exif_backup_path(&path);
@@ -2340,7 +2340,7 @@ mod tests {
     #[test]
     fn repairs_existing_exif_without_backup_when_disabled() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_repair_no_backup_test_{}.jpg",
+            "sh148_exif_file_tool_repair_no_backup_test_{}.jpg",
             std::process::id()
         ));
         let backup_path = exif_backup_path(&path);
@@ -2362,7 +2362,7 @@ mod tests {
     #[test]
     fn refuses_to_rewrite_existing_exif_structure() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_existing_exif_rewrite_test_{}.jpg",
+            "sh148_exif_file_tool_existing_exif_rewrite_test_{}.jpg",
             std::process::id()
         ));
         std::fs::write(&path, minimal_jpeg_with_camera_make("Canon")).unwrap();
@@ -2380,7 +2380,7 @@ mod tests {
     #[test]
     fn rewrites_generated_exif_file_in_place() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_generated_exif_test_{}.jpg",
+            "sh148_exif_file_tool_generated_exif_test_{}.jpg",
             std::process::id()
         ));
         let backup_path = exif_backup_path(&path);
@@ -2412,7 +2412,7 @@ mod tests {
     #[test]
     fn rewrites_basic_generated_exif_shape_in_place() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_basic_generated_shape_{}.jpg",
+            "sh148_exif_file_tool_basic_generated_shape_{}.jpg",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
@@ -2434,7 +2434,7 @@ mod tests {
     #[test]
     fn removes_every_exif_app1_segment_but_preserves_other_app1_data() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_remove_all_exif_{}.jpg",
+            "sh148_exif_file_tool_remove_all_exif_{}.jpg",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);

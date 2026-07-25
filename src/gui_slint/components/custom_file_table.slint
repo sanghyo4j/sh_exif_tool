@@ -24,9 +24,9 @@ component MenuRow inherits Rectangle {
     callback clicked();
 
     x: 1px;
-    width: 134px;
-    height: 31px;
-    background: touch.has-hover && enabled ? (danger ? #fff1f1 : #eaf4ff) : #ffffff;
+    width: 150px;
+    height: 28px;
+    background: touch.has-hover && enabled ? #d9eaf7 : #f2f2f2;
 
     Text {
         x: 12px;
@@ -34,7 +34,7 @@ component MenuRow inherits Rectangle {
         height: 100%;
         text: root.title;
         font-size: FontSettings.font_size_pt * 1pt;
-        color: !root.enabled ? #9aa8b2 : (root.danger ? #b42318 : #1f2933);
+        color: !root.enabled ? #929292 : #202020;
         vertical-alignment: center;
     }
 
@@ -70,11 +70,22 @@ export component CustomFileTable inherits Rectangle {
 
     property <length> menu_x: 0px;
     property <length> menu_y: 0px;
-    property <length> menu_width: 136px;
-    property <length> menu_height: 161px;
+    property <length> menu_width: 152px;
+    property <bool> context_target_is_dir: root.selected_index >= 0 && root.selected_index < root.files.length && root.files[root.selected_index].is_dir;
+    property <length> menu_height: root.context_target_is_dir ? 170px : 142px;
 
     background: #ffffff;
     forward-focus: focus_scope;
+
+    background_close_area := TouchArea {
+        width: 100%;
+        height: 100%;
+        pointer-event(event) => {
+            if (root.context_menu_visible && event.kind == PointerEventKind.down) {
+                root.context_menu_visible = false;
+            }
+        }
+    }
 
     VerticalLayout {
         width: 100%;
@@ -93,11 +104,11 @@ export component CustomFileTable inherits Rectangle {
                 spacing: 0px;
 
                 Rectangle { width: 22px; }
-                Text { width: parent.width - 22px - media_date_header.width - size_header.width - modified_header.width - metadata_header.width - 20px; text: "Filename"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; overflow: elide; }
-                size_header := Text { width: 78px; text: "Size"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; }
-                modified_header := Text { width: 146px; text: "Modified"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; }
-                media_date_header := Text { width: 150px; text: "Media Date"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; overflow: elide; }
-                metadata_header := Text { width: 68px; text: "Metadata"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 700; vertical-alignment: center; horizontal-alignment: center; }
+                Text { width: parent.width - 22px - media_date_header.width - size_header.width - modified_header.width - metadata_header.width - 20px; text: "Filename"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; overflow: elide; }
+                size_header := Text { width: 78px; text: "Size"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; }
+                modified_header := Text { width: 146px; text: "Modified"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; }
+                media_date_header := Text { width: 150px; text: "Media Date"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; overflow: elide; }
+                metadata_header := Text { width: 68px; text: "Metadata"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; horizontal-alignment: center; }
             }
 
             HDivider { y: parent.height - 1px; }
@@ -164,20 +175,17 @@ export component CustomFileTable inherits Rectangle {
         y: root.menu_y;
         width: root.menu_width;
         height: root.menu_height;
-        background: #ffffff;
+        background: #f2f2f2;
         border-width: 1px;
-        border-color: #cfd8dc;
-        border-radius: 3px;
+        border-color: #a0a0a0;
+        border-radius: 0px;
 
-        MenuRow { y: 1px; title: "Refresh"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.reload_requested(); } }
-        HDivider { y: 32px; background: #edf0f2; }
-        MenuRow { y: 33px; title: "Rename"; danger: false; enabled: root.selected_recyclable_count == 1; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count == 1) { root.rename_requested(root.selected_index); } } }
-        HDivider { y: 64px; background: #edf0f2; }
-        MenuRow { y: 65px; title: "Copy"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.copy_requested(); } } }
-        HDivider { y: 96px; background: #edf0f2; }
-        MenuRow { y: 97px; title: "Paste"; danger: false; enabled: root.copied_file_count > 0; clicked => { root.context_menu_visible = false; if (root.copied_file_count > 0) { root.paste_requested(); } } }
-        HDivider { y: 128px; background: #edf0f2; }
-        MenuRow { y: 129px; title: "Delete"; danger: true; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.delete_requested(); } } }
+        if root.context_target_is_dir: MenuRow { y: 1px; title: "Open (O)"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.row_activated(root.selected_index); } }
+        MenuRow { y: root.context_target_is_dir ? 29px : 1px; title: "Refresh (E)"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.reload_requested(); } }
+        MenuRow { y: root.context_target_is_dir ? 57px : 29px; title: "Rename (M)"; danger: false; enabled: root.selected_recyclable_count == 1; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count == 1) { root.rename_requested(root.selected_index); } } }
+        MenuRow { y: root.context_target_is_dir ? 85px : 57px; title: "Copy (C)"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.copy_requested(); } } }
+        MenuRow { y: root.context_target_is_dir ? 113px : 85px; title: "Paste (P)"; danger: false; enabled: root.copied_file_count > 0; clicked => { root.context_menu_visible = false; if (root.copied_file_count > 0) { root.paste_requested(); } } }
+        MenuRow { y: root.context_target_is_dir ? 141px : 113px; title: "Delete (D)"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.delete_requested(); } } }
     }
 
     focus_scope := FocusScope {
@@ -187,6 +195,40 @@ export component CustomFileTable inherits Rectangle {
         height: 0px;
 
         key-pressed(event) => {
+            if (event.text == Key.Escape && root.context_menu_visible) {
+                root.context_menu_visible = false;
+                return accept;
+            }
+            if (root.context_menu_visible && (event.text == "O" || event.text == "o") && !event.modifiers.control && root.context_target_is_dir) {
+                root.context_menu_visible = false;
+                root.row_activated(root.selected_index);
+                return accept;
+            }
+            if (root.context_menu_visible && (event.text == "E" || event.text == "e") && !event.modifiers.control) {
+                root.context_menu_visible = false;
+                root.reload_requested();
+                return accept;
+            }
+            if (root.context_menu_visible && (event.text == "M" || event.text == "m") && !event.modifiers.control && root.selected_recyclable_count == 1) {
+                root.context_menu_visible = false;
+                root.rename_requested(root.selected_index);
+                return accept;
+            }
+            if (root.context_menu_visible && (event.text == "C" || event.text == "c") && !event.modifiers.control && root.selected_recyclable_count > 0) {
+                root.context_menu_visible = false;
+                root.copy_requested();
+                return accept;
+            }
+            if (root.context_menu_visible && (event.text == "P" || event.text == "p") && !event.modifiers.control && root.copied_file_count > 0) {
+                root.context_menu_visible = false;
+                root.paste_requested();
+                return accept;
+            }
+            if (root.context_menu_visible && (event.text == "D" || event.text == "d") && !event.modifiers.control && root.selected_recyclable_count > 0) {
+                root.context_menu_visible = false;
+                root.delete_requested();
+                return accept;
+            }
             if ((event.text == "A" || event.text == "a") && event.modifiers.control) {
                 root.context_menu_visible = false;
                 root.select_all_requested();

@@ -425,7 +425,7 @@ mod tests {
         let moov = atom(b"moov", &atom(b"mvhd", &mvhd_payload));
         let ftyp = atom(b"ftyp", b"isom\0\0\0\0isom");
         let mdat = atom(b"mdat", &[0; 32]);
-        let path = std::env::temp_dir().join(format!("sh_exif_tool_mp4_scan_{}.mp4", std::process::id()));
+        let path = std::env::temp_dir().join(format!("sh148_exif_file_tool_mp4_scan_{}.mp4", std::process::id()));
         let mut bytes = ftyp;
         bytes.extend_from_slice(&mdat);
         bytes.extend_from_slice(&moov);
@@ -475,7 +475,7 @@ mod tests {
         let ftyp = atom(b"ftyp", b"isom\0\0\0\0isom");
         let mdat = atom(b"mdat", &[0x5a; 64]);
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_mp4_write_{}.mp4",
+            "sh148_exif_file_tool_mp4_write_{}.mp4",
             std::process::id()
         ));
         let original_bytes = [ftyp, mdat, moov].concat();

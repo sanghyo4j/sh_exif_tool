@@ -18,6 +18,7 @@ export component SectionHeader inherits Rectangle {
         height: 100%;
         pointer-event(event) => {
             if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.metadata_section != "") {
+                MetadataContextMenuState.x = section_touch.absolute-position.x + section_touch.mouse-x;
                 MetadataContextMenuState.y = section_touch.absolute-position.y + section_touch.mouse-y;
                 root.section_right_clicked(root.metadata_section);
             }
@@ -38,7 +39,7 @@ export component SectionHeader inherits Rectangle {
         height: 100%;
         text: title;
         font-size: max(9pt, (FontSettings.font_size_pt - 1) * 1pt);
-        font-weight: 800;
+        font-weight: 600;
         color: #203d4e;
         vertical-alignment: center;
         overflow: elide;
@@ -59,7 +60,7 @@ export component SectionHeader inherits Rectangle {
             height: 100%;
             text: root.action_title;
             font-size: max(9pt, (FontSettings.font_size_pt - 1) * 1pt);
-            font-weight: 700;
+            font-weight: 600;
             color: !root.action_enabled ? #9aa1a6 : action_area.has-hover ? #9a3412 : #203d4e;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -100,6 +101,7 @@ export component EditableInfoRow inherits Rectangle {
         height: 100%;
         pointer-event(event) => {
             if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.metadata_key != "") {
+                MetadataContextMenuState.x = tag_touch.absolute-position.x + tag_touch.mouse-x;
                 MetadataContextMenuState.y = tag_touch.absolute-position.y + tag_touch.mouse-y;
                 root.metadata_right_clicked(root.metadata_key, root.value);
             }
@@ -245,6 +247,7 @@ export component ReadOnlyInfoRow inherits Rectangle {
         height: 100%;
         pointer-event(event) => {
             if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.metadata_key != "") {
+                MetadataContextMenuState.x = tag_touch.absolute-position.x + tag_touch.mouse-x;
                 MetadataContextMenuState.y = tag_touch.absolute-position.y + tag_touch.mouse-y;
                 root.metadata_right_clicked(root.metadata_key, root.value);
             }

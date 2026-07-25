@@ -28,7 +28,22 @@ pub fn read_directory(path: &Path) -> Result<Vec<FileSystemEntry>, String> {
         })
         .collect();
 
-    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.path.cmp(&b.path)));
+    entries.sort_by(|a, b| {
+        let a_name = a
+            .path
+            .file_name()
+            .unwrap_or(a.path.as_os_str())
+            .to_string_lossy();
+        let b_name = b
+            .path
+            .file_name()
+            .unwrap_or(b.path.as_os_str())
+            .to_string_lossy();
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a_name.to_lowercase().cmp(&b_name.to_lowercase()))
+            .then_with(|| a_name.cmp(&b_name))
+    });
     Ok(entries)
 }
 
@@ -73,7 +88,7 @@ pub fn move_trailing_numbers_to_front(paths: &[PathBuf]) -> Result<usize, String
         let mut attempt = 0usize;
         let temporary = loop {
             let candidate = directory.join(format!(
-                ".sh_exif_tool_rename_{}_{}_{}.tmp",
+                ".sh148_exif_file_tool_rename_{}_{}_{}.tmp",
                 std::process::id(),
                 index,
                 attempt
@@ -692,6 +707,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn directory_sort_is_case_insensitive_with_folders_first() {
+        let directory = std::env::temp_dir().join(format!(
+            "sh148_exif_file_tool_case_sort_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::create_dir(directory.join("Album")).unwrap();
+        std::fs::create_dir(directory.join("albums")).unwrap();
+        std::fs::create_dir(directory.join("Video")).unwrap();
+        std::fs::write(directory.join("A-file.jpg"), b"a").unwrap();
+
+        let entries = read_directory(&directory).unwrap();
+        let names: Vec<_> = entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        assert_eq!(names, ["Album", "albums", "Video", "A-file.jpg"]);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn moves_only_delimited_two_or_three_digit_trailing_numbers() {
         assert_eq!(
             move_trailing_number_to_front_name(Path::new("xxxx_xxxx_001.jpg")).as_deref(),
@@ -710,7 +758,7 @@ mod tests {
     #[test]
     fn renames_selected_matching_files_only() {
         let directory = std::env::temp_dir().join(format!(
-            "sh_exif_tool_trailing_rename_{}_{}",
+            "sh148_exif_file_tool_trailing_rename_{}_{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -740,7 +788,7 @@ mod tests {
     fn duplicate_preserves_file_times() {
         let dir = std::env::temp_dir();
         let source_path = dir.join(format!(
-            "sh_exif_tool_duplicate_created_source_{}.jpg",
+            "sh148_exif_file_tool_duplicate_created_source_{}.jpg",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&source_path);

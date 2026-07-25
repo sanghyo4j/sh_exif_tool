@@ -30,7 +30,7 @@ mod tests {
     #[test]
     fn fast_scan_matches_existing_reader_for_basic_exif() {
         let path = std::env::temp_dir().join(format!(
-            "sh_exif_tool_jpeg_scan_equivalence_{}.jpg",
+            "sh148_exif_file_tool_jpeg_scan_equivalence_{}.jpg",
             std::process::id()
         ));
         let bytes = minimal_jpeg_with_taken_date("2012:08:15 02:30:00");

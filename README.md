@@ -1,1 +1,1 @@
-# sh_exif_tool
+# SH148 EXIF-File Tool

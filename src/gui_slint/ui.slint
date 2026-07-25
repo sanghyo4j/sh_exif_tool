@@ -13,9 +13,9 @@ export component MainWindow inherits Window {
     width: 1200px;
     height: 800px;
     background: #ffffff;
-    default-font-family: "Malgun Gothic";
+    default-font-family: "Segoe UI Variable Text";
     default-font-size: 10pt;
-    title: "Rust EXIF Tool";
+    title: "SH148 EXIF-File Tool";
 
     in property <string> current_path: "C:/";
     in-out property <[FileEntry]> files;
@@ -147,8 +147,7 @@ export component MainWindow inherits Window {
     in-out property <string> shift_media_date_minutes: "0";
     in-out property <string> shift_media_date_seconds: "0";
     in-out property <string> shift_media_date_preview: "";
-    in-out property <bool> toast_visible: false;
-    in-out property <string> toast_text: "";
+    in-out property <string> activity_text: "Ready";
     in-out property <bool> file_context_menu_visible: false;
     in-out property <bool> exif_context_menu_visible: false;
     in-out property <bool> exif_context_paste_enabled: false;
@@ -630,9 +629,9 @@ export component MainWindow inherits Window {
         }
 
         metadata_panel := MetadataPanel {
-                x: 756px;
+                x: 752px;
                 y: 0px;
-                width: max(320px, root.width - 756px);
+                width: max(320px, root.width - 752px);
                 height: 100%;
                 selected_file_count: root.selected_file_count;
                 selected_name <=> root.selected_name;
@@ -837,13 +836,13 @@ export component MainWindow inherits Window {
     }
 
     if root.exif_context_menu_visible: TouchArea {
-        width: 756px;
+        width: 100%;
         height: 100%;
         clicked => { root.exif_context_menu_visible = false; }
     }
 
     if root.exif_context_menu_visible: Rectangle {
-        x: 600px;
+        x: min(root.width - 154px, max(2px, MetadataContextMenuState.x));
         y: min(root.height - 91px, max(42px, MetadataContextMenuState.y));
         width: 152px;
         height: 65px;
@@ -1284,26 +1283,6 @@ export component MainWindow inherits Window {
         }
     }
 
-    if toast_visible: Rectangle {
-        x: (root.width - self.width) / 2;
-        y: 54px;
-        width: 240px;
-        height: 38px;
-        background: #263238ee;
-        border-radius: 4px;
-
-        Text {
-            x: 16px;
-            width: parent.width - 32px;
-            height: 100%;
-            text: root.toast_text;
-            color: #ffffff;
-            font-size: FontSettings.font_size_pt * 1pt;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-    }
-
     HDivider { y: root.height - 27px; }
 
     Rectangle {
@@ -1314,14 +1293,27 @@ export component MainWindow inherits Window {
 
         Text {
             x: 10px;
-            width: max(0px, parent.width - font_size_status.width - 24px);
+            width: max(0px, parent.width - file_count_status.width - font_size_status.width - 36px);
+            height: 100%;
+            text: root.activity_text;
+            font-size: FontSettings.font_size_pt * 1pt;
+            color: #4f5f68;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        file_count_status := Text {
+            x: parent.width - font_size_status.width - self.width - 20px;
+            width: 220px;
             height: 100%;
             text: root.selected_file_count > 0
                 ? root.selected_file_count + " selected / " + root.item_count + (root.item_count == 1 ? " file" : " files")
                 : root.item_count + (root.item_count == 1 ? " file" : " files");
             font-size: FontSettings.font_size_pt * 1pt;
             color: #666666;
+            horizontal-alignment: right;
             vertical-alignment: center;
+            overflow: elide;
         }
 
         font_size_status := Text {

@@ -141,6 +141,8 @@ impl GuiRunner for SlintRunner {
         ui.global::<Palette>().set_color_scheme(ColorScheme::Light);
         let app = Rc::new(RefCell::new(SlintApp::new()));
         let copied_files = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+        let pending_filename_renames =
+            Rc::new(RefCell::new(HashMap::<PathBuf, String>::new()));
         let pending_filename_taken_dates = Rc::new(RefCell::new(HashMap::<PathBuf, String>::new()));
         let pending_created_dates = Rc::new(RefCell::new(HashMap::<PathBuf, SystemTime>::new()));
         let pending_modified_dates = Rc::new(RefCell::new(HashMap::<PathBuf, SystemTime>::new()));
@@ -185,8 +187,10 @@ impl GuiRunner for SlintRunner {
             let ui_handle = ui.as_weak();
             let app_handle = app.clone();
             let schedule_scan = schedule_media_scan.clone();
+            let pending_filename_renames = pending_filename_renames.clone();
             move |selected_path: Option<PathBuf>| {
                 if let Some(ui) = ui_handle.upgrade() {
+                    pending_filename_renames.borrow_mut().clear();
                     let mut app = app_handle.borrow_mut();
                     let selected_index = selected_path
                         .as_deref()
@@ -262,10 +266,7 @@ impl GuiRunner for SlintRunner {
             let Some(_path) = app_handle.borrow().path_for_ui_index(ui.get_selected_index()) else { return; };
             let key = key.to_string();
             let value = value.to_string();
-            let paste_enabled = (is_writable_exif_key(&key)
-                || (ui.get_selected_media_kind().as_str() == "png"
-                    && ui.get_selected_file_count() == 1
-                    && is_writable_png_key(&key)))
+            let paste_enabled = is_writable_metadata_key(&ui, &key)
                 && matches!(*clipboard.borrow(), Some(ExifClipboard::Tag { .. }));
             *context_target.borrow_mut() = Some(ExifContextTarget::Tag { key, value });
             ui.set_exif_context_paste_enabled(paste_enabled);
@@ -328,7 +329,7 @@ impl GuiRunner for SlintRunner {
             let Some(target) = context_target.borrow().clone() else { return; };
             let values = match (target, clipboard.borrow().clone()) {
                 (ExifContextTarget::Tag { key, .. }, Some(ExifClipboard::Tag { value, .. }))
-                    if is_writable_exif_key(&key) => Some(vec![(key, value)]),
+                    if is_writable_metadata_key(&ui, &key) => Some(vec![(key, value)]),
                 (
                     ExifContextTarget::Section { section, .. },
                     Some(ExifClipboard::Section { section: source_section, values, .. }),
@@ -500,6 +501,7 @@ impl GuiRunner for SlintRunner {
         });
 
         let app_handle = app.clone();
+        let pending_renames = pending_filename_renames.clone();
         let ui_handle = ui.as_weak();
         ui.on_set_filename_from_media_date(move || {
             if let Some(ui) = ui_handle.upgrade() {
@@ -507,31 +509,93 @@ impl GuiRunner for SlintRunner {
                     let app = app_handle.borrow();
                     selected_file_paths(&app)
                 };
-                if selected_paths.len() != 1 {
-                    show_message(&ui, "Unable to Set Filename", "Select one file before setting its filename from Media Date.");
+                if selected_paths.is_empty() {
+                    show_message(
+                        &ui,
+                        "Unable to Set Filename",
+                        "Select one or more files before setting filenames from Media Date.",
+                    );
                     return;
                 }
 
-                let path = &selected_paths[0];
-                let media_date = scan_media_file(path).media_date;
-                let new_name = match filename_from_media_date(
-                    path,
-                    &media_date,
-                    ui.get_show_extension_in_file_name(),
-                ) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        show_message(&ui, "Unable to Set Filename", &err);
-                        return;
-                    }
-                };
+                if selected_paths.len() == 1 {
+                    pending_renames.borrow_mut().clear();
+                    let path = &selected_paths[0];
+                    let media_date = scan_media_file(path).media_date;
+                    let new_name = match filename_from_media_date(
+                        path,
+                        &media_date,
+                        ui.get_show_extension_in_file_name(),
+                    ) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            show_message(&ui, "Unable to Set Filename", &err);
+                            return;
+                        }
+                    };
 
-                ui.set_selected_name(new_name.into());
-                update_metadata_dirty_state(&ui);
+                    ui.set_selected_name(new_name.into());
+                    update_metadata_dirty_state(&ui);
+                    return;
+                }
+
+                let mut reserved_names = HashSet::new();
+                let mut staged = HashMap::new();
+                let mut skipped_count = 0usize;
+                for path in &selected_paths {
+                    let media_date = scan_media_file(path).media_date;
+                    let new_name = match filename_from_media_date_with_reserved(
+                        path,
+                        &media_date,
+                        true,
+                        &mut reserved_names,
+                    ) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            skipped_count += 1;
+                            continue;
+                        }
+                    };
+                    if path.file_name().is_some_and(|value| value == new_name.as_str()) {
+                        skipped_count += 1;
+                        continue;
+                    }
+                    staged.insert(path.clone(), new_name);
+                }
+
+                if staged.is_empty() {
+                    show_message(
+                        &ui,
+                        "Unable to Set Filename",
+                        "No selected file has a usable Media Date or requires renaming.",
+                    );
+                    return;
+                }
+
+                let staged_count = staged.len();
+                *pending_renames.borrow_mut() = staged;
+                ui.set_selected_name("".into());
+                ui.set_selected_name_status("Mixed".into());
+                ui.set_selected_name_dirty(true);
+                ui.set_metadata_dirty(true);
+                if skipped_count == 0 {
+                    show_toast(
+                        &ui,
+                        &format!("Staged {staged_count} filename(s). Ctrl+S to save."),
+                    );
+                } else {
+                    show_toast(
+                        &ui,
+                        &format!(
+                            "Staged {staged_count}; skipped {skipped_count}. Ctrl+S to save."
+                        ),
+                    );
+                }
             }
         });
 
         let app_handle = app.clone();
+        let pending_renames = pending_filename_renames.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
         let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
@@ -540,6 +604,7 @@ impl GuiRunner for SlintRunner {
         let schedule_scan = schedule_media_scan.clone();
         ui.on_table_row_selected(move |index, ctrl, shift| {
             if let Some(ui) = ui_handle.upgrade() {
+                pending_renames.borrow_mut().clear();
                 pending_taken_dates.borrow_mut().clear();
                 pending_created_dates_handle.borrow_mut().clear();
                 pending_modified_dates_handle.borrow_mut().clear();
@@ -555,6 +620,7 @@ impl GuiRunner for SlintRunner {
         });
 
         let app_handle = app.clone();
+        let pending_renames = pending_filename_renames.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
         let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
@@ -563,6 +629,7 @@ impl GuiRunner for SlintRunner {
         let schedule_scan = schedule_media_scan.clone();
         ui.on_select_all_table_rows(move || {
             let Some(ui) = ui_handle.upgrade() else { return; };
+            pending_renames.borrow_mut().clear();
             pending_taken_dates.borrow_mut().clear();
             pending_created_dates_handle.borrow_mut().clear();
             pending_modified_dates_handle.borrow_mut().clear();
@@ -1175,6 +1242,7 @@ impl GuiRunner for SlintRunner {
         });
 
         let app_handle = app.clone();
+        let pending_renames = pending_filename_renames.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
         let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
@@ -1182,6 +1250,7 @@ impl GuiRunner for SlintRunner {
         let ui_handle = ui.as_weak();
         ui.on_revert_changes(move || {
             if let Some(ui) = ui_handle.upgrade() {
+                pending_renames.borrow_mut().clear();
                 pending_taken_dates.borrow_mut().clear();
                 pending_created_dates_handle.borrow_mut().clear();
                 pending_modified_dates_handle.borrow_mut().clear();
@@ -1456,6 +1525,7 @@ impl GuiRunner for SlintRunner {
 
         let app_handle = app.clone();
         let refresh = refresh_ui.clone();
+        let pending_renames = pending_filename_renames.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
         let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
@@ -1464,6 +1534,27 @@ impl GuiRunner for SlintRunner {
         let ui_handle = ui.as_weak();
         ui.on_apply_changes(move || {
             if let Some(ui) = ui_handle.upgrade() {
+                if !pending_renames.borrow().is_empty() {
+                    let plan = pending_renames.borrow().clone();
+                    let renamed_paths = match apply_filename_rename_plan(&plan) {
+                        Ok(paths) => paths,
+                        Err(err) => {
+                            show_message(&ui, "Rename Failed", &err);
+                            return;
+                        }
+                    };
+                    let renamed_count = renamed_paths.len();
+                    let refresh_path = renamed_paths.last().cloned();
+                    pending_renames.borrow_mut().clear();
+                    {
+                        let mut app = app_handle.borrow_mut();
+                        app.load_folder();
+                    }
+                    refresh(refresh_path);
+                    show_toast(&ui, &format!("Renamed {renamed_count} file(s)."));
+                    return;
+                }
+
                 if ui.get_selected_name_dirty() {
                     let requested_name = ui.get_selected_name().trim().to_string();
 
@@ -2433,6 +2524,20 @@ fn filename_from_media_date(
     media_date: &str,
     show_extension: bool,
 ) -> Result<String, String> {
+    filename_from_media_date_with_reserved(
+        current_path,
+        media_date,
+        show_extension,
+        &mut HashSet::new(),
+    )
+}
+
+fn filename_from_media_date_with_reserved(
+    current_path: &std::path::Path,
+    media_date: &str,
+    show_extension: bool,
+    reserved_names: &mut HashSet<String>,
+) -> Result<String, String> {
     let datetime = NaiveDateTime::parse_from_str(media_date.trim(), "%Y-%m-%d %H:%M:%S")
         .map_err(|_| "The selected file does not have a usable Media Date.".to_string())?;
     let base = datetime.format("%Y%m%d_%H%M%S").to_string();
@@ -2452,12 +2557,41 @@ fn filename_from_media_date(
             _ => stem.clone(),
         };
         let candidate = parent.join(&full_name);
-        if candidate == current_path || !candidate.exists() {
+        let candidate_key = candidate.to_string_lossy().to_lowercase();
+        if (candidate == current_path || !candidate.exists())
+            && !reserved_names.contains(&candidate_key)
+        {
+            reserved_names.insert(candidate_key);
             return Ok(if show_extension { full_name } else { stem });
         }
     }
 
     Err("Could not find an available filename for the Media Date.".to_string())
+}
+
+fn apply_filename_rename_plan(
+    plan: &HashMap<PathBuf, String>,
+) -> Result<Vec<PathBuf>, String> {
+    let mut entries: Vec<_> = plan.iter().collect();
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+    let mut committed = Vec::with_capacity(entries.len());
+
+    for (source, new_name) in entries {
+        match rename_entry(source, new_name) {
+            Ok(target) => committed.push((source.clone(), target)),
+            Err(err) => {
+                for (previous_source, previous_target) in committed.iter().rev() {
+                    let _ = std::fs::rename(previous_target, previous_source);
+                }
+                return Err(format!("Failed to rename {}: {err}", source.display()));
+            }
+        }
+    }
+
+    Ok(committed
+        .into_iter()
+        .map(|(_, target)| target)
+        .collect())
 }
 
 fn selected_file_paths(app: &SlintApp) -> Vec<PathBuf> {
@@ -3250,14 +3384,7 @@ fn update_metadata_dirty_state(ui: &MainWindow) {
 }
 
 fn show_toast(ui: &MainWindow, message: &str) {
-    ui.set_toast_text(message.into());
-    ui.set_toast_visible(true);
-    let ui_handle = ui.as_weak();
-    slint::Timer::single_shot(Duration::from_millis(1600), move || {
-        if let Some(ui) = ui_handle.upgrade() {
-            ui.set_toast_visible(false);
-        }
-    });
+    ui.set_activity_text(message.into());
 }
 
 fn stage_or_confirm_exif_paste(
@@ -3332,13 +3459,20 @@ fn is_writable_png_key(key: &str) -> bool {
     matches!(key, "png_creation_time" | "date_time_original")
 }
 
+fn is_writable_metadata_key(ui: &MainWindow, key: &str) -> bool {
+    is_writable_exif_key(key)
+        || (ui.get_selected_media_kind().as_str() == "png"
+            && ui.get_selected_file_count() == 1
+            && is_writable_png_key(key))
+}
+
 fn exif_key_label(key: &str) -> &'static str {
     match key {
         "taken_date" => "Taken Date",
         "png_creation_time" => "Creation Time",
         "date_time_original" => "DateTime Original",
         "date_time_digitized" => "DateTime Digitized",
-        "image_date_time" => "Image Modified (DateTime)",
+        "image_date_time" => "Image Modified DateTime",
         "camera_make" => "Camera Make",
         "camera_model" => "Camera Model",
         "lens_model" => "Lens Model",
@@ -3428,11 +3562,14 @@ mod tests {
         auto_format_date_input,
         auto_format_date_edit,
         earliest_available_timestamp,
+        apply_filename_rename_plan,
         filename_from_media_date,
+        filename_from_media_date_with_reserved,
         parse_media_date_shift,
         shift_display_datetime,
         should_mirror_png_date_source,
     };
+    use std::collections::{HashMap, HashSet};
     use std::time::{Duration, SystemTime};
 
     #[test]
@@ -3530,7 +3667,7 @@ mod tests {
     #[test]
     fn filename_from_media_date_uses_compact_date_and_avoids_collisions() {
         let dir = std::env::temp_dir().join(format!(
-            "sh_exif_tool_media_filename_{}",
+            "sh148_exif_file_tool_media_filename_{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3545,5 +3682,51 @@ mod tests {
         let _ = std::fs::remove_file(collision);
         let _ = std::fs::remove_dir(dir);
         assert_eq!(result, "20120815_023000_001.jpg");
+    }
+
+    #[test]
+    fn filename_from_media_date_reserves_unique_names_for_a_batch() {
+        let dir = std::env::temp_dir().join(format!(
+            "sh148_exif_file_tool_media_filename_batch_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.jpg");
+        let second = dir.join("second.jpg");
+        std::fs::write(&first, []).unwrap();
+        std::fs::write(&second, []).unwrap();
+
+        let mut reserved = HashSet::new();
+        let first_name = filename_from_media_date_with_reserved(
+            &first,
+            "2012-08-15 02:30:00",
+            true,
+            &mut reserved,
+        )
+        .unwrap();
+        let second_name = filename_from_media_date_with_reserved(
+            &second,
+            "2012-08-15 02:30:00",
+            true,
+            &mut reserved,
+        )
+        .unwrap();
+        let plan = HashMap::from([
+            (first.clone(), first_name.clone()),
+            (second.clone(), second_name.clone()),
+        ]);
+
+        let renamed = apply_filename_rename_plan(&plan).unwrap();
+
+        assert_eq!(first_name, "20120815_023000.jpg");
+        assert_eq!(second_name, "20120815_023000_001.jpg");
+        assert_eq!(renamed.len(), 2);
+        assert!(dir.join(first_name).is_file());
+        assert!(dir.join(second_name).is_file());
+
+        for path in renamed {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir(dir);
     }
 }
