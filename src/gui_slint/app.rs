@@ -291,6 +291,32 @@ impl SlintApp {
         &self.selected_indices
     }
 
+    pub fn selected_counts(&self) -> (usize, usize, bool) {
+        let visible = self.visible_files();
+        let mut file_count = 0;
+        let mut recyclable_count = 0;
+        let mut has_dir = false;
+        for index in &self.selected_indices {
+            let Ok(index) = usize::try_from(*index) else {
+                continue;
+            };
+            if index == 0 {
+                has_dir = true;
+                continue;
+            }
+            let Some(entry) = visible.get(index - 1) else {
+                continue;
+            };
+            recyclable_count += 1;
+            if entry.is_dir {
+                has_dir = true;
+            } else {
+                file_count += 1;
+            }
+        }
+        (file_count, recyclable_count, has_dir)
+    }
+
     pub fn select_all_visible_entries(&mut self) {
         self.selected_indices = (1..=self.visible_files().len())
             .filter_map(|index| i32::try_from(index).ok())

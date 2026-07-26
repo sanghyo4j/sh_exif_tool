@@ -82,6 +82,14 @@ pub(crate) fn write_png_date_sources(
     )
 }
 
+pub(crate) fn remove_png_date_source(
+    path: &Path,
+    key: &str,
+    backup_before_changes: bool,
+) -> Result<(), String> {
+    png::remove_date_source(path, key, backup_before_changes)
+}
+
 pub(crate) fn remove_png_date_metadata(
     path: &Path,
     backup_before_changes: bool,

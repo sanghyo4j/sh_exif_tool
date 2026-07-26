@@ -7,6 +7,7 @@ use crate::exif::{
     create_date_only_exif_tiff,
     exif_backup_path,
     read_exif_tiff_metadata,
+    remove_exif_tiff_date_time_original,
     rewrite_exif_tiff_dates,
 };
 
@@ -255,6 +256,103 @@ pub(super) fn remove_date_metadata(
         return Err("PNG date metadata removal verification failed.".to_string());
     }
     Ok(())
+}
+
+pub(super) fn remove_date_source(
+    path: &Path,
+    key: &str,
+    backup_before_changes: bool,
+) -> Result<(), String> {
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    if !has_png_signature(&bytes) {
+        return Err("The selected file is not a valid PNG image.".to_string());
+    }
+    let updated = match key {
+        "png_creation_time" => remove_creation_time_chunks(&bytes)?,
+        "date_time_original" => {
+            let Some(tiff) = find_chunk(&bytes, b"eXIf") else {
+                return Ok(());
+            };
+            let updated_tiff = remove_exif_tiff_date_time_original(tiff)?;
+            replace_or_insert_chunk(&bytes, b"eXIf", &updated_tiff)?
+        }
+        _ => return Err("This PNG metadata row cannot be removed individually.".to_string()),
+    };
+    if updated == bytes {
+        return Ok(());
+    }
+
+    let original_file_metadata = fs::metadata(path).map_err(|err| err.to_string())?;
+    let original_created = original_file_metadata.created().ok();
+    let original_modified = original_file_metadata.modified().ok();
+    if backup_before_changes {
+        let backup_path = exif_backup_path(path);
+        if !backup_path.exists() {
+            fs::copy(path, &backup_path).map_err(|err| err.to_string())?;
+        }
+    }
+    if let Err(err) = fs::write(path, &updated) {
+        let _ = fs::write(path, &bytes);
+        return Err(err.to_string());
+    }
+    if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
+        let _ = fs::write(path, &bytes);
+        let _ = crate::fs::set_file_times(path, original_created, original_modified);
+        return Err(err);
+    }
+    let sources = read_date_sources(path);
+    let removed = match key {
+        "png_creation_time" => sources.creation_time.is_empty(),
+        "date_time_original" => sources.date_time_original.is_empty(),
+        _ => false,
+    };
+    if !removed {
+        let _ = fs::write(path, &bytes);
+        let _ = crate::fs::set_file_times(path, original_created, original_modified);
+        return Err("PNG metadata tag removal verification failed.".to_string());
+    }
+    Ok(())
+}
+
+fn remove_creation_time_chunks(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let mut output = Vec::with_capacity(bytes.len());
+    output.extend_from_slice(PNG_SIGNATURE);
+    let mut offset = PNG_SIGNATURE.len();
+    while offset
+        .checked_add(12)
+        .is_some_and(|minimum| minimum <= bytes.len())
+    {
+        let length = read_be_u32(&bytes[offset..offset + 4])
+            .ok_or_else(|| "Invalid PNG chunk length.".to_string())?
+            as usize;
+        let data_start = offset + 8;
+        let data_end = data_start
+            .checked_add(length)
+            .ok_or_else(|| "PNG chunk length overflow.".to_string())?;
+        let chunk_end = data_end
+            .checked_add(4)
+            .ok_or_else(|| "PNG chunk length overflow.".to_string())?;
+        if chunk_end > bytes.len() {
+            return Err("PNG chunk is truncated.".to_string());
+        }
+        let chunk_type = &bytes[offset + 4..offset + 8];
+        let data = &bytes[data_start..data_end];
+        let remove =
+            chunk_type == b"tEXt" && text_chunk_value(data, CREATION_TIME_KEYWORD).is_some();
+        if !remove {
+            output.extend_from_slice(&bytes[offset..chunk_end]);
+        }
+        offset = chunk_end;
+        if chunk_type == b"IEND" {
+            output.extend_from_slice(&bytes[offset..]);
+            offset = bytes.len();
+            break;
+        }
+    }
+    if offset != bytes.len() {
+        return Err("PNG contains invalid trailing chunk data.".to_string());
+    }
+    Ok(output)
 }
 
 fn find_text_chunk(bytes: &[u8], keyword: &[u8]) -> Option<String> {
@@ -633,6 +731,29 @@ mod tests {
         assert_eq!(sources.creation_time, "2015-12-26 03:53:22");
         assert_eq!(sources.date_time_original, "2016-01-02 11:22:33");
         assert_eq!(sources.effective_media_date(), "2016-01-02 11:22:33");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn removes_png_date_sources_individually() {
+        let path = std::env::temp_dir().join(format!(
+            "sh148_exif_file_tool_png_remove_one_date_{}.png",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        fs::write(&path, minimal_png()).unwrap();
+        write_media_date(&path, "2015-12-26 03:53:22", false).unwrap();
+
+        remove_date_source(&path, "png_creation_time", false).unwrap();
+        let sources = read_date_sources(&path);
+        assert_eq!(sources.creation_time, "");
+        assert_eq!(sources.date_time_original, "2015-12-26 03:53:22");
+
+        remove_date_source(&path, "date_time_original", false).unwrap();
+        let sources = read_date_sources(&path);
+        assert_eq!(sources.creation_time, "");
+        assert_eq!(sources.date_time_original, "");
 
         let _ = fs::remove_file(path);
     }

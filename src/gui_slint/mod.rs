@@ -16,6 +16,7 @@ use crate::exif::{
     is_generated_new_exif_path,
     read_exif_metadata,
     remove_exif_metadata,
+    remove_exif_tag,
     remove_gps_information,
     rewrite_basic_exif_metadata,
     rewrite_generated_basic_exif_metadata,
@@ -49,6 +50,7 @@ use crate::fs::{
 };
 use crate::media::{
     read_png_date_sources,
+    remove_png_date_source,
     remove_png_date_metadata,
     scan_media_file,
     write_png_date_sources,
@@ -147,6 +149,8 @@ impl GuiRunner for SlintRunner {
         let pending_created_dates = Rc::new(RefCell::new(HashMap::<PathBuf, SystemTime>::new()));
         let pending_modified_dates = Rc::new(RefCell::new(HashMap::<PathBuf, SystemTime>::new()));
         let pending_exif_removals = Rc::new(RefCell::new(HashSet::<PathBuf>::new()));
+        let pending_exif_tag_removals =
+            Rc::new(RefCell::new(HashMap::<PathBuf, HashSet<String>>::new()));
         let exif_clipboard = Rc::new(RefCell::new(None::<ExifClipboard>));
         let exif_context_target = Rc::new(RefCell::new(None::<ExifContextTarget>));
         let pending_exif_paste = Rc::new(RefCell::new(None::<PendingExifPaste>));
@@ -200,6 +204,7 @@ impl GuiRunner for SlintRunner {
                         app.select_ui_index(selected_index, false, false);
                     }
                     ui.set_current_path(app.current_path.as_str().into());
+                    ui.set_activity_text("Ready".into());
                     ui.set_item_count(app.file_count() as i32);
                     ui.set_files(app.get_ui_model());
                     set_selected_files(&ui, &app);
@@ -268,8 +273,20 @@ impl GuiRunner for SlintRunner {
             let value = value.to_string();
             let paste_enabled = is_writable_metadata_key(&ui, &key)
                 && matches!(*clipboard.borrow(), Some(ExifClipboard::Tag { .. }));
-            *context_target.borrow_mut() = Some(ExifContextTarget::Tag { key, value });
+            *context_target.borrow_mut() = Some(ExifContextTarget::Tag {
+                key: key.clone(),
+                value: value.clone(),
+            });
             ui.set_exif_context_paste_enabled(paste_enabled);
+            ui.set_exif_context_remove_enabled(
+                ui.get_selected_file_count() == 1
+                    && !value.trim().is_empty()
+                    && value.trim() != "-"
+                    && ((ui.get_selected_media_kind().as_str() == "jpeg"
+                        && is_removable_exif_key(&key))
+                        || (ui.get_selected_media_kind().as_str() == "png"
+                            && matches!(key.as_str(), "png_creation_time" | "date_time_original"))),
+            );
             ui.set_exif_context_menu_visible(true);
         });
 
@@ -292,6 +309,7 @@ impl GuiRunner for SlintRunner {
             ) && is_writable_exif_section(&section);
             *context_target.borrow_mut() = Some(ExifContextTarget::Section { section, values: current_values });
             ui.set_exif_context_paste_enabled(paste_enabled);
+            ui.set_exif_context_remove_enabled(false);
             ui.set_exif_context_menu_visible(true);
         });
 
@@ -339,6 +357,39 @@ impl GuiRunner for SlintRunner {
             if let Some(values) = values {
                 stage_or_confirm_exif_paste(&ui, values, &pending_paste);
             }
+        });
+
+        let app_handle = app.clone();
+        let context_target = exif_context_target.clone();
+        let pending_tag_removals = pending_exif_tag_removals.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_exif_context_remove(move || {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(ExifContextTarget::Tag { key, .. }) = context_target.borrow().clone() else {
+                return;
+            };
+            let removable = (ui.get_selected_media_kind().as_str() == "jpeg"
+                && is_removable_exif_key(&key))
+                || (ui.get_selected_media_kind().as_str() == "png"
+                    && matches!(key.as_str(), "png_creation_time" | "date_time_original"));
+            if !removable {
+                return;
+            }
+            let Some(path) = app_handle.borrow().path_for_ui_index(ui.get_selected_index()) else {
+                return;
+            };
+            pending_tag_removals
+                .borrow_mut()
+                .entry(path)
+                .or_default()
+                .insert(key.clone());
+            set_exif_value(&ui, &key, "");
+            set_exif_key_dirty(&ui, &key, false);
+            ui.set_metadata_dirty(true);
+            show_toast(
+                &ui,
+                &format!("Remove staged: '{}'. Ctrl+S to save.", exif_key_label(&key)),
+            );
         });
 
         let pending_paste = pending_exif_paste.clone();
@@ -600,6 +651,7 @@ impl GuiRunner for SlintRunner {
         let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
         let pending_exif_removals_handle = pending_exif_removals.clone();
+        let pending_exif_tag_removals_handle = pending_exif_tag_removals.clone();
         let ui_handle = ui.as_weak();
         let schedule_scan = schedule_media_scan.clone();
         ui.on_table_row_selected(move |index, ctrl, shift| {
@@ -609,6 +661,8 @@ impl GuiRunner for SlintRunner {
                 pending_created_dates_handle.borrow_mut().clear();
                 pending_modified_dates_handle.borrow_mut().clear();
                 pending_exif_removals_handle.borrow_mut().clear();
+                pending_exif_tag_removals_handle.borrow_mut().clear();
+                ui.set_activity_text("Ready".into());
                 let mut app = app_handle.borrow_mut();
                 app.select_ui_index(index, ctrl, shift);
                 ui.set_selected_index(index);
@@ -625,6 +679,7 @@ impl GuiRunner for SlintRunner {
         let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
         let pending_exif_removals_handle = pending_exif_removals.clone();
+        let pending_exif_tag_removals_handle = pending_exif_tag_removals.clone();
         let ui_handle = ui.as_weak();
         let schedule_scan = schedule_media_scan.clone();
         ui.on_select_all_table_rows(move || {
@@ -634,6 +689,8 @@ impl GuiRunner for SlintRunner {
             pending_created_dates_handle.borrow_mut().clear();
             pending_modified_dates_handle.borrow_mut().clear();
             pending_exif_removals_handle.borrow_mut().clear();
+            pending_exif_tag_removals_handle.borrow_mut().clear();
+            ui.set_activity_text("Ready".into());
             let mut app = app_handle.borrow_mut();
             app.select_all_visible_entries();
             ui.set_files(app.get_ui_model());
@@ -1462,7 +1519,7 @@ impl GuiRunner for SlintRunner {
                         )
                         .into(),
                     );
-                    ui.set_confirm_yes_selected(true);
+                    ui.set_confirm_yes_selected(false);
                     ui.set_confirm_trailing_rename_visible(true);
                 }
                 Err(err) => show_message(&ui, "Filename Change Failed", &err),
@@ -1530,6 +1587,7 @@ impl GuiRunner for SlintRunner {
         let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
         let pending_exif_removals_handle = pending_exif_removals.clone();
+        let pending_exif_tag_removals_handle = pending_exif_tag_removals.clone();
         let overwrite_confirmed = date_overwrite_confirmed.clone();
         let ui_handle = ui.as_weak();
         ui.on_apply_changes(move || {
@@ -1611,7 +1669,7 @@ impl GuiRunner for SlintRunner {
                     ui.set_message_text(
                         "Existing date metadata may be overwritten. Continue? (Y/N)".into(),
                     );
-                    ui.set_confirm_yes_selected(true);
+                    ui.set_confirm_yes_selected(false);
                     ui.set_confirm_date_overwrite_visible(true);
                     return;
                 }
@@ -1674,6 +1732,7 @@ impl GuiRunner for SlintRunner {
                     pending_created_dates_handle.borrow_mut().clear();
                     pending_modified_dates_handle.borrow_mut().clear();
                     pending_exif_removals_handle.borrow_mut().clear();
+                    pending_exif_tag_removals_handle.borrow_mut().clear();
                     update_metadata_dirty_state(&ui);
                     {
                         let mut app = app_handle.borrow_mut();
@@ -1685,6 +1744,37 @@ impl GuiRunner for SlintRunner {
 
                 let apply_path = selected_path.clone();
                 if let Some(path) = apply_path.as_ref() {
+                    let staged_tag_removals = pending_exif_tag_removals_handle
+                        .borrow()
+                        .get(path)
+                        .cloned()
+                        .unwrap_or_default();
+                    if !staged_tag_removals.is_empty() {
+                        for key in &staged_tag_removals {
+                            let result = if is_png_path(path) {
+                                remove_png_date_source(path, key, ui.get_backup_before_changes())
+                            } else {
+                                remove_exif_tag(path, key, ui.get_backup_before_changes())
+                            };
+                            if let Err(err) = result {
+                                show_message(&ui, "Remove Tag Failed", &err);
+                                return;
+                            }
+                        }
+                        pending_exif_tag_removals_handle.borrow_mut().remove(path);
+                        if !has_exif_metadata_changes(&ui)
+                            && !ui.get_selected_created_dirty()
+                            && !ui.get_selected_modified_dirty()
+                        {
+                            {
+                                let mut app = app_handle.borrow_mut();
+                                app.load_folder();
+                            }
+                            refresh(selected_path);
+                            show_toast(&ui, "Metadata tag(s) removed.");
+                            return;
+                        }
+                    }
                     if pending_exif_removals_handle.borrow().contains(path) {
                         if let Err(err) =
                             remove_supported_metadata(path, ui.get_backup_before_changes())
@@ -1697,6 +1787,7 @@ impl GuiRunner for SlintRunner {
                         pending_created_dates_handle.borrow_mut().clear();
                         pending_modified_dates_handle.borrow_mut().clear();
                         pending_exif_removals_handle.borrow_mut().clear();
+                        pending_exif_tag_removals_handle.borrow_mut().clear();
                         update_metadata_dirty_state(&ui);
                         {
                             let mut app = app_handle.borrow_mut();
@@ -1920,6 +2011,7 @@ impl GuiRunner for SlintRunner {
                 pending_created_dates_handle.borrow_mut().clear();
                 pending_modified_dates_handle.borrow_mut().clear();
                 pending_exif_removals_handle.borrow_mut().clear();
+                pending_exif_tag_removals_handle.borrow_mut().clear();
                 update_metadata_dirty_state(&ui);
                 {
                     let mut app = app_handle.borrow_mut();
@@ -2060,6 +2152,28 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
 
     if indices.len() == 1 {
         set_selected_file(ui, app, indices[0]);
+        return;
+    }
+
+    if indices.len() > 5 {
+        let (file_count, recyclable_count, has_dir) = app.selected_counts();
+        let summary = format!("{} items selected", indices.len());
+        ui.set_selected_index(*indices.last().unwrap_or(&-1));
+        ui.set_selected_name(summary.clone().into());
+        ui.set_selected_created(String::new().into());
+        ui.set_selected_modified(String::new().into());
+        ui.set_selected_name_status(String::new().into());
+        ui.set_selected_created_status("Mixed".into());
+        ui.set_selected_modified_status("Mixed".into());
+        ui.set_original_selected_name(summary.into());
+        ui.set_original_selected_created(String::new().into());
+        ui.set_original_selected_modified(String::new().into());
+        ui.set_selected_is_dir(has_dir);
+        ui.set_selected_file_count(file_count as i32);
+        ui.set_selected_recyclable_count(recyclable_count as i32);
+        ui.set_selected_delete_message(delete_confirmation_message(recyclable_count as i32).into());
+        set_media_details(ui, "mixed", "", "", "");
+        set_loaded_exif_metadata(ui, ExifMetadata::default());
         return;
     }
 
@@ -2321,6 +2435,12 @@ fn set_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
     ui.set_lens_model(metadata.lens_model.into());
     ui.set_software(metadata.software.into());
     ui.set_artist(metadata.artist.into());
+    ui.set_image_description(metadata.image_description.into());
+    ui.set_copyright(metadata.copyright.into());
+    ui.set_exif_version(metadata.exif_version.into());
+    ui.set_exposure_program(metadata.exposure_program.into());
+    ui.set_white_balance(metadata.white_balance.into());
+    ui.set_focal_length_35mm(metadata.focal_length_35mm.into());
     ui.set_shutter_speed(metadata.shutter_speed.into());
     ui.set_aperture(metadata.aperture.into());
     ui.set_iso_speed(metadata.iso_speed.into());
@@ -2460,6 +2580,12 @@ fn join_metadata(values: &[ExifMetadata]) -> ExifMetadata {
         lens_model: joined_selection_value(values.iter().map(|metadata| metadata.lens_model.clone()).collect()),
         software: joined_selection_value(values.iter().map(|metadata| metadata.software.clone()).collect()),
         artist: joined_selection_value(values.iter().map(|metadata| metadata.artist.clone()).collect()),
+        image_description: joined_selection_value(values.iter().map(|metadata| metadata.image_description.clone()).collect()),
+        copyright: joined_selection_value(values.iter().map(|metadata| metadata.copyright.clone()).collect()),
+        exif_version: joined_selection_value(values.iter().map(|metadata| metadata.exif_version.clone()).collect()),
+        exposure_program: joined_selection_value(values.iter().map(|metadata| metadata.exposure_program.clone()).collect()),
+        white_balance: joined_selection_value(values.iter().map(|metadata| metadata.white_balance.clone()).collect()),
+        focal_length_35mm: joined_selection_value(values.iter().map(|metadata| metadata.focal_length_35mm.clone()).collect()),
         shutter_speed: joined_selection_value(values.iter().map(|metadata| metadata.shutter_speed.clone()).collect()),
         aperture: joined_selection_value(values.iter().map(|metadata| metadata.aperture.clone()).collect()),
         iso_speed: joined_selection_value(values.iter().map(|metadata| metadata.iso_speed.clone()).collect()),
@@ -2898,6 +3024,12 @@ fn collect_current_exif_metadata(ui: &MainWindow) -> ExifMetadata {
         lens_model: ui.get_lens_model().to_string(),
         software: ui.get_software().to_string(),
         artist: ui.get_artist().to_string(),
+        image_description: ui.get_image_description().to_string(),
+        copyright: ui.get_copyright().to_string(),
+        exif_version: ui.get_exif_version().to_string(),
+        exposure_program: ui.get_exposure_program().to_string(),
+        white_balance: ui.get_white_balance().to_string(),
+        focal_length_35mm: ui.get_focal_length_35mm().to_string(),
         shutter_speed: ui.get_shutter_speed().to_string(),
         aperture: ui.get_aperture().to_string(),
         iso_speed: ui.get_iso_speed().to_string(),
@@ -3401,7 +3533,7 @@ fn stage_or_confirm_exif_paste(
         *pending.borrow_mut() = Some(PendingExifPaste { values });
         ui.set_message_title("Confirm Paste".into());
         ui.set_message_text("Destination contains a value. Paste anyway? (Y/N)".into());
-        ui.set_confirm_yes_selected(true);
+        ui.set_confirm_yes_selected(false);
         ui.set_confirm_metadata_paste_visible(true);
         false
     } else {
@@ -3459,6 +3591,40 @@ fn is_writable_png_key(key: &str) -> bool {
     matches!(key, "png_creation_time" | "date_time_original")
 }
 
+fn is_removable_exif_key(key: &str) -> bool {
+    matches!(
+        key,
+        "taken_date"
+            | "date_time_original"
+            | "date_time_digitized"
+            | "image_date_time"
+            | "camera_make"
+            | "camera_model"
+            | "lens_model"
+            | "software"
+            | "artist"
+            | "shutter_speed"
+            | "aperture"
+            | "iso_speed"
+            | "focal_length"
+            | "flash_fired"
+            | "metering_mode"
+            | "image_width"
+            | "image_height"
+            | "orientation"
+            | "color_space"
+            | "gps_latitude"
+            | "gps_longitude"
+            | "gps_altitude"
+            | "image_description"
+            | "copyright"
+            | "exif_version"
+            | "exposure_program"
+            | "white_balance"
+            | "focal_length_35mm"
+    )
+}
+
 fn is_writable_metadata_key(ui: &MainWindow, key: &str) -> bool {
     is_writable_exif_key(key)
         || (ui.get_selected_media_kind().as_str() == "png"
@@ -3478,6 +3644,12 @@ fn exif_key_label(key: &str) -> &'static str {
         "lens_model" => "Lens Model",
         "software" => "Software",
         "artist" => "Artist",
+        "image_description" => "Image Description",
+        "copyright" => "Copyright",
+        "exif_version" => "EXIF Version",
+        "exposure_program" => "Exposure Program",
+        "white_balance" => "White Balance",
+        "focal_length_35mm" => "35mm Focal Length",
         "shutter_speed" => "Shutter Speed",
         "aperture" => "Aperture",
         "iso_speed" => "ISO Speed",
@@ -3487,6 +3659,31 @@ fn exif_key_label(key: &str) -> &'static str {
         "orientation" => "Orientation",
         "color_space" => "Color Space",
         _ => "EXIF Tag",
+    }
+}
+
+fn set_exif_key_dirty(ui: &MainWindow, key: &str, dirty: bool) {
+    match key {
+        "taken_date" => ui.set_taken_date_dirty(dirty),
+        "camera_make" => ui.set_camera_make_dirty(dirty),
+        "camera_model" => ui.set_camera_model_dirty(dirty),
+        "lens_model" => ui.set_lens_model_dirty(dirty),
+        "software" => ui.set_software_dirty(dirty),
+        "artist" => ui.set_artist_dirty(dirty),
+        "shutter_speed" => ui.set_shutter_speed_dirty(dirty),
+        "aperture" => ui.set_aperture_dirty(dirty),
+        "iso_speed" => ui.set_iso_speed_dirty(dirty),
+        "focal_length" => ui.set_focal_length_dirty(dirty),
+        "flash_fired" => ui.set_flash_fired_dirty(dirty),
+        "metering_mode" => ui.set_metering_mode_dirty(dirty),
+        "image_width" => ui.set_image_width_dirty(dirty),
+        "image_height" => ui.set_image_height_dirty(dirty),
+        "orientation" => ui.set_orientation_dirty(dirty),
+        "color_space" => ui.set_color_space_dirty(dirty),
+        "gps_latitude" => ui.set_gps_latitude_dirty(dirty),
+        "gps_longitude" => ui.set_gps_longitude_dirty(dirty),
+        "gps_altitude" => ui.set_gps_altitude_dirty(dirty),
+        _ => {}
     }
 }
 
@@ -3512,6 +3709,12 @@ fn get_exif_value(ui: &MainWindow, key: &str) -> String {
         "lens_model" => ui.get_lens_model().to_string(),
         "software" => ui.get_software().to_string(),
         "artist" => ui.get_artist().to_string(),
+        "image_description" => ui.get_image_description().to_string(),
+        "copyright" => ui.get_copyright().to_string(),
+        "exif_version" => ui.get_exif_version().to_string(),
+        "exposure_program" => ui.get_exposure_program().to_string(),
+        "white_balance" => ui.get_white_balance().to_string(),
+        "focal_length_35mm" => ui.get_focal_length_35mm().to_string(),
         "shutter_speed" => ui.get_shutter_speed().to_string(),
         "aperture" => ui.get_aperture().to_string(),
         "iso_speed" => ui.get_iso_speed().to_string(),
@@ -3539,6 +3742,12 @@ fn set_exif_value(ui: &MainWindow, key: &str, value: &str) {
         "lens_model" => ui.set_lens_model(value.into()),
         "software" => ui.set_software(value.into()),
         "artist" => ui.set_artist(value.into()),
+        "image_description" => ui.set_image_description(value.into()),
+        "copyright" => ui.set_copyright(value.into()),
+        "exif_version" => ui.set_exif_version(value.into()),
+        "exposure_program" => ui.set_exposure_program(value.into()),
+        "white_balance" => ui.set_white_balance(value.into()),
+        "focal_length_35mm" => ui.set_focal_length_35mm(value.into()),
         "shutter_speed" => ui.set_shutter_speed(value.into()),
         "aperture" => ui.set_aperture(value.into()),
         "iso_speed" => ui.set_iso_speed(value.into()),

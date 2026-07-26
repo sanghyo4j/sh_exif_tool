@@ -50,8 +50,8 @@ component MenuRow inherits Rectangle {
 
     x: 1px;
     width: 278px;
-    height: 31px;
-    background: area.has-hover ? (danger ? #fff1f1 : #eaf4ff) : #ffffff;
+    height: 28px;
+    background: area.has-hover ? #d9eaf7 : #f2f2f2;
 
     Text {
         x: 12px;
@@ -59,7 +59,7 @@ component MenuRow inherits Rectangle {
         height: 100%;
         text: root.title;
         font-size: FontSettings.font_size_pt * 1pt;
-        color: root.danger ? #b42318 : #1f2933;
+        color: #202020;
         vertical-alignment: center;
         overflow: elide;
     }
@@ -116,6 +116,12 @@ export component MetadataPanel inherits Rectangle {
     in-out property <string> lens_model;
     in-out property <string> software;
     in-out property <string> artist;
+    in-out property <string> image_description;
+    in-out property <string> copyright;
+    in-out property <string> exif_version;
+    in-out property <string> exposure_program;
+    in-out property <string> white_balance;
+    in-out property <string> focal_length_35mm;
     in-out property <string> shutter_speed;
     in-out property <string> aperture;
     in-out property <string> iso_speed;
@@ -322,7 +328,7 @@ export component MetadataPanel inherits Rectangle {
 
                 VerticalLayout {
                     width: parent.viewport-width;
-                    padding-top: 10px;
+                    padding-top: 0px;
                     padding-bottom: 18px;
                     padding-left: 0px;
                     padding-right: 12px;
@@ -391,6 +397,14 @@ export component MetadataPanel inherits Rectangle {
                     if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "GPS Latitude"; metadata_key: "gps_latitude"; value <=> root.gps_latitude; status <=> root.gps_latitude_status; dirty <=> root.gps_latitude_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "GPS Longitude"; metadata_key: "gps_longitude"; value <=> root.gps_longitude; status <=> root.gps_longitude_status; dirty <=> root.gps_longitude_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "GPS Altitude"; metadata_key: "gps_altitude"; value <=> root.gps_altitude; status <=> root.gps_altitude_status; dirty <=> root.gps_altitude_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+
+                    if root.selected_media_kind == "jpeg" && root.exif_available && (root.image_description != "" || root.copyright != "" || root.exif_version != "" || root.exposure_program != "" || root.white_balance != "" || root.focal_length_35mm != ""): SectionHeader { title: "EXTRA"; }
+                    if root.selected_media_kind == "jpeg" && root.exif_available && root.image_description != "": ReadOnlyInfoRow { label: "Image Description"; metadata_key: "image_description"; value: root.image_description; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available && root.copyright != "": ReadOnlyInfoRow { label: "Copyright"; metadata_key: "copyright"; value: root.copyright; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available && root.exif_version != "": ReadOnlyInfoRow { label: "EXIF Version"; metadata_key: "exif_version"; value: root.exif_version; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available && root.exposure_program != "": ReadOnlyInfoRow { label: "Exposure Program"; metadata_key: "exposure_program"; value: root.exposure_program; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available && root.white_balance != "": ReadOnlyInfoRow { label: "White Balance"; metadata_key: "white_balance"; value: root.white_balance; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available && root.focal_length_35mm != "": ReadOnlyInfoRow { label: "35mm Focal Length"; metadata_key: "focal_length_35mm"; value: root.focal_length_35mm; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
                 }
             }
         }
@@ -437,35 +451,30 @@ export component MetadataPanel inherits Rectangle {
         x: parent.width - 292px;
         y: 30px;
         width: 280px;
-        height: 97px;
-        background: #ffffff;
+        height: 86px;
+        background: #f2f2f2;
         border-width: 1px;
-        border-color: #cfd8dc;
-        border-radius: 3px;
+        border-color: #a0a0a0;
+        border-radius: 0px;
 
         MenuRow { y: 1px; title: "Set Filename from Media Date"; clicked => { root.file_tools_menu_visible = false; root.set_filename_from_media_date(); } }
-        Rectangle { y: 32px; width: 100%; height: 1px; background: #edf0f2; }
-        MenuRow { y: 33px; title: "Set Modified Date from Created Date"; clicked => { root.file_tools_menu_visible = false; root.set_modified_date_from_created_date(); } }
-        Rectangle { y: 64px; width: 100%; height: 1px; background: #edf0f2; }
-        MenuRow { y: 65px; title: "Set File Dates from Media Date"; clicked => { root.file_tools_menu_visible = false; root.set_file_dates_from_media_date(); } }
+        MenuRow { y: 29px; title: "Set Modified Date from Created Date"; clicked => { root.file_tools_menu_visible = false; root.set_modified_date_from_created_date(); } }
+        MenuRow { y: 57px; title: "Set File Dates from Media Date"; clicked => { root.file_tools_menu_visible = false; root.set_file_dates_from_media_date(); } }
     }
 
     if metadata_tools_menu_visible: Rectangle {
         x: parent.width - 292px;
         y: 30px;
         width: 280px;
-        height: (root.selected_media_kind == "jpeg" || root.selected_media_kind == "png") ? 129px : 97px;
-        background: #ffffff;
+        height: (root.selected_media_kind == "jpeg" || root.selected_media_kind == "png") ? 114px : 86px;
+        background: #f2f2f2;
         border-width: 1px;
-        border-color: #cfd8dc;
-        border-radius: 3px;
+        border-color: #a0a0a0;
+        border-radius: 0px;
 
         MenuRow { y: 1px; title: "Set Media Date from Filename"; clicked => { root.metadata_tools_menu_visible = false; root.fill_taken_date_from_filename(); } }
-        Rectangle { y: 32px; width: 100%; height: 1px; background: #edf0f2; }
-        MenuRow { y: 33px; title: "Set Media Date from File Timestamp"; clicked => { root.metadata_tools_menu_visible = false; root.fill_taken_date_from_created_date(); } }
-        Rectangle { y: 64px; width: 100%; height: 1px; background: #edf0f2; }
-        MenuRow { y: 65px; title: "Shift Media Date..."; clicked => { root.metadata_tools_menu_visible = false; root.shift_media_date(); } }
-        if root.selected_media_kind == "jpeg" || root.selected_media_kind == "png": Rectangle { y: 96px; width: 100%; height: 1px; background: #edf0f2; }
-        if root.selected_media_kind == "jpeg" || root.selected_media_kind == "png": MenuRow { y: 97px; title: "Remove Metadata Tags"; danger: true; clicked => { root.metadata_tools_menu_visible = false; root.remove_exif_tags(); } }
+        MenuRow { y: 29px; title: "Set Media Date from File Timestamp"; clicked => { root.metadata_tools_menu_visible = false; root.fill_taken_date_from_created_date(); } }
+        MenuRow { y: 57px; title: "Shift Media Date..."; clicked => { root.metadata_tools_menu_visible = false; root.shift_media_date(); } }
+        if root.selected_media_kind == "jpeg" || root.selected_media_kind == "png": MenuRow { y: 85px; title: "Remove Metadata Tags"; danger: true; clicked => { root.metadata_tools_menu_visible = false; root.remove_exif_tags(); } }
     }
 }

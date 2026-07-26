@@ -41,6 +41,12 @@ export component MainWindow inherits Window {
     in-out property <string> lens_model: "";
     in-out property <string> software: "";
     in-out property <string> artist: "";
+    in-out property <string> image_description: "";
+    in-out property <string> copyright: "";
+    in-out property <string> exif_version: "";
+    in-out property <string> exposure_program: "";
+    in-out property <string> white_balance: "";
+    in-out property <string> focal_length_35mm: "";
     in-out property <string> shutter_speed: "";
     in-out property <string> aperture: "";
     in-out property <string> iso_speed: "";
@@ -139,7 +145,7 @@ export component MainWindow inherits Window {
     in-out property <bool> confirm_metadata_paste_visible: false;
     in-out property <bool> confirm_trailing_rename_visible: false;
     in-out property <bool> confirm_date_overwrite_visible: false;
-    in-out property <bool> confirm_yes_selected: true;
+    in-out property <bool> confirm_yes_selected: false;
     in-out property <bool> shift_media_date_visible: false;
     in-out property <bool> shift_media_date_subtract: false;
     in-out property <string> shift_media_date_days: "0";
@@ -151,10 +157,12 @@ export component MainWindow inherits Window {
     in-out property <bool> file_context_menu_visible: false;
     in-out property <bool> exif_context_menu_visible: false;
     in-out property <bool> exif_context_paste_enabled: false;
+    in-out property <bool> exif_context_remove_enabled: false;
     in-out property <int> file_filter: 0;
     in-out property <bool> show_only_missing_media_date: false;
     in-out property <bool> backup_before_changes: false;
     in-out property <bool> show_extension_in_file_name: false;
+    in-out property <bool> mark_file_date_mismatches: false;
 
     callback open_dir(int);
     callback reload();
@@ -192,6 +200,7 @@ export component MainWindow inherits Window {
     callback exif_section_right_clicked(string);
     callback exif_context_copy();
     callback exif_context_paste();
+    callback exif_context_remove();
     callback confirm_metadata_paste(bool);
     callback confirm_date_overwrite(bool);
     callback request_move_trailing_numbers();
@@ -219,7 +228,7 @@ export component MainWindow inherits Window {
                 activated => {
                     root.file_context_menu_visible = false;
                     root.editing_path = false;
-                    root.confirm_yes_selected = true;
+                    root.confirm_yes_selected = false;
                     root.confirm_delete_visible = true;
                     root.message_title = "Delete";
                     root.message_text = root.selected_delete_message;
@@ -340,6 +349,19 @@ export component MainWindow inherits Window {
                 activated => {
                     root.show_only_missing_media_date = !root.show_only_missing_media_date;
                     root.set_show_only_missing_media_date(root.show_only_missing_media_date);
+                }
+            }
+            MenuSeparator {}
+            Menu {
+                title: "File List";
+
+                MenuItem {
+                    title: "Mark Created/Modified Differences";
+                    checkable: true;
+                    checked: root.mark_file_date_mismatches;
+                    activated => {
+                        root.mark_file_date_mismatches = !root.mark_file_date_mismatches;
+                    }
                 }
             }
             MenuSeparator {}
@@ -523,6 +545,7 @@ export component MainWindow inherits Window {
                 selected_file_count: root.selected_file_count;
                 selected_recyclable_count: root.selected_recyclable_count;
                 copied_file_count: root.copied_file_count;
+                mark_file_date_mismatches: root.mark_file_date_mismatches;
                 context_menu_visible <=> root.file_context_menu_visible;
                 row_selected(index, ctrl, shift) => {
                     root.editing_path = false;
@@ -593,7 +616,7 @@ export component MainWindow inherits Window {
                 delete_requested() => {
                     root.editing_path = false;
                     if (root.selected_recyclable_count > 0) {
-                        root.confirm_yes_selected = true;
+                        root.confirm_yes_selected = false;
                         root.confirm_delete_visible = true;
                         root.message_title = "Delete";
                         root.message_text = root.selected_delete_message;
@@ -647,6 +670,12 @@ export component MainWindow inherits Window {
                 lens_model <=> root.lens_model;
                 software <=> root.software;
                 artist <=> root.artist;
+                image_description <=> root.image_description;
+                copyright <=> root.copyright;
+                exif_version <=> root.exif_version;
+                exposure_program <=> root.exposure_program;
+                white_balance <=> root.white_balance;
+                focal_length_35mm <=> root.focal_length_35mm;
                 shutter_speed <=> root.shutter_speed;
                 aperture <=> root.aperture;
                 iso_speed <=> root.iso_speed;
@@ -837,19 +866,34 @@ export component MainWindow inherits Window {
 
     if root.exif_context_menu_visible: TouchArea {
         width: 100%;
-        height: 100%;
+        height: 41px;
+        clicked => { root.exif_context_menu_visible = false; }
+    }
+
+    if root.exif_context_menu_visible: TouchArea {
+        y: 41px;
+        width: 752px;
+        height: root.height - 41px;
+        clicked => { root.exif_context_menu_visible = false; }
+    }
+
+    if root.exif_context_menu_visible: TouchArea {
+        x: 752px;
+        y: root.height - 26px;
+        width: root.width - 752px;
+        height: 26px;
         clicked => { root.exif_context_menu_visible = false; }
     }
 
     if root.exif_context_menu_visible: Rectangle {
         x: min(root.width - 154px, max(2px, MetadataContextMenuState.x));
-        y: min(root.height - 91px, max(42px, MetadataContextMenuState.y));
+        y: min(root.height - 112px, max(42px, MetadataContextMenuState.y));
         width: 152px;
-        height: 65px;
-        background: #ffffff;
+        height: 86px;
+        background: #f2f2f2;
         border-width: 1px;
-        border-color: #cfd8dc;
-        border-radius: 3px;
+        border-color: #a0a0a0;
+        border-radius: 0px;
         forward-focus: exif_context_focus;
 
         init => { exif_context_focus.focus(); }
@@ -861,6 +905,21 @@ export component MainWindow inherits Window {
                     root.exif_context_menu_visible = false;
                     return accept;
                 }
+                if (event.text == "C" || event.text == "c") {
+                    root.exif_context_menu_visible = false;
+                    root.exif_context_copy();
+                    return accept;
+                }
+                if ((event.text == "P" || event.text == "p") && root.exif_context_paste_enabled) {
+                    root.exif_context_menu_visible = false;
+                    root.exif_context_paste();
+                    return accept;
+                }
+                if ((event.text == "R" || event.text == "r") && root.exif_context_remove_enabled) {
+                    root.exif_context_menu_visible = false;
+                    root.exif_context_remove();
+                    return accept;
+                }
                 reject
             }
         }
@@ -869,20 +928,28 @@ export component MainWindow inherits Window {
             x: 1px;
             y: 1px;
             width: parent.width - 2px;
-            height: 31px;
-            background: copy_area.has-hover ? #edf4f8 : #ffffff;
-            Text { x: 14px; width: parent.width - 28px; height: 100%; text: "Copy"; color: #263238; vertical-alignment: center; }
+            height: 28px;
+            background: copy_area.has-hover ? #d9eaf7 : #f2f2f2;
+            Text { x: 12px; width: parent.width - 24px; height: 100%; text: "Copy (C)"; color: #202020; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; }
             copy_area := TouchArea { width: 100%; height: 100%; clicked => { root.exif_context_menu_visible = false; root.exif_context_copy(); } }
         }
-        Rectangle { x: 1px; y: 32px; width: parent.width - 2px; height: 1px; background: #edf0f2; }
         Rectangle {
             x: 1px;
-            y: 33px;
+            y: 29px;
             width: parent.width - 2px;
-            height: 31px;
-            background: root.exif_context_paste_enabled && paste_area.has-hover ? #edf4f8 : #ffffff;
-            Text { x: 14px; width: parent.width - 28px; height: 100%; text: "Paste"; color: root.exif_context_paste_enabled ? #263238 : #aeb7bc; vertical-alignment: center; }
+            height: 28px;
+            background: root.exif_context_paste_enabled && paste_area.has-hover ? #d9eaf7 : #f2f2f2;
+            Text { x: 12px; width: parent.width - 24px; height: 100%; text: "Paste (P)"; color: root.exif_context_paste_enabled ? #202020 : #929292; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; }
             paste_area := TouchArea { enabled: root.exif_context_paste_enabled; width: 100%; height: 100%; clicked => { root.exif_context_menu_visible = false; root.exif_context_paste(); } }
+        }
+        Rectangle {
+            x: 1px;
+            y: 57px;
+            width: parent.width - 2px;
+            height: 28px;
+            background: root.exif_context_remove_enabled && remove_area.has-hover ? #d9eaf7 : #f2f2f2;
+            Text { x: 12px; width: parent.width - 24px; height: 100%; text: "Remove (R)"; color: root.exif_context_remove_enabled ? #202020 : #929292; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; }
+            remove_area := TouchArea { enabled: root.exif_context_remove_enabled; width: 100%; height: 100%; clicked => { root.exif_context_menu_visible = false; root.exif_context_remove(); } }
         }
     }
 
@@ -1050,12 +1117,12 @@ export component MainWindow inherits Window {
                 }
 
                 if ((root.confirm_delete_visible || root.confirm_metadata_paste_visible || root.confirm_trailing_rename_visible || root.confirm_date_overwrite_visible) && (event.text == Key.LeftArrow || event.text == Key.UpArrow)) {
-                    root.confirm_yes_selected = false;
+                    root.confirm_yes_selected = true;
                     return accept;
                 }
 
                 if ((root.confirm_delete_visible || root.confirm_metadata_paste_visible || root.confirm_trailing_rename_visible || root.confirm_date_overwrite_visible) && (event.text == Key.RightArrow || event.text == Key.DownArrow)) {
-                    root.confirm_yes_selected = true;
+                    root.confirm_yes_selected = false;
                     return accept;
                 }
 
@@ -1188,7 +1255,7 @@ export component MainWindow inherits Window {
             }
 
             if confirm_delete_visible || confirm_metadata_paste_visible || confirm_trailing_rename_visible || confirm_date_overwrite_visible: Rectangle {
-                x: parent.width - 172px;
+                x: parent.width - 92px;
                 y: parent.height - 44px;
                 width: 72px;
                 height: 28px;
@@ -1234,7 +1301,7 @@ export component MainWindow inherits Window {
             }
 
             if confirm_delete_visible || confirm_metadata_paste_visible || confirm_trailing_rename_visible || confirm_date_overwrite_visible: Rectangle {
-                x: parent.width - 92px;
+                x: parent.width - 172px;
                 y: parent.height - 44px;
                 width: 72px;
                 height: 28px;

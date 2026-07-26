@@ -19,6 +19,12 @@ pub struct ExifMetadata {
     pub lens_model: String,
     pub software: String,
     pub artist: String,
+    pub image_description: String,
+    pub copyright: String,
+    pub exif_version: String,
+    pub exposure_program: String,
+    pub white_balance: String,
+    pub focal_length_35mm: String,
     pub shutter_speed: String,
     pub aperture: String,
     pub iso_speed: String,
@@ -47,6 +53,12 @@ impl Default for ExifMetadata {
             lens_model: empty_value(),
             software: empty_value(),
             artist: empty_value(),
+            image_description: empty_value(),
+            copyright: empty_value(),
+            exif_version: empty_value(),
+            exposure_program: empty_value(),
+            white_balance: empty_value(),
+            focal_length_35mm: empty_value(),
             shutter_speed: empty_value(),
             aperture: empty_value(),
             iso_speed: empty_value(),
@@ -511,6 +523,13 @@ pub fn rewrite_repairable_exif_metadata(
     backup_before_changes: bool,
 ) -> Result<(), String> {
     let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let tiff = find_exif_tiff(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
+    if !is_basic_generated_tiff(tiff) {
+        return Err(
+            "The requested tag is not present. The file contains additional EXIF tags, so a basic EXIF rebuild was refused to prevent metadata loss."
+                .to_string(),
+        );
+    }
     if find_exif_tiff_start(&bytes).is_none() {
         return Err("EXIF data was not found.".to_string());
     }
@@ -532,7 +551,63 @@ pub fn rewrite_repairable_exif_metadata(
 }
 
 pub fn is_generated_new_exif_path(path: &Path) -> bool {
-    exif_backup_path(path).exists() || has_basic_generated_exif_shape(path)
+    has_basic_generated_exif_shape(path)
+}
+
+pub fn remove_exif_tag(path: &Path, key: &str, backup_before_changes: bool) -> Result<(), String> {
+    let (ifd0_tags, exif_tags, gps_tags): (&[u16], &[u16], &[u16]) = match key {
+        "taken_date" => (&[0x0132], &[0x9003, 0x9004], &[]),
+        "date_time_original" => (&[], &[0x9003], &[]),
+        "date_time_digitized" => (&[], &[0x9004], &[]),
+        "image_date_time" => (&[0x0132], &[], &[]),
+        "camera_make" => (&[0x010f], &[], &[]),
+        "image_description" => (&[0x010e], &[], &[]),
+        "copyright" => (&[0x8298], &[], &[]),
+        "camera_model" => (&[0x0110], &[], &[]),
+        "orientation" => (&[0x0112], &[], &[]),
+        "software" => (&[0x0131], &[], &[]),
+        "artist" => (&[0x013b], &[], &[]),
+        "shutter_speed" => (&[], &[0x829a], &[]),
+        "exposure_program" => (&[], &[0x8822], &[]),
+        "exif_version" => (&[], &[0x9000], &[]),
+        "aperture" => (&[], &[0x829d], &[]),
+        "iso_speed" => (&[], &[0x8827], &[]),
+        "focal_length" => (&[], &[0x920a], &[]),
+        "flash_fired" => (&[], &[0x9209], &[]),
+        "metering_mode" => (&[], &[0x9207], &[]),
+        "image_width" => (&[], &[0xa002], &[]),
+        "image_height" => (&[], &[0xa003], &[]),
+        "color_space" => (&[], &[0xa001], &[]),
+        "lens_model" => (&[], &[0xa434], &[]),
+        "white_balance" => (&[], &[0xa403], &[]),
+        "focal_length_35mm" => (&[], &[0xa405], &[]),
+        "gps_latitude" => (&[], &[], &[0x0001, 0x0002]),
+        "gps_longitude" => (&[], &[], &[0x0003, 0x0004]),
+        "gps_altitude" => (&[], &[], &[0x0005, 0x0006]),
+        _ => return Err("This metadata row cannot be removed individually.".to_string()),
+    };
+
+    let original_file_metadata = fs::metadata(path).map_err(|err| err.to_string())?;
+    let original_created = original_file_metadata.created().ok();
+    let original_modified = original_file_metadata.modified().ok();
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let tiff = find_exif_tiff(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
+    let updated_tiff = rewrite_exif_tiff_removing_tags(tiff, ifd0_tags, exif_tags, gps_tags)?;
+    let segment = build_exif_app1_from_tiff(&updated_tiff)?;
+    let updated = replace_or_insert_exif_app1(&bytes, &segment)?;
+    if backup_before_changes {
+        let backup_path = exif_backup_path(path);
+        if !backup_path.exists() {
+            fs::copy(path, backup_path).map_err(|err| err.to_string())?;
+        }
+    }
+    fs::write(path, updated).map_err(|err| err.to_string())?;
+    if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
+        let _ = fs::write(path, bytes);
+        let _ = crate::fs::set_file_times(path, original_created, original_modified);
+        return Err(err);
+    }
+    Ok(())
 }
 
 pub fn exif_backup_path(path: &Path) -> PathBuf {
@@ -1241,6 +1316,121 @@ pub(crate) fn rewrite_exif_tiff_dates(
     Ok(output)
 }
 
+pub(crate) fn remove_exif_tiff_date_time_original(tiff: &[u8]) -> Result<Vec<u8>, String> {
+    rewrite_exif_tiff_removing_tags(tiff, &[], &[0x9003], &[])
+}
+
+fn rewrite_exif_tiff_removing_tags(
+    tiff: &[u8],
+    ifd0_tags: &[u16],
+    exif_tags: &[u16],
+    gps_tags: &[u16],
+) -> Result<Vec<u8>, String> {
+    let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid EXIF TIFF header.".to_string())?;
+    if read_u16(tiff, 2, endian) != Some(42) {
+        return Err("Invalid EXIF TIFF marker.".to_string());
+    }
+    let old_ifd0_offset = read_u32(tiff, 4, endian)
+        .map(|value| value as usize)
+        .ok_or_else(|| "Invalid EXIF IFD0 offset.".to_string())?;
+    let old_ifd0 = raw_ifd_entries(tiff, old_ifd0_offset, endian)?;
+    let old_ifd0_next = raw_ifd_next_offset(tiff, old_ifd0_offset, old_ifd0.len(), endian)?;
+    let parsed_ifd0 = read_ifd_entries(tiff, old_ifd0_offset, endian)
+        .ok_or_else(|| "Unable to read EXIF IFD0 entries.".to_string())?;
+    let old_exif_offset = parsed_ifd0
+        .iter()
+        .find(|entry| entry.tag == 0x8769)
+        .and_then(Entry::as_long)
+        .map(|value| value as usize);
+    let old_gps_offset = parsed_ifd0
+        .iter()
+        .find(|entry| entry.tag == 0x8825)
+        .and_then(Entry::as_long)
+        .filter(|value| *value > 0)
+        .map(|value| value as usize);
+
+    let mut output = tiff.to_vec();
+    if output.len() % 2 != 0 {
+        output.push(0);
+    }
+
+    let new_exif_offset = if let Some(offset) = old_exif_offset {
+        let entries: Vec<_> = raw_ifd_entries(tiff, offset, endian)?
+            .into_iter()
+            .filter(|(tag, _)| !exif_tags.contains(tag))
+            .collect();
+        let next = raw_ifd_next_offset(tiff, offset, raw_ifd_entries(tiff, offset, endian)?.len(), endian)?;
+        let new_offset = output.len();
+        append_raw_ifd(&mut output, new_offset, &entries, next, endian)?;
+        Some(new_offset)
+    } else {
+        None
+    };
+
+    if output.len() % 2 != 0 {
+        output.push(0);
+    }
+    let new_gps_offset = if let Some(offset) = old_gps_offset {
+        let old_entries = raw_ifd_entries(tiff, offset, endian)?;
+        let next = raw_ifd_next_offset(tiff, offset, old_entries.len(), endian)?;
+        let entries: Vec<_> = old_entries
+            .into_iter()
+            .filter(|(tag, _)| !gps_tags.contains(tag))
+            .collect();
+        let new_offset = output.len();
+        append_raw_ifd(&mut output, new_offset, &entries, next, endian)?;
+        Some(new_offset)
+    } else {
+        None
+    };
+
+    if output.len() % 2 != 0 {
+        output.push(0);
+    }
+    let mut new_ifd0: Vec<_> = old_ifd0
+        .into_iter()
+        .filter(|(tag, _)| {
+            !ifd0_tags.contains(tag)
+                && *tag != 0x8769
+                && *tag != 0x8825
+        })
+        .collect();
+    if let Some(offset) = new_exif_offset {
+        let offset = u32::try_from(offset).map_err(|_| "EXIF data is too large.".to_string())?;
+        new_ifd0.push((0x8769, make_tiff_entry(0x8769, 4, 1, offset, endian)));
+    }
+    if let Some(offset) = new_gps_offset {
+        let offset = u32::try_from(offset).map_err(|_| "EXIF data is too large.".to_string())?;
+        new_ifd0.push((0x8825, make_tiff_entry(0x8825, 4, 1, offset, endian)));
+    }
+    new_ifd0.sort_by_key(|(tag, _)| *tag);
+    let new_ifd0_offset = output.len();
+    append_raw_ifd(&mut output, new_ifd0_offset, &new_ifd0, old_ifd0_next, endian)?;
+    write_u32_at(
+        &mut output,
+        4,
+        u32::try_from(new_ifd0_offset).map_err(|_| "EXIF data is too large.".to_string())?,
+        endian,
+    )?;
+    Ok(output)
+}
+
+fn build_exif_app1_from_tiff(tiff: &[u8]) -> Result<Vec<u8>, String> {
+    let segment_len = tiff
+        .len()
+        .checked_add(8)
+        .ok_or_else(|| "EXIF segment is too large.".to_string())?;
+    if segment_len > u16::MAX as usize {
+        return Err("EXIF segment is too large for JPEG APP1.".to_string());
+    }
+    let mut segment = Vec::with_capacity(segment_len + 2);
+    segment.extend_from_slice(&[0xff, 0xe1]);
+    segment.extend_from_slice(&(segment_len as u16).to_be_bytes());
+    segment.extend_from_slice(b"Exif\0\0");
+    segment.extend_from_slice(tiff);
+    Ok(segment)
+}
+
 fn raw_ifd_entries(
     tiff: &[u8],
     offset: usize,
@@ -1392,6 +1582,7 @@ fn parse_tiff(data: &[u8]) -> Option<ExifMetadata> {
 
     for entry in read_ifd_entries(data, ifd0_offset, endian)? {
         match entry.tag {
+            0x010e => meta.image_description = entry.as_ascii().unwrap_or_else(empty_value),
             0x010f => meta.camera_make = entry.as_ascii().unwrap_or_else(empty_value),
             0x0110 => meta.camera_model = entry.as_ascii().unwrap_or_else(empty_value),
             0x0112 => meta.orientation = entry.as_short().map(format_orientation).unwrap_or_else(empty_value),
@@ -1403,6 +1594,7 @@ fn parse_tiff(data: &[u8]) -> Option<ExifMetadata> {
                     .unwrap_or_else(empty_value);
             }
             0x013b => meta.artist = entry.as_ascii().unwrap_or_else(empty_value),
+            0x8298 => meta.copyright = entry.as_ascii().unwrap_or_else(empty_value),
             0x8769 => exif_ifd = entry.as_long().map(|v| v as usize),
             0x8825 => gps_ifd = entry.as_long().filter(|v| *v > 0).map(|v| v as usize),
             _ => {}
@@ -1449,6 +1641,12 @@ fn parse_exif_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMet
 
     for entry in entries {
         match entry.tag {
+            0x8822 => {
+                meta.exposure_program = entry
+                    .as_short()
+                    .map(format_exposure_program)
+                    .unwrap_or_else(empty_value)
+            }
             0x829a => meta.shutter_speed = entry.as_rational().map(format_shutter).unwrap_or_else(empty_value),
             0x829d => meta.aperture = entry.as_rational().map(format_aperture).unwrap_or_else(empty_value),
             0x8827 => meta.iso_speed = entry.as_short().map(|v| v.to_string()).unwrap_or_else(empty_value),
@@ -1464,12 +1662,25 @@ fn parse_exif_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMet
                     .map(|value| exif_datetime_to_display(&value))
                     .unwrap_or_else(empty_value);
             }
+            0x9000 => meta.exif_version = entry.as_version_string().unwrap_or_else(empty_value),
             0x9207 => meta.metering_mode = entry.as_short().map(format_metering).unwrap_or_else(empty_value),
             0x9209 => meta.flash_fired = entry.as_short().map(format_flash).unwrap_or_else(empty_value),
             0x920a => meta.focal_length = entry.as_rational().map(format_focal_length).unwrap_or_else(empty_value),
             0xa001 => meta.color_space = entry.as_short().map(format_color_space).unwrap_or_else(empty_value),
             0xa002 => meta.image_width = entry.as_number().map(|v| v.to_string()).unwrap_or_else(empty_value),
             0xa003 => meta.image_height = entry.as_number().map(|v| v.to_string()).unwrap_or_else(empty_value),
+            0xa403 => {
+                meta.white_balance = entry
+                    .as_short()
+                    .map(format_white_balance)
+                    .unwrap_or_else(empty_value)
+            }
+            0xa405 => {
+                meta.focal_length_35mm = entry
+                    .as_short()
+                    .map(|value| format!("{value} mm"))
+                    .unwrap_or_else(empty_value)
+            }
             0xa434 => meta.lens_model = entry.as_ascii().unwrap_or_else(empty_value),
             _ => {}
         }
@@ -1606,6 +1817,24 @@ impl<'a> Entry<'a> {
             return None;
         }
         self.value_bytes()?.first().copied()
+    }
+
+    fn as_version_string(&self) -> Option<String> {
+        if self.field_type != 7 {
+            return None;
+        }
+        let bytes = self.value_bytes()?;
+        let value: String = bytes
+            .iter()
+            .copied()
+            .filter(u8::is_ascii_digit)
+            .map(char::from)
+            .collect();
+        match value.len() {
+            4 => Some(format!("{}.{}", &value[..2], &value[2..])),
+            _ if !value.is_empty() => Some(value),
+            _ => None,
+        }
     }
 
     fn as_short(&self) -> Option<u16> {
@@ -1755,6 +1984,29 @@ fn format_metering(value: u16) -> String {
         _ => "Unknown",
     }
     .to_string()
+}
+
+fn format_exposure_program(value: u16) -> String {
+    match value {
+        0 => "Not defined".to_string(),
+        1 => "Manual".to_string(),
+        2 => "Normal program".to_string(),
+        3 => "Aperture priority".to_string(),
+        4 => "Shutter priority".to_string(),
+        5 => "Creative program".to_string(),
+        6 => "Action program".to_string(),
+        7 => "Portrait mode".to_string(),
+        8 => "Landscape mode".to_string(),
+        _ => value.to_string(),
+    }
+}
+
+fn format_white_balance(value: u16) -> String {
+    match value {
+        0 => "Auto".to_string(),
+        1 => "Manual".to_string(),
+        _ => value.to_string(),
+    }
 }
 
 fn format_orientation(value: u16) -> String {
@@ -2234,6 +2486,12 @@ mod tests {
             lens_model: "FE 35mm F1.8".to_string(),
             software: "SH148 EXIF-File Tool".to_string(),
             artist: "tester".to_string(),
+            image_description: String::new(),
+            copyright: String::new(),
+            exif_version: String::new(),
+            exposure_program: String::new(),
+            white_balance: String::new(),
+            focal_length_35mm: String::new(),
             shutter_speed: "1/125".to_string(),
             aperture: "f/2.8".to_string(),
             iso_speed: "400".to_string(),
@@ -2307,6 +2565,32 @@ mod tests {
         assert!(err.contains("does not create missing tags"));
         assert_eq!(read_exif_metadata(&path).camera_make, "Canon");
         assert_eq!(read_exif_metadata(&path).lens_model, "");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn individual_tag_removal_preserves_other_raw_exif_entries() {
+        let path = std::env::temp_dir().join(format!(
+            "sh148_exif_file_tool_remove_one_tag_test_{}.jpg",
+            std::process::id()
+        ));
+        let mut jpeg = minimal_jpeg_with_camera_make("Preserve me");
+        let tag_position = jpeg
+            .windows(2)
+            .position(|bytes| bytes == [0x0f, 0x01])
+            .expect("camera make tag");
+        jpeg[tag_position..tag_position + 2].copy_from_slice(&0x010eu16.to_le_bytes());
+        std::fs::write(&path, jpeg).unwrap();
+
+        remove_exif_tag(&path, "camera_model", false).unwrap();
+        assert_eq!(
+            read_exif_metadata(&path).image_description,
+            "Preserve me"
+        );
+
+        remove_exif_tag(&path, "image_description", false).unwrap();
+        assert_eq!(read_exif_metadata(&path).image_description, "");
 
         let _ = std::fs::remove_file(path);
     }
