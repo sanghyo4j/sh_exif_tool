@@ -1,6 +1,30 @@
 export global FontSettings {
     in-out property <int> font_size_pt: 10;
     in property <string> font_family: "Segoe UI Variable Text";
+    in-out property <bool> use_monospace_details: false;
+    in property <string> details_font_family: use_monospace_details ? "Consolas" : font_family;
+}
+
+export global NativeColors {
+    in property <color> window_bg: #f3f3f3;
+    in property <color> surface: #ffffff;
+    in property <color> subtle_surface: #f7f7f7;
+    in property <color> menu_bg: #f2f2f2;
+    in property <color> border: #d1d1d1;
+    in property <color> divider: #ededed;
+    in property <color> text: #1a1a1a;
+    in property <color> secondary_text: #5d5d5d;
+    in property <color> disabled_text: #9a9a9a;
+    in property <color> hover: #e9e9e9;
+    in property <color> pressed: #dadada;
+    in property <color> row_hover: #f5f5f5;
+    in property <color> selection: #e5f3ff;
+    in property <color> selection_hover: #dceeff;
+    in property <color> accent: #0067c0;
+    in property <color> pending: #fff4ce;
+    in property <color> warning: #ca5010;
+    in property <color> danger: #c42b1c;
+    in property <color> danger_soft: #fde7e9;
 }
 
 export global MetadataContextMenuState {

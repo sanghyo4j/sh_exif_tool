@@ -2,7 +2,7 @@ import { ListView } from "std-widgets.slint";
 import { FileEntry } from "../types.slint";
 import { HDivider } from "dividers.slint";
 import { FileIcon, FolderIcon, ImageFileIcon, VideoFileIcon } from "icons.slint";
-import { FontSettings } from "../theme.slint";
+import { FontSettings, NativeColors } from "../theme.slint";
 
 component IconCell inherits Rectangle {
     in property <bool> is_dir;
@@ -24,9 +24,9 @@ component MenuRow inherits Rectangle {
     callback clicked();
 
     x: 1px;
-    width: 150px;
+    width: 190px;
     height: 28px;
-    background: touch.has-hover && enabled ? #d9eaf7 : #f2f2f2;
+    background: touch.has-hover && enabled ? NativeColors.hover : NativeColors.menu_bg;
 
     Text {
         x: 12px;
@@ -34,7 +34,7 @@ component MenuRow inherits Rectangle {
         height: 100%;
         text: root.title;
         font-size: FontSettings.font_size_pt * 1pt;
-        color: !root.enabled ? #929292 : #202020;
+        color: !root.enabled ? NativeColors.disabled_text : NativeColors.text;
         vertical-alignment: center;
     }
 
@@ -64,18 +64,18 @@ export component CustomFileTable inherits Rectangle {
     callback paste_requested();
     callback delete_requested();
     callback open_folder_requested();
-    callback open_in_file_manager_requested();
+    callback open_in_file_manager_requested(int);
     callback apply_requested();
     callback revert_requested();
     callback exit_requested();
 
     property <length> menu_x: 0px;
     property <length> menu_y: 0px;
-    property <length> menu_width: 152px;
+    property <length> menu_width: 192px;
     property <bool> context_target_is_dir: root.selected_index >= 0 && root.selected_index < root.files.length && root.files[root.selected_index].is_dir;
-    property <length> menu_height: root.context_target_is_dir ? 170px : 142px;
+    property <length> menu_height: root.context_target_is_dir ? 198px : 170px;
 
-    background: #ffffff;
+    background: NativeColors.surface;
     forward-focus: focus_scope;
 
     end_scroll_timer := Timer {
@@ -105,7 +105,7 @@ export component CustomFileTable inherits Rectangle {
 
         Rectangle {
             height: 30px;
-            background: #f7f9fb;
+            background: NativeColors.subtle_surface;
 
             HorizontalLayout {
                 width: 100%;
@@ -115,11 +115,11 @@ export component CustomFileTable inherits Rectangle {
                 spacing: 0px;
 
                 Rectangle { width: 22px; }
-                Text { width: parent.width - 22px - media_date_header.width - size_header.width - modified_header.width - metadata_header.width - 20px; text: "Filename"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; overflow: elide; }
-                size_header := Text { width: 78px; text: "Size"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; }
-                modified_header := Text { width: 146px; text: "Modified"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; }
-                media_date_header := Text { width: 150px; text: "Media Date"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; overflow: elide; }
-                metadata_header := Text { width: 68px; text: "Metadata"; color: #37474f; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; horizontal-alignment: center; }
+                Text { width: parent.width - 22px - media_date_header.width - size_header.width - modified_header.width - metadata_header.width - 20px; text: "Filename"; color: NativeColors.text; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; overflow: elide; }
+                size_header := Text { width: 78px; text: "Size"; color: NativeColors.text; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; }
+                modified_header := Text { width: 146px; text: "Modified"; color: NativeColors.text; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; }
+                media_date_header := Text { width: 150px; text: "Media Date"; color: NativeColors.text; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; overflow: elide; }
+                metadata_header := Text { width: 68px; text: "Metadata"; color: NativeColors.text; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; horizontal-alignment: center; }
             }
 
             HDivider { y: parent.height - 1px; }
@@ -133,7 +133,9 @@ export component CustomFileTable inherits Rectangle {
 
             for entry[i] in files: Rectangle {
                 height: 30px;
-                background: entry.selected ? #dbeafe : #ffffff;
+                background: entry.selected
+                    ? (row_touch.has-hover ? NativeColors.selection_hover : NativeColors.selection)
+                    : (row_touch.has-hover ? NativeColors.row_hover : NativeColors.surface);
 
                 HorizontalLayout {
                     width: 100%;
@@ -143,8 +145,8 @@ export component CustomFileTable inherits Rectangle {
                     spacing: 0px;
 
                     IconCell { is_dir: entry.is_dir; media_kind: entry.media_kind; }
-                    Text { width: parent.width - 22px - media_date_cell.width - size_cell.width - modified_cell.width - metadata_cell.width - 20px; text: entry.is_dir && entry.name != "[..]" ? "[" + entry.name + "]" : entry.name; color: entry.selected ? #0f172a : #1f2933; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
-                    size_cell := Text { width: 78px; text: entry.size; color: #4b5563; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                    Text { width: parent.width - 22px - media_date_cell.width - size_cell.width - modified_cell.width - metadata_cell.width - 20px; text: entry.is_dir && entry.name != "[..]" ? "[" + entry.name + "]" : entry.name; color: NativeColors.text; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                    size_cell := Text { width: 78px; text: entry.size; color: NativeColors.secondary_text; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
                     modified_cell := Rectangle {
                         width: 146px;
                         property <bool> has_date_mismatch: root.mark_file_date_mismatches && !entry.is_dir && entry.created != "-" && entry.modified != "-" && entry.created != entry.modified;
@@ -153,7 +155,7 @@ export component CustomFileTable inherits Rectangle {
                             width: modified_cell.has_date_mismatch ? parent.width - 28px : parent.width;
                             height: 100%;
                             text: entry.modified;
-                            color: #4b5563;
+                            color: NativeColors.secondary_text;
                             font-size: FontSettings.font_size_pt * 1pt;
                             vertical-alignment: center;
                             overflow: elide;
@@ -164,17 +166,17 @@ export component CustomFileTable inherits Rectangle {
                             width: 27px;
                             height: 100%;
                             text: "(!)";
-                            color: #c2410c;
+                            color: NativeColors.warning;
                             font-size: FontSettings.font_size_pt * 1pt;
                             font-weight: 700;
                             vertical-alignment: center;
                         }
                     }
-                    media_date_cell := Text { width: 150px; text: entry.media_date; color: #4b5563; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
-                    metadata_cell := Text { width: 68px; text: entry.metadata_status; color: entry.metadata_status == "!" ? #b42318 : #4b5563; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; horizontal-alignment: center; overflow: elide; }
+                    media_date_cell := Text { width: 150px; text: entry.media_date; color: NativeColors.secondary_text; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                    metadata_cell := Text { width: 68px; text: entry.metadata_status; color: entry.metadata_status == "!" ? NativeColors.danger : NativeColors.secondary_text; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; horizontal-alignment: center; overflow: elide; }
                 }
 
-                TouchArea {
+                row_touch := TouchArea {
                     width: 100%;
                     height: 100%;
 
@@ -200,7 +202,7 @@ export component CustomFileTable inherits Rectangle {
                     }
                 }
 
-                HDivider { y: parent.height - 1px; background: #eef2f5; }
+                HDivider { y: parent.height - 1px; background: NativeColors.divider; }
             }
         }
     }
@@ -210,17 +212,18 @@ export component CustomFileTable inherits Rectangle {
         y: root.menu_y;
         width: root.menu_width;
         height: root.menu_height;
-        background: #f2f2f2;
+        background: NativeColors.menu_bg;
         border-width: 1px;
         border-color: #a0a0a0;
         border-radius: 0px;
 
         if root.context_target_is_dir: MenuRow { y: 1px; title: "Open (O)"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.row_activated(root.selected_index); } }
-        MenuRow { y: root.context_target_is_dir ? 29px : 1px; title: "Refresh (E)"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.reload_requested(); } }
-        MenuRow { y: root.context_target_is_dir ? 57px : 29px; title: "Rename (M)"; danger: false; enabled: root.selected_recyclable_count == 1; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count == 1) { root.rename_requested(root.selected_index); } } }
-        MenuRow { y: root.context_target_is_dir ? 85px : 57px; title: "Copy (C)"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.copy_requested(); } } }
-        MenuRow { y: root.context_target_is_dir ? 113px : 85px; title: "Paste (P)"; danger: false; enabled: root.copied_file_count > 0; clicked => { root.context_menu_visible = false; if (root.copied_file_count > 0) { root.paste_requested(); } } }
-        MenuRow { y: root.context_target_is_dir ? 141px : 113px; title: "Delete (D)"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.delete_requested(); } } }
+        MenuRow { y: root.context_target_is_dir ? 29px : 1px; title: "Open in Explorer (X)"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.open_in_file_manager_requested(root.selected_index); } }
+        MenuRow { y: root.context_target_is_dir ? 57px : 29px; title: "Refresh (E)"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.reload_requested(); } }
+        MenuRow { y: root.context_target_is_dir ? 85px : 57px; title: "Rename (M)"; danger: false; enabled: root.selected_recyclable_count == 1; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count == 1) { root.rename_requested(root.selected_index); } } }
+        MenuRow { y: root.context_target_is_dir ? 113px : 85px; title: "Copy (C)"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.copy_requested(); } } }
+        MenuRow { y: root.context_target_is_dir ? 141px : 113px; title: "Paste (P)"; danger: false; enabled: root.copied_file_count > 0; clicked => { root.context_menu_visible = false; if (root.copied_file_count > 0) { root.paste_requested(); } } }
+        MenuRow { y: root.context_target_is_dir ? 169px : 141px; title: "Delete (D)"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.delete_requested(); } } }
     }
 
     focus_scope := FocusScope {
@@ -237,6 +240,11 @@ export component CustomFileTable inherits Rectangle {
             if (root.context_menu_visible && (event.text == "O" || event.text == "o") && !event.modifiers.control && root.context_target_is_dir) {
                 root.context_menu_visible = false;
                 root.row_activated(root.selected_index);
+                return accept;
+            }
+            if (root.context_menu_visible && (event.text == "X" || event.text == "x") && !event.modifiers.control) {
+                root.context_menu_visible = false;
+                root.open_in_file_manager_requested(root.selected_index);
                 return accept;
             }
             if (root.context_menu_visible && (event.text == "E" || event.text == "e") && !event.modifiers.control) {
@@ -267,6 +275,13 @@ export component CustomFileTable inherits Rectangle {
             if ((event.text == "A" || event.text == "a") && event.modifiers.control) {
                 root.context_menu_visible = false;
                 root.select_all_requested();
+                return accept;
+            }
+            if (event.text == Key.Delete) {
+                root.context_menu_visible = false;
+                if (root.selected_recyclable_count > 0) {
+                    root.delete_requested();
+                }
                 return accept;
             }
             if (event.text == Key.UpArrow) {
@@ -300,7 +315,7 @@ export component CustomFileTable inherits Rectangle {
             if ((event.text == "V" || event.text == "v") && event.modifiers.control) { root.paste_requested(); return accept; }
             if ((event.text == "O" || event.text == "o") && event.modifiers.control && event.modifiers.shift) { root.open_folder_requested(); return accept; }
             if ((event.text == "S" || event.text == "s") && event.modifiers.control) { root.apply_requested(); return accept; }
-            if ((event.text == "R" || event.text == "r") && event.modifiers.alt && event.modifiers.shift) { root.open_in_file_manager_requested(); return accept; }
+            if ((event.text == "R" || event.text == "r") && event.modifiers.alt && event.modifiers.shift) { root.open_in_file_manager_requested(root.selected_index); return accept; }
             if ((event.text == "R" || event.text == "r") && event.modifiers.control && !event.modifiers.shift) { root.revert_requested(); return accept; }
             if ((event.text == "W" || event.text == "w") && event.modifiers.control) { root.exit_requested(); return accept; }
             reject

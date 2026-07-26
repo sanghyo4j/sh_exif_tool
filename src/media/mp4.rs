@@ -47,10 +47,9 @@ pub(super) fn write_media_date(path: &Path, display_value: &str) -> Result<(), S
         .write(true)
         .open(path)
         .map_err(|err| err.to_string())?;
-    let fields = find_creation_time_fields(&mut file)?;
-    let targets: Vec<_> = fields.into_iter().filter(|field| field.original != 0).collect();
+    let targets = find_creation_time_fields(&mut file)?;
     if targets.is_empty() {
-        return Err("No existing MP4 creation time value was found.".to_string());
+        return Err("No writable MP4 creation time field was found.".to_string());
     }
     if targets.iter().any(|field| field.width == 4 && quicktime_seconds > u32::MAX as u64) {
         return Err("MP4 Media Date is outside the range of an existing version 0 date field.".to_string());
@@ -216,7 +215,10 @@ fn scan_atom_children(
                     summary.media_date = read_quicktime_creation_date(file, atom.payload_start, atom.end)?;
                 }
             }
-            b"trak" | b"mdia" | b"minf" | b"stbl" | b"udta" => {
+            // Creation timestamps only live in mvhd (under moov), tkhd
+            // (under trak), and mdhd (under mdia). Other containers may carry
+            // vendor-specific or non-atom payloads and must remain opaque.
+            b"trak" | b"mdia" => {
                 scan_atom_children(file, atom.payload_start, atom.end, depth + 1, summary)?;
             }
             _ => {}
@@ -269,7 +271,7 @@ fn collect_creation_time_fields(
             b"mvhd" | b"tkhd" | b"mdhd" => {
                 fields.push(read_creation_time_field(file, atom.payload_start, atom.end)?);
             }
-            b"trak" | b"mdia" | b"minf" | b"stbl" | b"udta" => {
+            b"trak" | b"mdia" => {
                 collect_creation_time_fields(
                     file,
                     atom.payload_start,
@@ -445,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_only_existing_nonzero_creation_dates_in_place() {
+    fn writes_all_existing_creation_date_fields_in_place_including_zero_values() {
         let original_unix = 1_344_992_400u32;
         let original_quicktime = original_unix + QUICKTIME_UNIX_EPOCH_OFFSET as u32;
         let mvhd = atom(b"mvhd", &version_zero_date_payload(original_quicktime));
@@ -499,8 +501,63 @@ mod tests {
         assert_eq!(updated_bytes.len(), original_bytes.len());
         assert_eq!(&updated_bytes[updated_bytes.len() - 16..], &original_bytes[original_bytes.len() - 16..]);
         assert_eq!(result.media_date, display_value);
-        assert_eq!(fields.iter().filter(|field| field.original == 0).count(), 2);
-        assert_eq!(fields.iter().filter(|field| field.original == expected).count(), 3);
+        assert_eq!(fields.iter().filter(|field| field.original == 0).count(), 0);
+        assert_eq!(fields.iter().filter(|field| field.original == expected).count(), 5);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn writes_an_existing_zero_creation_date_in_place() {
+        let ftyp = atom(b"ftyp", b"isom\0\0\0\0isom");
+        let mdat = atom(b"mdat", &[0x5a; 32]);
+        let moov = atom(b"moov", &atom(b"mvhd", &version_zero_date_payload(0)));
+        let original_bytes = [ftyp, mdat, moov].concat();
+        let path = std::env::temp_dir().join(format!(
+            "sh148_exif_file_tool_mp4_zero_date_write_{}.mp4",
+            std::process::id()
+        ));
+        std::fs::write(&path, &original_bytes).unwrap();
+
+        let display_value = "2016-04-27 18:10:53";
+        write_media_date(&path, display_value).unwrap();
+
+        let updated_bytes = std::fs::read(&path).unwrap();
+        let result = scan_media_file(&path);
+        assert_eq!(updated_bytes.len(), original_bytes.len());
+        assert_eq!(result.media_date, display_value);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ignores_opaque_vendor_metadata_while_writing_creation_date() {
+        let ftyp = atom(b"ftyp", b"isom\0\0\0\0isom");
+        let mdat = atom(b"mdat", &[0x5a; 32]);
+        let mvhd = atom(b"mvhd", &version_zero_date_payload(0));
+        // This is intentionally not an atom stream. Some cameras place
+        // proprietary payloads inside udta, which is irrelevant to the
+        // standard header creation timestamps.
+        let opaque_udta = atom(b"udta", &[0xff, 0xff, 0xff, 0xff, b'v', b'e', b'n', b'd']);
+        let moov = atom(b"moov", &[mvhd, opaque_udta].concat());
+        let original_bytes = [ftyp, mdat, moov].concat();
+        let path = std::env::temp_dir().join(format!(
+            "sh148_exif_file_tool_mp4_opaque_metadata_{}.mp4",
+            std::process::id()
+        ));
+        std::fs::write(&path, &original_bytes).unwrap();
+
+        let display_value = "2016-05-19 20:31:26";
+        write_media_date(&path, display_value).unwrap();
+
+        let updated_bytes = std::fs::read(&path).unwrap();
+        let result = scan_media_file(&path);
+        assert_eq!(updated_bytes.len(), original_bytes.len());
+        assert_eq!(result.media_date, display_value);
+        assert_eq!(
+            &updated_bytes[updated_bytes.len() - 16..],
+            &original_bytes[original_bytes.len() - 16..]
+        );
 
         let _ = std::fs::remove_file(path);
     }

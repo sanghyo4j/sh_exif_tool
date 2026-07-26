@@ -1,6 +1,6 @@
 import { HorizontalBox } from "std-widgets.slint";
 import { HDivider } from "dividers.slint";
-import { FontSettings, MetadataContextMenuState } from "../theme.slint";
+import { FontSettings, MetadataContextMenuState, NativeColors } from "../theme.slint";
 
 export component SectionHeader inherits Rectangle {
     in property <string> title;
@@ -11,7 +11,9 @@ export component SectionHeader inherits Rectangle {
     callback section_right_clicked(string);
 
     height: 30px;
-    background: #e7f0f5;
+    background: root.metadata_section != "" && section_touch.has-hover
+        ? NativeColors.hover
+        : NativeColors.subtle_surface;
 
     section_touch := TouchArea {
         width: 100%;
@@ -30,7 +32,7 @@ export component SectionHeader inherits Rectangle {
         y: 0px;
         width: 4px;
         height: 100%;
-        background: #3d7895;
+        background: NativeColors.accent;
     }
 
     Text {
@@ -38,9 +40,10 @@ export component SectionHeader inherits Rectangle {
         width: root.action_title == "" ? parent.width - 30px : parent.width - 124px;
         height: 100%;
         text: title;
+        font-family: FontSettings.details_font_family;
         font-size: max(9pt, (FontSettings.font_size_pt - 1) * 1pt);
         font-weight: 600;
-        color: #203d4e;
+        color: NativeColors.text;
         vertical-alignment: center;
         overflow: elide;
     }
@@ -50,18 +53,19 @@ export component SectionHeader inherits Rectangle {
         y: 5px;
         width: 88px;
         height: 20px;
-        background: !root.action_enabled ? #e9eff3 : action_area.has-hover ? #fff1f1 : #f7fbfd;
+        background: !root.action_enabled ? NativeColors.subtle_surface : action_area.has-hover ? NativeColors.danger_soft : NativeColors.surface;
         border-width: 1px;
-        border-color: !root.action_enabled ? #cfd8dc : action_area.has-hover ? #d6a0a0 : #b9c8d1;
+        border-color: !root.action_enabled ? NativeColors.border : action_area.has-hover ? NativeColors.danger : NativeColors.border;
         border-radius: 2px;
 
         Text {
             width: 100%;
             height: 100%;
             text: root.action_title;
+            font-family: FontSettings.details_font_family;
             font-size: max(9pt, (FontSettings.font_size_pt - 1) * 1pt);
             font-weight: 600;
-            color: !root.action_enabled ? #9aa1a6 : action_area.has-hover ? #9a3412 : #203d4e;
+            color: !root.action_enabled ? NativeColors.disabled_text : action_area.has-hover ? NativeColors.danger : NativeColors.text;
             horizontal-alignment: center;
             vertical-alignment: center;
             overflow: elide;
@@ -93,8 +97,10 @@ export component EditableInfoRow inherits Rectangle {
         input.select-all();
     }
 
-    height: 36px;
-    background: #ffffff;
+    height: 30px;
+    background: root.metadata_key != "" && tag_touch.has-hover
+        ? NativeColors.row_hover
+        : NativeColors.surface;
 
     tag_touch := TouchArea {
         width: 154px;
@@ -113,7 +119,8 @@ export component EditableInfoRow inherits Rectangle {
         width: 126px;
         height: 100%;
         text: label;
-        color: #455a64;
+        font-family: FontSettings.details_font_family;
+        color: NativeColors.secondary_text;
         font-size: FontSettings.font_size_pt * 1pt;
         vertical-alignment: center;
         overflow: elide;
@@ -121,12 +128,12 @@ export component EditableInfoRow inherits Rectangle {
 
     Rectangle {
         x: 154px;
-        y: 4px;
+        y: 3px;
         width: max(40px, parent.width - 168px);
-        height: 28px;
-        background: input.has-focus ? #eaf4ff : (root.dirty ? #fff7d6 : (root.status == "Mixed" ? #f6f7f8 : #00000000));
+        height: 24px;
+        background: input.has-focus ? NativeColors.selection : (root.dirty ? NativeColors.pending : (root.status == "Mixed" ? NativeColors.subtle_surface : #00000000));
         border-width: input.has-focus || root.dirty || root.status == "Mixed" ? 1px : 0px;
-        border-color: input.has-focus ? #2563eb : (root.dirty ? #e5c85d : (root.status == "Mixed" ? #d9dee2 : #edf0f2));
+        border-color: input.has-focus ? NativeColors.accent : (root.dirty ? #d6b656 : (root.status == "Mixed" ? NativeColors.border : NativeColors.divider));
         border-radius: 3px;
 
         input := TextInput {
@@ -134,10 +141,11 @@ export component EditableInfoRow inherits Rectangle {
             width: parent.width - 16px;
             height: 100%;
             text <=> root.value;
+            font-family: FontSettings.details_font_family;
             font-size: FontSettings.font_size_pt * 1pt;
             vertical-alignment: center;
             single-line: true;
-            color: #1f2933;
+            color: NativeColors.text;
 
             edited => {
                 if (root.date_input) {
@@ -189,7 +197,8 @@ export component EditableInfoRow inherits Rectangle {
             width: parent.width - 16px;
             height: 100%;
             text: "<Multiple values>";
-            color: #7b858c;
+            font-family: FontSettings.details_font_family;
+            color: NativeColors.disabled_text;
             font-size: max(8pt, (FontSettings.font_size_pt - 2) * 1pt);
             vertical-alignment: center;
             overflow: elide;
@@ -198,7 +207,7 @@ export component EditableInfoRow inherits Rectangle {
 
     HDivider {
         y: parent.height - 1px;
-        background: #f3f5f6;
+        background: NativeColors.divider;
     }
 }
 
@@ -209,16 +218,17 @@ component InlineButton inherits Rectangle {
 
     width: 96px;
     height: 24px;
-    background: !enabled ? #f6f7f8 : area.has-hover ? #eef4f8 : #ffffff;
+    background: !enabled ? NativeColors.subtle_surface : area.has-hover ? NativeColors.hover : NativeColors.surface;
     border-width: 1px;
-    border-color: !enabled ? #d9dee2 : area.has-hover ? #8aa8ba : #b8c2cc;
+    border-color: !enabled ? NativeColors.border : area.has-hover ? #8a8a8a : NativeColors.border;
     border-radius: 3px;
 
     Text {
         width: 100%;
         height: 100%;
         text: root.title;
-        color: root.enabled ? #34434c : #9aa1a6;
+        font-family: FontSettings.details_font_family;
+        color: root.enabled ? NativeColors.text : NativeColors.disabled_text;
         font-size: max(8pt, (FontSettings.font_size_pt - 1) * 1pt);
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -239,8 +249,10 @@ export component ReadOnlyInfoRow inherits Rectangle {
     in property <string> metadata_key: "";
     callback metadata_right_clicked(string, string);
 
-    height: 36px;
-    background: #ffffff;
+    height: 30px;
+    background: root.metadata_key != "" && tag_touch.has-hover
+        ? NativeColors.row_hover
+        : NativeColors.surface;
 
     tag_touch := TouchArea {
         width: 100%;
@@ -259,7 +271,8 @@ export component ReadOnlyInfoRow inherits Rectangle {
         width: 126px;
         height: 100%;
         text: label;
-        color: #455a64;
+        font-family: FontSettings.details_font_family;
+        color: NativeColors.secondary_text;
         font-size: FontSettings.font_size_pt * 1pt;
         vertical-alignment: center;
         overflow: elide;
@@ -270,7 +283,8 @@ export component ReadOnlyInfoRow inherits Rectangle {
         width: max(40px, parent.width - 176px);
         height: 100%;
         text: root.value;
-        color: #1f2933;
+        font-family: FontSettings.details_font_family;
+        color: NativeColors.text;
         font-size: FontSettings.font_size_pt * 1pt;
         vertical-alignment: center;
         overflow: elide;
@@ -278,7 +292,7 @@ export component ReadOnlyInfoRow inherits Rectangle {
 
     HDivider {
         y: parent.height - 1px;
-        background: #f3f5f6;
+        background: NativeColors.divider;
     }
 }
 
@@ -286,15 +300,16 @@ export component ExifAvailabilityRow inherits Rectangle {
     in property <string> label;
     in property <bool> available;
 
-    height: 36px;
-    background: #ffffff;
+    height: 30px;
+    background: NativeColors.surface;
 
     Text {
         x: 14px;
         width: 126px;
         height: 100%;
         text: root.label;
-        color: #455a64;
+        font-family: FontSettings.details_font_family;
+        color: NativeColors.secondary_text;
         font-size: FontSettings.font_size_pt * 1pt;
         vertical-alignment: center;
         overflow: elide;
@@ -302,19 +317,20 @@ export component ExifAvailabilityRow inherits Rectangle {
 
     Rectangle {
         x: 154px;
-        y: 7px;
+        y: 4px;
         width: 46px;
         height: 22px;
-        background: root.available ? #e8f6ee : #fff1f1;
+        background: root.available ? #e7f5ec : NativeColors.danger_soft;
         border-width: 1px;
-        border-color: root.available ? #b9dcc7 : #e2b4b4;
+        border-color: root.available ? #9fd0b1 : #e5a4aa;
         border-radius: 3px;
 
         Text {
             width: 100%;
             height: 100%;
             text: root.available ? "YES" : "NO";
-            color: root.available ? #1f6f43 : #8a3b3b;
+            font-family: FontSettings.details_font_family;
+            color: root.available ? #107c10 : NativeColors.danger;
             font-size: max(8pt, (FontSettings.font_size_pt - 1) * 1pt);
             font-weight: 800;
             horizontal-alignment: center;
@@ -324,7 +340,7 @@ export component ExifAvailabilityRow inherits Rectangle {
 
     HDivider {
         y: parent.height - 1px;
-        background: #f3f5f6;
+        background: NativeColors.divider;
     }
 }
 
@@ -332,7 +348,7 @@ export component CreateExifRow inherits Rectangle {
     callback create_requested();
 
     height: 48px;
-    background: #ffffff;
+    background: NativeColors.surface;
 
     InlineButton {
         x: (parent.width - self.width) / 2;
@@ -345,6 +361,6 @@ export component CreateExifRow inherits Rectangle {
 
     HDivider {
         y: parent.height - 1px;
-        background: #f3f5f6;
+        background: NativeColors.divider;
     }
 }

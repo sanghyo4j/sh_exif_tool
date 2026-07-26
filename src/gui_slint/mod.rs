@@ -42,7 +42,7 @@ use crate::fs::{
     copy_file_to_folder,
     move_file_to_recycle_bin,
     move_trailing_numbers_to_front,
-    open_in_file_manager,
+    reveal_in_file_manager,
     rename_entry,
     save_file_copy,
     set_file_times,
@@ -981,6 +981,10 @@ impl GuiRunner for SlintRunner {
 
                 if selected_paths.len() == 1 {
                     let path = &selected_paths[0];
+                    if !is_jpeg_path(path) && !is_png_path(path) && !is_mp4_path(path) {
+                        show_message(&ui, &unable_title, "The selected file is not a supported media file.");
+                        return;
+                    }
                     let Some(datetime) = extract_datetime_from_filename(path) else {
                         show_message(&ui, &unable_title, "No supported date pattern was found in the filename.");
                         return;
@@ -1002,19 +1006,30 @@ impl GuiRunner for SlintRunner {
                         ui.set_exif_available(true);
                     }
                     update_metadata_dirty_state(&ui);
+                    if is_jpeg_path(path) && !read_exif_metadata(path).has_exif {
+                        show_toast(&ui, "Date staged; an EXIF structure will be created on save.");
+                    }
                     return;
                 }
 
                 let mut pending = HashMap::new();
+                let mut new_exif_count = 0usize;
                 for path in &selected_paths {
+                    if !is_jpeg_path(path) && !is_png_path(path) && !is_mp4_path(path) {
+                        continue;
+                    }
                     if let Some(datetime) = extract_datetime_from_filename(path) {
-                        let existing_taken_date = if is_mp4_path(path) || is_png_path(path) {
-                            scan_media_file(path).media_date
+                        let (existing_taken_date, needs_exif) = if is_mp4_path(path) || is_png_path(path) {
+                            (scan_media_file(path).media_date, false)
                         } else {
-                            read_exif_metadata(path).taken_date
+                            let metadata = read_exif_metadata(path);
+                            (metadata.taken_date, !metadata.has_exif)
                         };
                         if should_apply_taken_date_candidate(&existing_taken_date, &datetime) {
                             pending.insert(path.clone(), datetime);
+                            if needs_exif {
+                                new_exif_count += 1;
+                            }
                         }
                     }
                 }
@@ -1032,12 +1047,19 @@ impl GuiRunner for SlintRunner {
                 ui.set_taken_date_status("Mixed".into());
                 ui.set_taken_date_dirty(true);
                 ui.set_metadata_dirty(true);
-                if ui.get_selected_media_kind().as_str() == "jpeg" && !ui.get_exif_available() {
+                if selected_paths.iter().all(|path| is_jpeg_path(path)) && !ui.get_exif_available() {
                     // Each EXIF-less JPEG will receive its structure during Apply.
                     ui.set_exif_available(true);
                 }
 
-                if skipped_count == 0 {
+                if new_exif_count > 0 {
+                    show_toast(
+                        &ui,
+                        &format!(
+                            "Staged {parsed_count} date(s); EXIF will be created for {new_exif_count}. Ctrl+S to save."
+                        ),
+                    );
+                } else if skipped_count == 0 {
                     show_toast(&ui, &format!("Parsed {parsed_count} date(s). Ctrl+S to save."));
                 } else {
                     show_toast(&ui, &format!("Parsed {parsed_count}; skipped {skipped_count}. Ctrl+S to save."));
@@ -1066,6 +1088,7 @@ impl GuiRunner for SlintRunner {
                 let mut pending = HashMap::new();
                 let mut unavailable_count = 0usize;
                 let mut later_count = 0usize;
+                let mut new_exif_count = 0usize;
                 for path in &selected_paths {
                     if !is_jpeg_path(path) && !is_png_path(path) && !is_mp4_path(path) {
                         unavailable_count += 1;
@@ -1075,13 +1098,17 @@ impl GuiRunner for SlintRunner {
                         unavailable_count += 1;
                         continue;
                     };
-                    let existing_taken_date = if is_mp4_path(path) || is_png_path(path) {
-                        scan_media_file(path).media_date
+                    let (existing_taken_date, needs_exif) = if is_mp4_path(path) || is_png_path(path) {
+                        (scan_media_file(path).media_date, false)
                     } else {
-                        read_exif_metadata(path).taken_date
+                        let metadata = read_exif_metadata(path);
+                        (metadata.taken_date, !metadata.has_exif)
                     };
                     if should_apply_taken_date_candidate(&existing_taken_date, &timestamp) {
                         pending.insert(path.clone(), timestamp);
+                        if needs_exif {
+                            new_exif_count += 1;
+                        }
                     } else {
                         later_count += 1;
                     }
@@ -1105,7 +1132,11 @@ impl GuiRunner for SlintRunner {
                         ui.set_exif_available(true);
                     }
                     update_metadata_dirty_state(&ui);
-                    show_toast(&ui, "Date staged. Ctrl+S to save.");
+                    if new_exif_count > 0 {
+                        show_toast(&ui, "Date staged; an EXIF structure will be created on save.");
+                    } else {
+                        show_toast(&ui, "Date staged. Ctrl+S to save.");
+                    }
                     return;
                 }
 
@@ -1125,7 +1156,11 @@ impl GuiRunner for SlintRunner {
                 }
 
                 let skipped_count = unavailable_count + later_count;
-                let message = if skipped_count == 0 {
+                let message = if new_exif_count > 0 {
+                    format!(
+                        "Staged dates for {staged_count} files; EXIF will be created for {new_exif_count}. Ctrl+S to save."
+                    )
+                } else if skipped_count == 0 {
                     format!(
                         "The earlier file timestamp was staged for {staged_count} files. Save to apply."
                     )
@@ -1559,12 +1594,33 @@ impl GuiRunner for SlintRunner {
             if let Some(ui) = ui_handle.upgrade() {
                 let path = {
                     let app = app_handle.borrow();
-                    PathBuf::from(&app.current_path)
+                    app.path_for_ui_index(ui.get_selected_index())
+                        .filter(|path| path.exists())
+                        .unwrap_or_else(|| PathBuf::from(&app.current_path))
                 };
 
-                if let Err(err) = open_in_file_manager(&path) {
+                if let Err(err) = reveal_in_file_manager(&path) {
                     show_message(&ui, "Open in Explorer Failed", &err);
                 }
+            }
+        });
+
+        let app_handle = app.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_reveal_in_explorer(move |index| {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            let path = {
+                let app = app_handle.borrow();
+                app.path_for_ui_index(index)
+            };
+
+            let Some(path) = path else {
+                show_message(&ui, "Open in Explorer Failed", "The selected item could not be resolved.");
+                return;
+            };
+
+            if let Err(err) = reveal_in_file_manager(&path) {
+                show_message(&ui, "Open in Explorer Failed", &err);
             }
         });
 
@@ -1798,7 +1854,7 @@ impl GuiRunner for SlintRunner {
                         return;
                     }
                 }
-                if ui.get_selected_media_kind().as_str() == "mp4" && ui.get_taken_date_dirty() {
+                if apply_path.as_deref().is_some_and(is_mp4_path) && ui.get_taken_date_dirty() {
                     let Some(path) = apply_path.as_ref() else {
                         show_message(&ui, "Apply Failed", "Selected file could not be resolved.");
                         return;
@@ -1814,7 +1870,7 @@ impl GuiRunner for SlintRunner {
                     ui.set_original_taken_date(ui.get_taken_date());
                     ui.set_taken_date_dirty(false);
                     update_metadata_dirty_state(&ui);
-                } else if ui.get_selected_media_kind().as_str() == "png"
+                } else if apply_path.as_deref().is_some_and(is_png_path)
                     && (ui.get_taken_date_dirty()
                         || ui.get_png_creation_time_dirty()
                         || ui.get_png_exif_date_time_original_dirty())
@@ -2172,7 +2228,10 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
         ui.set_selected_file_count(file_count as i32);
         ui.set_selected_recyclable_count(recyclable_count as i32);
         ui.set_selected_delete_message(delete_confirmation_message(recyclable_count as i32).into());
-        set_media_details(ui, "mixed", "", "", "");
+        // Determining the selected media kind only uses the already-loaded file
+        // entries/extensions, so large selections can keep their tools available
+        // without performing EXIF aggregation.
+        set_selected_media_details(ui, app);
         set_loaded_exif_metadata(ui, ExifMetadata::default());
         return;
     }

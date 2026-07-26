@@ -346,6 +346,14 @@ pub fn open_in_file_manager(path: &Path) -> Result<(), String> {
     open_in_file_manager_impl(path)
 }
 
+pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err("Selected path does not exist.".to_string());
+    }
+
+    reveal_in_file_manager_impl(path)
+}
+
 pub fn set_file_times(
     path: &Path,
     created: Option<SystemTime>,
@@ -658,7 +666,7 @@ fn move_path_to_recycle_bin(path: &Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn open_in_file_manager_impl(path: &Path) -> Result<(), String> {
-    let path = path.canonicalize().map_err(|err| err.to_string())?;
+    let path = explorer_compatible_path(path)?;
     let target = if path.is_file() {
         path.parent()
             .ok_or_else(|| "Selected file parent could not be resolved.".to_string())?
@@ -667,15 +675,112 @@ fn open_in_file_manager_impl(path: &Path) -> Result<(), String> {
         path
     };
 
-    Command::new("explorer.exe")
-        .arg(target)
-        .spawn()
-        .map_err(|err| err.to_string())?;
-    Ok(())
+    shell_execute_windows(target.as_os_str(), None)
+}
+
+#[cfg(windows)]
+fn reveal_in_file_manager_impl(path: &Path) -> Result<(), String> {
+    let path = explorer_compatible_path(path)?;
+    if path.is_dir() {
+        return open_in_file_manager_impl(&path);
+    }
+
+    let mut parameters = std::ffi::OsString::from("/select,\"");
+    parameters.push(path.as_os_str());
+    parameters.push("\"");
+    shell_execute_windows(
+        std::ffi::OsStr::new("explorer.exe"),
+        Some(parameters.as_os_str()),
+    )
+}
+
+#[cfg(windows)]
+fn explorer_compatible_path(path: &Path) -> Result<PathBuf, String> {
+    // std::fs::canonicalize() produces a verbatim `\\?\` path on Windows.
+    // Explorer's command line does not reliably accept that form, so retain
+    // the normal absolute drive/UNC spelling used by the application.
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(path))
+            .map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(windows)]
+fn shell_execute_windows(
+    file: &std::ffi::OsStr,
+    parameters: Option<&std::ffi::OsStr>,
+) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut std::ffi::c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show_command: i32,
+        ) -> *mut std::ffi::c_void;
+    }
+
+    let operation: Vec<u16> = std::ffi::OsStr::new("open")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let file: Vec<u16> = file
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let parameters: Option<Vec<u16>> = parameters.map(|value| {
+        value
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    });
+    let parameter_pointer = parameters
+        .as_ref()
+        .map_or(ptr::null(), |value| value.as_ptr());
+
+    // SAFETY: all pointers refer to null-terminated UTF-16 buffers that remain
+    // alive for the duration of this synchronous ShellExecuteW call.
+    let result = unsafe {
+        ShellExecuteW(
+            ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            parameter_pointer,
+            ptr::null(),
+            1,
+        )
+    } as isize;
+
+    if result <= 32 {
+        Err(format!("Windows Shell failed to open Explorer (code {result})."))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "macos")]
 fn open_in_file_manager_impl(path: &Path) -> Result<(), String> {
+    let mut command = Command::new("open");
+    if path.is_file() {
+        command.arg("-R").arg(path);
+    } else {
+        command.arg(path);
+    }
+
+    command.spawn().map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_in_file_manager_impl(path: &Path) -> Result<(), String> {
     let mut command = Command::new("open");
     if path.is_file() {
         command.arg("-R").arg(path);
@@ -700,6 +805,11 @@ fn open_in_file_manager_impl(path: &Path) -> Result<(), String> {
         .spawn()
         .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn reveal_in_file_manager_impl(path: &Path) -> Result<(), String> {
+    open_in_file_manager_impl(path)
 }
 
 #[cfg(test)]

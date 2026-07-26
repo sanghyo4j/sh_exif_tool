@@ -5,14 +5,14 @@ import { PathBar } from "components/path_bar.slint";
 import { FileTable } from "components/file_table.slint";
 import { CustomFileTable } from "components/custom_file_table.slint";
 import { MetadataPanel } from "components/metadata_panel.slint";
-import { FontSettings, MetadataContextMenuState } from "theme.slint";
+import { FontSettings, MetadataContextMenuState, NativeColors } from "theme.slint";
 
 export { FileEntry, Palette, FontSettings }
 
 export component MainWindow inherits Window {
     width: 1200px;
     height: 800px;
-    background: #ffffff;
+    background: NativeColors.window_bg;
     default-font-family: "Segoe UI Variable Text";
     default-font-size: 10pt;
     title: "SH148 EXIF-File Tool";
@@ -174,6 +174,7 @@ export component MainWindow inherits Window {
     callback delete_file();
     callback confirm_delete_file();
     callback open_in_explorer();
+    callback reveal_in_explorer(int);
     callback exit_app();
     callback apply_changes();
     callback revert_changes();
@@ -374,6 +375,17 @@ export component MainWindow inherits Window {
                     root.editing_path = false;
                     root.show_extension_in_file_name = !root.show_extension_in_file_name;
                     root.set_show_extension_in_file_name(root.show_extension_in_file_name);
+                }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: "Use Monospace Font in Details";
+                checkable: true;
+                checked: FontSettings.use_monospace_details;
+                activated => {
+                    root.file_context_menu_visible = false;
+                    root.editing_path = false;
+                    FontSettings.use_monospace_details = !FontSettings.use_monospace_details;
                 }
             }
             MenuSeparator {}
@@ -625,9 +637,9 @@ export component MainWindow inherits Window {
                 open_folder_requested() => {
                     root.editing_path = true;
                 }
-                open_in_file_manager_requested() => {
+                open_in_file_manager_requested(index) => {
                     root.editing_path = false;
-                    root.open_in_explorer();
+                    root.reveal_in_explorer(index);
                 }
                 apply_requested() => {
                     root.editing_path = false;
@@ -890,7 +902,7 @@ export component MainWindow inherits Window {
         y: min(root.height - 112px, max(42px, MetadataContextMenuState.y));
         width: 152px;
         height: 86px;
-        background: #f2f2f2;
+        background: NativeColors.menu_bg;
         border-width: 1px;
         border-color: #a0a0a0;
         border-radius: 0px;
@@ -929,8 +941,8 @@ export component MainWindow inherits Window {
             y: 1px;
             width: parent.width - 2px;
             height: 28px;
-            background: copy_area.has-hover ? #d9eaf7 : #f2f2f2;
-            Text { x: 12px; width: parent.width - 24px; height: 100%; text: "Copy (C)"; color: #202020; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; }
+            background: copy_area.has-hover ? NativeColors.hover : NativeColors.menu_bg;
+            Text { x: 12px; width: parent.width - 24px; height: 100%; text: "Copy (C)"; color: NativeColors.text; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; }
             copy_area := TouchArea { width: 100%; height: 100%; clicked => { root.exif_context_menu_visible = false; root.exif_context_copy(); } }
         }
         Rectangle {
@@ -938,8 +950,8 @@ export component MainWindow inherits Window {
             y: 29px;
             width: parent.width - 2px;
             height: 28px;
-            background: root.exif_context_paste_enabled && paste_area.has-hover ? #d9eaf7 : #f2f2f2;
-            Text { x: 12px; width: parent.width - 24px; height: 100%; text: "Paste (P)"; color: root.exif_context_paste_enabled ? #202020 : #929292; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; }
+            background: root.exif_context_paste_enabled && paste_area.has-hover ? NativeColors.hover : NativeColors.menu_bg;
+            Text { x: 12px; width: parent.width - 24px; height: 100%; text: "Paste (P)"; color: root.exif_context_paste_enabled ? NativeColors.text : NativeColors.disabled_text; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; }
             paste_area := TouchArea { enabled: root.exif_context_paste_enabled; width: 100%; height: 100%; clicked => { root.exif_context_menu_visible = false; root.exif_context_paste(); } }
         }
         Rectangle {
@@ -947,8 +959,8 @@ export component MainWindow inherits Window {
             y: 57px;
             width: parent.width - 2px;
             height: 28px;
-            background: root.exif_context_remove_enabled && remove_area.has-hover ? #d9eaf7 : #f2f2f2;
-            Text { x: 12px; width: parent.width - 24px; height: 100%; text: "Remove (R)"; color: root.exif_context_remove_enabled ? #202020 : #929292; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; }
+            background: root.exif_context_remove_enabled && remove_area.has-hover ? NativeColors.hover : NativeColors.menu_bg;
+            Text { x: 12px; width: parent.width - 24px; height: 100%; text: "Remove (R)"; color: root.exif_context_remove_enabled ? NativeColors.text : NativeColors.disabled_text; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; }
             remove_area := TouchArea { enabled: root.exif_context_remove_enabled; width: 100%; height: 100%; clicked => { root.exif_context_menu_visible = false; root.exif_context_remove(); } }
         }
     }
@@ -1016,29 +1028,29 @@ export component MainWindow inherits Window {
             y: (root.height - self.height) / 2;
             width: min(610px, root.width - 48px);
             height: 390px;
-            background: #ffffff;
+            background: NativeColors.surface;
             border-width: 1px;
-            border-color: #cfd8dc;
+            border-color: NativeColors.border;
             border-radius: 6px;
 
             Text {
                 x: 22px; y: 16px; width: parent.width - 44px; height: 30px;
                 text: "Shift Media Date";
-                color: #263238; font-size: 15px; font-weight: 700;
+                color: NativeColors.text; font-size: 15px; font-weight: 700;
                 vertical-alignment: center;
             }
 
             Text {
                 x: 22px; y: 54px; width: 72px; height: 28px;
-                text: "Operation"; color: #455a64;
+                text: "Operation"; color: NativeColors.secondary_text;
                 font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center;
             }
 
             Rectangle {
                 x: 104px; y: 54px; width: 82px; height: 28px;
-                background: !root.shift_media_date_subtract ? #eaf4ff : #ffffff;
-                border-width: 1px; border-color: #9db4c2; border-radius: 3px;
-                Text { width: 100%; height: 100%; text: "Add"; color: #263238; horizontal-alignment: center; vertical-alignment: center; }
+                background: !root.shift_media_date_subtract ? NativeColors.selection : NativeColors.surface;
+                border-width: 1px; border-color: !root.shift_media_date_subtract ? NativeColors.accent : NativeColors.border; border-radius: 3px;
+                Text { width: 100%; height: 100%; text: "Add"; color: NativeColors.text; horizontal-alignment: center; vertical-alignment: center; }
                 TouchArea { width: 100%; height: 100%; clicked => {
                     root.shift_media_date_subtract = false;
                     root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, root.shift_media_date_hours, root.shift_media_date_minutes, root.shift_media_date_seconds, false);
@@ -1046,36 +1058,36 @@ export component MainWindow inherits Window {
             }
             Rectangle {
                 x: 194px; y: 54px; width: 82px; height: 28px;
-                background: root.shift_media_date_subtract ? #eaf4ff : #ffffff;
-                border-width: 1px; border-color: #9db4c2; border-radius: 3px;
-                Text { width: 100%; height: 100%; text: "Subtract"; color: #263238; horizontal-alignment: center; vertical-alignment: center; }
+                background: root.shift_media_date_subtract ? NativeColors.selection : NativeColors.surface;
+                border-width: 1px; border-color: root.shift_media_date_subtract ? NativeColors.accent : NativeColors.border; border-radius: 3px;
+                Text { width: 100%; height: 100%; text: "Subtract"; color: NativeColors.text; horizontal-alignment: center; vertical-alignment: center; }
                 TouchArea { width: 100%; height: 100%; clicked => {
                     root.shift_media_date_subtract = true;
                     root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, root.shift_media_date_hours, root.shift_media_date_minutes, root.shift_media_date_seconds, true);
                 } }
             }
 
-            Text { x: 22px; y: 102px; width: 70px; height: 22px; text: "Days"; color: #455a64; vertical-alignment: center; }
-            Text { x: 154px; y: 102px; width: 70px; height: 22px; text: "Hours"; color: #455a64; vertical-alignment: center; }
-            Text { x: 286px; y: 102px; width: 70px; height: 22px; text: "Minutes"; color: #455a64; vertical-alignment: center; }
-            Text { x: 418px; y: 102px; width: 70px; height: 22px; text: "Seconds"; color: #455a64; vertical-alignment: center; }
+            Text { x: 22px; y: 102px; width: 70px; height: 22px; text: "Days"; color: NativeColors.secondary_text; vertical-alignment: center; }
+            Text { x: 154px; y: 102px; width: 70px; height: 22px; text: "Hours"; color: NativeColors.secondary_text; vertical-alignment: center; }
+            Text { x: 286px; y: 102px; width: 70px; height: 22px; text: "Minutes"; color: NativeColors.secondary_text; vertical-alignment: center; }
+            Text { x: 418px; y: 102px; width: 70px; height: 22px; text: "Seconds"; color: NativeColors.secondary_text; vertical-alignment: center; }
 
             LineEdit { x: 22px; y: 126px; width: 110px; height: 30px; text <=> root.shift_media_date_days; edited(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(value, root.shift_media_date_hours, root.shift_media_date_minutes, root.shift_media_date_seconds, root.shift_media_date_subtract); } }
             LineEdit { x: 154px; y: 126px; width: 110px; height: 30px; text <=> root.shift_media_date_hours; edited(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, value, root.shift_media_date_minutes, root.shift_media_date_seconds, root.shift_media_date_subtract); } }
             LineEdit { x: 286px; y: 126px; width: 110px; height: 30px; text <=> root.shift_media_date_minutes; edited(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, root.shift_media_date_hours, value, root.shift_media_date_seconds, root.shift_media_date_subtract); } }
             LineEdit { x: 418px; y: 126px; width: 110px; height: 30px; text <=> root.shift_media_date_seconds; edited(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, root.shift_media_date_hours, root.shift_media_date_minutes, value, root.shift_media_date_subtract); } }
 
-            Text { x: 22px; y: 174px; width: parent.width - 44px; height: 22px; text: "Preview"; color: #263238; font-weight: 700; vertical-alignment: center; }
-            Rectangle { x: 22px; y: 200px; width: parent.width - 44px; height: 118px; background: #f6f8fa; border-width: 1px; border-color: #dde4e8; border-radius: 3px;
-                Text { x: 12px; y: 8px; width: parent.width - 24px; height: parent.height - 16px; text: root.shift_media_date_preview; color: #37474f; font-size: max(9pt, (FontSettings.font_size_pt - 1) * 1pt); wrap: word-wrap; }
+            Text { x: 22px; y: 174px; width: parent.width - 44px; height: 22px; text: "Preview"; color: NativeColors.text; font-weight: 700; vertical-alignment: center; }
+            Rectangle { x: 22px; y: 200px; width: parent.width - 44px; height: 118px; background: NativeColors.subtle_surface; border-width: 1px; border-color: NativeColors.border; border-radius: 3px;
+                Text { x: 12px; y: 8px; width: parent.width - 24px; height: parent.height - 16px; text: root.shift_media_date_preview; color: NativeColors.text; font-size: max(9pt, (FontSettings.font_size_pt - 1) * 1pt); wrap: word-wrap; }
             }
 
-            Rectangle { x: parent.width - 190px; y: parent.height - 48px; width: 76px; height: 30px; background: cancel_shift.has-hover ? #f3f6f8 : #ffffff; border-width: 1px; border-color: #b8c2cc; border-radius: 3px;
-                Text { width: 100%; height: 100%; text: "Cancel"; color: #263238; horizontal-alignment: center; vertical-alignment: center; }
+            Rectangle { x: parent.width - 190px; y: parent.height - 48px; width: 76px; height: 30px; background: cancel_shift.has-hover ? NativeColors.hover : NativeColors.surface; border-width: 1px; border-color: NativeColors.border; border-radius: 3px;
+                Text { width: 100%; height: 100%; text: "Cancel"; color: NativeColors.text; horizontal-alignment: center; vertical-alignment: center; }
                 cancel_shift := TouchArea { width: 100%; height: 100%; clicked => { root.shift_media_date_visible = false; } }
             }
-            Rectangle { x: parent.width - 102px; y: parent.height - 48px; width: 80px; height: 30px; background: apply_shift.has-hover ? #eaf4ff : #ffffff; border-width: 1px; border-color: #8aa8ba; border-radius: 3px;
-                Text { width: 100%; height: 100%; text: "Apply"; color: #1f3440; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+            Rectangle { x: parent.width - 102px; y: parent.height - 48px; width: 80px; height: 30px; background: apply_shift.has-hover ? NativeColors.selection : NativeColors.surface; border-width: 1px; border-color: NativeColors.accent; border-radius: 3px;
+                Text { width: 100%; height: 100%; text: "Apply"; color: NativeColors.text; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
                 apply_shift := TouchArea { width: 100%; height: 100%; clicked => {
                     if (root.apply_shift_media_date(root.shift_media_date_days, root.shift_media_date_hours, root.shift_media_date_minutes, root.shift_media_date_seconds, root.shift_media_date_subtract)) {
                         root.shift_media_date_visible = false;
@@ -1192,9 +1204,9 @@ export component MainWindow inherits Window {
             y: (root.height - self.height) / 2;
             width: min(420px, root.width - 48px);
             height: 150px;
-            background: #ffffff;
+            background: NativeColors.surface;
             border-width: 1px;
-            border-color: #cfd8dc;
+            border-color: NativeColors.border;
             border-radius: 6px;
 
             Text {
@@ -1203,7 +1215,7 @@ export component MainWindow inherits Window {
                 width: parent.width - 40px;
                 height: 28px;
                 text: root.message_title;
-                color: #263238;
+                color: NativeColors.text;
                 font-size: 15px;
                 font-weight: 700;
                 vertical-alignment: center;
@@ -1215,7 +1227,7 @@ export component MainWindow inherits Window {
                 width: parent.width - 40px;
                 height: 40px;
                 text: root.message_text;
-                color: #37474f;
+                color: NativeColors.text;
                 font-size: FontSettings.font_size_pt * 1pt;
                 wrap: word-wrap;
             }
@@ -1225,16 +1237,16 @@ export component MainWindow inherits Window {
                 y: parent.height - 44px;
                 width: 72px;
                 height: 28px;
-                background: ok_touch.has-hover ? #eaf4ff : #ffffff;
+                background: ok_touch.has-hover ? NativeColors.hover : NativeColors.surface;
                 border-width: 1px;
-                border-color: #b8c2cc;
+                border-color: NativeColors.border;
                 border-radius: 3px;
 
                 Text {
                     width: 100%;
                     height: 100%;
                     text: "OK";
-                    color: #1f2933;
+                    color: NativeColors.text;
                     font-size: FontSettings.font_size_pt * 1pt;
                     horizontal-alignment: center;
                     vertical-alignment: center;
@@ -1259,16 +1271,16 @@ export component MainWindow inherits Window {
                 y: parent.height - 44px;
                 width: 72px;
                 height: 28px;
-                background: !root.confirm_yes_selected ? #eaf4ff : no_touch.has-hover ? #f3f6f8 : #ffffff;
+                background: !root.confirm_yes_selected ? NativeColors.selection : no_touch.has-hover ? NativeColors.hover : NativeColors.surface;
                 border-width: !root.confirm_yes_selected ? 2px : 1px;
-                border-color: !root.confirm_yes_selected ? #4f86a6 : #b8c2cc;
+                border-color: !root.confirm_yes_selected ? NativeColors.accent : NativeColors.border;
                 border-radius: 3px;
 
                 Text {
                     width: 100%;
                     height: 100%;
                     text: "No";
-                    color: #1f2933;
+                    color: NativeColors.text;
                     font-size: FontSettings.font_size_pt * 1pt;
                     horizontal-alignment: center;
                     vertical-alignment: center;
@@ -1305,16 +1317,16 @@ export component MainWindow inherits Window {
                 y: parent.height - 44px;
                 width: 72px;
                 height: 28px;
-                background: root.confirm_yes_selected ? #fff1f1 : yes_touch.has-hover ? #fff7f7 : #ffffff;
+                background: root.confirm_yes_selected ? NativeColors.danger_soft : yes_touch.has-hover ? NativeColors.danger_soft : NativeColors.surface;
                 border-width: root.confirm_yes_selected ? 2px : 1px;
-                border-color: root.confirm_yes_selected ? #b42318 : #d99a9a;
+                border-color: root.confirm_yes_selected ? NativeColors.danger : #e5a4aa;
                 border-radius: 3px;
 
                 Text {
                     width: 100%;
                     height: 100%;
                     text: "Yes";
-                    color: #b42318;
+                    color: NativeColors.danger;
                     font-size: FontSettings.font_size_pt * 1pt;
                     horizontal-alignment: center;
                     vertical-alignment: center;
@@ -1356,7 +1368,7 @@ export component MainWindow inherits Window {
         y: root.height - 26px;
         width: 100%;
         height: 26px;
-        background: #f7f7f7;
+        background: NativeColors.subtle_surface;
 
         Text {
             x: 10px;
@@ -1364,7 +1376,7 @@ export component MainWindow inherits Window {
             height: 100%;
             text: root.activity_text;
             font-size: FontSettings.font_size_pt * 1pt;
-            color: #4f5f68;
+            color: NativeColors.secondary_text;
             vertical-alignment: center;
             overflow: elide;
         }
@@ -1377,7 +1389,7 @@ export component MainWindow inherits Window {
                 ? root.selected_file_count + " selected / " + root.item_count + (root.item_count == 1 ? " file" : " files")
                 : root.item_count + (root.item_count == 1 ? " file" : " files");
             font-size: FontSettings.font_size_pt * 1pt;
-            color: #666666;
+            color: NativeColors.secondary_text;
             horizontal-alignment: right;
             vertical-alignment: center;
             overflow: elide;
@@ -1389,7 +1401,7 @@ export component MainWindow inherits Window {
             height: 100%;
             text: "Font: " + FontSettings.font_size_pt + " pt";
             font-size: FontSettings.font_size_pt * 1pt;
-            color: #666666;
+            color: NativeColors.secondary_text;
             horizontal-alignment: right;
             vertical-alignment: center;
         }

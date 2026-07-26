@@ -1,6 +1,6 @@
 import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
 import { SectionHeader, EditableInfoRow, ReadOnlyInfoRow, CreateExifRow } from "info_row.slint";
-import { FontSettings } from "../theme.slint";
+import { FontSettings, NativeColors } from "../theme.slint";
 
 component ToolButton inherits Rectangle {
     in property <string> title;
@@ -8,9 +8,9 @@ component ToolButton inherits Rectangle {
 
     width: 78px;
     height: 24px;
-    background: area.has-hover ? #e8f0f5 : #ffffff;
+    background: area.has-hover ? NativeColors.hover : NativeColors.surface;
     border-width: 1px;
-    border-color: area.has-hover ? #8aa8ba : #b8c6cf;
+    border-color: area.has-hover ? #8a8a8a : NativeColors.border;
     border-radius: 2px;
 
     Text {
@@ -18,8 +18,9 @@ component ToolButton inherits Rectangle {
         width: parent.width - 24px;
         height: 100%;
         text: root.title;
+        font-family: FontSettings.details_font_family;
         font-size: max(9pt, (FontSettings.font_size_pt - 1) * 1pt);
-        color: #1f3440;
+        color: NativeColors.text;
         font-weight: 600;
         horizontal-alignment: left;
         vertical-alignment: center;
@@ -30,8 +31,9 @@ component ToolButton inherits Rectangle {
         width: 14px;
         height: 100%;
         text: "v";
+        font-family: FontSettings.details_font_family;
         font-size: max(8pt, (FontSettings.font_size_pt - 2) * 1pt);
-        color: #52626d;
+        color: NativeColors.secondary_text;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -51,15 +53,16 @@ component MenuRow inherits Rectangle {
     x: 1px;
     width: 278px;
     height: 28px;
-    background: area.has-hover ? #d9eaf7 : #f2f2f2;
+    background: area.has-hover ? NativeColors.hover : NativeColors.menu_bg;
 
     Text {
         x: 12px;
         width: parent.width - 24px;
         height: 100%;
         text: root.title;
+        font-family: FontSettings.details_font_family;
         font-size: FontSettings.font_size_pt * 1pt;
-        color: #202020;
+        color: NativeColors.text;
         vertical-alignment: center;
         overflow: elide;
     }
@@ -78,17 +81,18 @@ component ActionButton inherits Rectangle {
 
     width: 96px;
     height: 30px;
-    background: !enabled ? #f6f7f8 : area.has-hover ? #eef4f8 : #ffffff;
+    background: !enabled ? NativeColors.subtle_surface : area.has-hover ? NativeColors.hover : NativeColors.surface;
     border-width: 1px;
-    border-color: !enabled ? #d9dee2 : area.has-hover ? #8aa8ba : #9aa5ad;
+    border-color: !enabled ? NativeColors.border : area.has-hover ? #8a8a8a : NativeColors.border;
     border-radius: 3px;
 
     Text {
         width: 100%;
         height: 100%;
         text: root.title;
+        font-family: FontSettings.details_font_family;
         font-size: FontSettings.font_size_pt * 1pt;
-        color: root.enabled ? #34434c : #9aa1a6;
+        color: root.enabled ? NativeColors.text : NativeColors.disabled_text;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -225,7 +229,7 @@ export component MetadataPanel inherits Rectangle {
         root.metadata_tools_menu_visible = false;
     }
 
-    background: #fcfcfc;
+    background: NativeColors.surface;
 
     focus_sink := FocusScope {
         x: 0px;
@@ -270,13 +274,13 @@ export component MetadataPanel inherits Rectangle {
 
         Rectangle {
             height: 30px;
-            background: #edf3f7;
+            background: NativeColors.subtle_surface;
 
             Rectangle {
                 y: parent.height - 1px;
                 width: 100%;
                 height: 1px;
-                background: #cfdbe2;
+                background: NativeColors.border;
             }
 
             Text {
@@ -284,9 +288,10 @@ export component MetadataPanel inherits Rectangle {
                 width: parent.width - 188px;
                 height: 100%;
                 text: "Details";
+                font-family: FontSettings.details_font_family;
                 font-size: max(10pt, FontSettings.font_size_pt * 1pt);
                 font-weight: 600;
-                color: #203d4e;
+                color: NativeColors.text;
                 vertical-alignment: center;
                 overflow: elide;
             }
@@ -318,7 +323,7 @@ export component MetadataPanel inherits Rectangle {
 
         Rectangle {
             vertical-stretch: 1;
-            background: #fcfcfc;
+            background: NativeColors.surface;
 
             ScrollView {
                 width: 100%;
@@ -411,7 +416,7 @@ export component MetadataPanel inherits Rectangle {
 
         Rectangle {
             height: 48px;
-            background: #ffffff;
+            background: NativeColors.surface;
 
             ActionButton {
                 x: parent.width - 212px;
@@ -452,7 +457,7 @@ export component MetadataPanel inherits Rectangle {
         y: 30px;
         width: 280px;
         height: 86px;
-        background: #f2f2f2;
+        background: NativeColors.menu_bg;
         border-width: 1px;
         border-color: #a0a0a0;
         border-radius: 0px;
@@ -467,7 +472,7 @@ export component MetadataPanel inherits Rectangle {
         y: 30px;
         width: 280px;
         height: (root.selected_media_kind == "jpeg" || root.selected_media_kind == "png") ? 114px : 86px;
-        background: #f2f2f2;
+        background: NativeColors.menu_bg;
         border-width: 1px;
         border-color: #a0a0a0;
         border-radius: 0px;

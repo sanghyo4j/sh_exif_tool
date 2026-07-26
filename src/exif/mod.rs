@@ -1132,6 +1132,13 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
             }
         }
 
+        if start + 17 <= chars.len() {
+            let separated: String = chars[start..start + 17].iter().collect();
+            if let Some(parsed) = parse_short_year_separated_filename_datetime(&separated) {
+                candidates.push(parsed);
+            }
+        }
+
         let mut digits = String::new();
         let mut candidate_10 = None;
         let mut candidate_12 = None;
@@ -1195,6 +1202,31 @@ fn parse_separated_filename_datetime(value: &str) -> Option<NaiveDateTime> {
         .map(|index| bytes[*index] as char)
         .collect();
     parse_compact_filename_datetime(&digits)
+}
+
+fn parse_short_year_separated_filename_datetime(value: &str) -> Option<NaiveDateTime> {
+    let bytes = value.as_bytes();
+    let digit_positions = [0, 1, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16];
+    if bytes.len() != 17
+        || !digit_positions
+            .iter()
+            .all(|index| bytes[*index].is_ascii_digit())
+        || !matches!(bytes[2], b'-' | b'.' | b'_')
+        || !matches!(bytes[5], b'-' | b'.' | b'_')
+        || !matches!(bytes[8], b' ' | b'-' | b'_' | b'T')
+        || !matches!(bytes[11], b':' | b';' | b'.' | b'-' | b'_')
+        || !matches!(bytes[14], b':' | b';' | b'.' | b'-' | b'_')
+    {
+        return None;
+    }
+
+    let digits: String = digit_positions
+        .iter()
+        .map(|index| bytes[*index] as char)
+        .collect();
+    let year = 2000 + digits[0..2].parse::<i32>().ok()?;
+    let expanded = format!("{year:04}{}", &digits[2..]);
+    parse_compact_filename_datetime(&expanded)
 }
 
 pub fn exif_datetime_to_display(value: &str) -> String {
@@ -2352,6 +2384,10 @@ mod tests {
         assert_eq!(
             extract_datetime_from_filename(Path::new("2014-02-04 14.40.01.png")).as_deref(),
             Some("2014-02-04 14:40:01")
+        );
+        assert_eq!(
+            extract_datetime_from_filename(Path::new("16-04-27-18-10-53-393_video.mp4")).as_deref(),
+            Some("2016-04-27 18:10:53")
         );
     }
 
