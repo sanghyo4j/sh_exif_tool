@@ -141,7 +141,14 @@ fn scan_atoms(file: &mut File) -> Result<Mp4Summary, String> {
         let atom = read_atom_header(file, position, file_len)?;
         match &atom.kind {
             b"ftyp" => found_ftyp = true,
-            b"moov" => scan_atom_children(file, atom.payload_start, atom.end, 0, &mut summary)?,
+            b"moov" => {
+                scan_atom_children(file, atom.payload_start, atom.end, 0, &mut summary)?;
+                // Some Samsung files append an SEFT footer after the complete
+                // moov atom. It is not an ISO BMFF atom stream and must remain
+                // opaque. All standard creation-time fields are inside moov,
+                // so no later top-level data needs to be parsed.
+                break;
+            }
             _ => {}
         }
         position = atom.end;
@@ -237,13 +244,16 @@ fn find_creation_time_fields(file: &mut File) -> Result<Vec<CreationTimeField>, 
         let atom = read_atom_header(file, position, file_len)?;
         match &atom.kind {
             b"ftyp" => found_ftyp = true,
-            b"moov" => collect_creation_time_fields(
-                file,
-                atom.payload_start,
-                atom.end,
-                0,
-                &mut fields,
-            )?,
+            b"moov" => {
+                collect_creation_time_fields(
+                    file,
+                    atom.payload_start,
+                    atom.end,
+                    0,
+                    &mut fields,
+                )?;
+                break;
+            }
             _ => {}
         }
         position = atom.end;
@@ -557,6 +567,40 @@ mod tests {
         assert_eq!(
             &updated_bytes[updated_bytes.len() - 16..],
             &original_bytes[original_bytes.len() - 16..]
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn preserves_samsung_seft_footer_after_moov() {
+        let ftyp = atom(b"ftyp", b"mp42\0\0\0\0isommp42");
+        let mdat = atom(b"mdat", &[0x5a; 32]);
+        let moov = atom(b"moov", &atom(b"mvhd", &version_zero_date_payload(0)));
+        let seft_footer = b"\0\0A\n\x12\0\0\0BackupRestore_Data_test_SEFHe\0\0\0\x01\0\0\0\0\0A\n,\0\0\0,\0\0\0\x18\0\0\0SEFT";
+        let original_bytes = [
+            ftyp.as_slice(),
+            mdat.as_slice(),
+            moov.as_slice(),
+            seft_footer.as_slice(),
+        ]
+        .concat();
+        let path = std::env::temp_dir().join(format!(
+            "sh148_exif_file_tool_mp4_seft_footer_{}.mp4",
+            std::process::id()
+        ));
+        std::fs::write(&path, &original_bytes).unwrap();
+
+        let display_value = "2016-05-19 20:31:26";
+        write_media_date(&path, display_value).unwrap();
+
+        let updated_bytes = std::fs::read(&path).unwrap();
+        let result = scan_media_file(&path);
+        assert_eq!(updated_bytes.len(), original_bytes.len());
+        assert_eq!(result.media_date, display_value);
+        assert_eq!(
+            &updated_bytes[updated_bytes.len() - seft_footer.len()..],
+            seft_footer
         );
 
         let _ = std::fs::remove_file(path);
