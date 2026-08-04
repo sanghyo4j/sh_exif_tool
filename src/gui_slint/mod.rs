@@ -1,6 +1,6 @@
 pub mod app;
 
-use chrono::{Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{Duration as ChronoDuration, FixedOffset, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use slint::{language::ColorScheme, ComponentHandle};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use self::app::{CachedMediaScan, SlintApp};
 use crate::exif::{
+    extract_embedded_thumbnail,
     extract_datetime_from_filename,
     exif_backup_path,
     is_generated_new_exif_path,
@@ -28,6 +29,9 @@ use crate::exif::{
     write_color_space,
     write_flash_fired,
     write_focal_length,
+    write_gps_date_stamp,
+    write_gps_date_time,
+    write_gps_time_stamp,
     write_iso_speed,
     write_lens_model,
     write_metering_mode,
@@ -38,15 +42,18 @@ use crate::exif::{
     ExifMetadata,
 };
 use crate::fs::{
+    analyze_front_or_rear_number_removal,
     copy_file_times,
     copy_file_to_folder,
     move_file_to_recycle_bin,
     move_trailing_numbers_to_front,
+    remove_front_or_rear_numbers,
     reveal_in_file_manager,
     rename_entry,
     save_file_copy,
     set_file_times,
     trailing_number_rename_candidate_count,
+    FilenameCollisionResolver,
 };
 use crate::media::{
     read_png_date_sources,
@@ -146,6 +153,8 @@ impl GuiRunner for SlintRunner {
         let pending_filename_renames =
             Rc::new(RefCell::new(HashMap::<PathBuf, String>::new()));
         let pending_filename_taken_dates = Rc::new(RefCell::new(HashMap::<PathBuf, String>::new()));
+        let pending_gps_date_times =
+            Rc::new(RefCell::new(HashMap::<PathBuf, (String, String)>::new()));
         let pending_created_dates = Rc::new(RefCell::new(HashMap::<PathBuf, SystemTime>::new()));
         let pending_modified_dates = Rc::new(RefCell::new(HashMap::<PathBuf, SystemTime>::new()));
         let pending_exif_removals = Rc::new(RefCell::new(HashSet::<PathBuf>::new()));
@@ -268,6 +277,10 @@ impl GuiRunner for SlintRunner {
         let ui_handle = ui.as_weak();
         ui.on_exif_tag_right_clicked(move |key, value| {
             let Some(ui) = ui_handle.upgrade() else { return; };
+            if key.is_empty() {
+                ui.set_exif_context_menu_visible(false);
+                return;
+            }
             let Some(_path) = app_handle.borrow().path_for_ui_index(ui.get_selected_index()) else { return; };
             let key = key.to_string();
             let value = value.to_string();
@@ -296,6 +309,10 @@ impl GuiRunner for SlintRunner {
         let ui_handle = ui.as_weak();
         ui.on_exif_section_right_clicked(move |section| {
             let Some(ui) = ui_handle.upgrade() else { return; };
+            if section.is_empty() {
+                ui.set_exif_context_menu_visible(false);
+                return;
+            }
             let Some(_path) = app_handle.borrow().path_for_ui_index(ui.get_selected_index()) else { return; };
             let section = section.to_string();
             let current_values = collect_exif_section(&ui, &section);
@@ -568,6 +585,7 @@ impl GuiRunner for SlintRunner {
                     );
                     return;
                 }
+                ui.set_shift_gps_date_time_mode(false);
 
                 if selected_paths.len() == 1 {
                     pending_renames.borrow_mut().clear();
@@ -590,7 +608,7 @@ impl GuiRunner for SlintRunner {
                     return;
                 }
 
-                let mut reserved_names = HashSet::new();
+                let mut collision_resolver = FilenameCollisionResolver::new();
                 let mut staged = HashMap::new();
                 let mut skipped_count = 0usize;
                 for path in &selected_paths {
@@ -599,7 +617,7 @@ impl GuiRunner for SlintRunner {
                         path,
                         &media_date,
                         true,
-                        &mut reserved_names,
+                        &mut collision_resolver,
                     ) {
                         Ok(value) => value,
                         Err(_) => {
@@ -648,6 +666,7 @@ impl GuiRunner for SlintRunner {
         let app_handle = app.clone();
         let pending_renames = pending_filename_renames.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_gps_date_times_handle = pending_gps_date_times.clone();
         let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
         let pending_exif_removals_handle = pending_exif_removals.clone();
@@ -658,6 +677,7 @@ impl GuiRunner for SlintRunner {
             if let Some(ui) = ui_handle.upgrade() {
                 pending_renames.borrow_mut().clear();
                 pending_taken_dates.borrow_mut().clear();
+                pending_gps_date_times_handle.borrow_mut().clear();
                 pending_created_dates_handle.borrow_mut().clear();
                 pending_modified_dates_handle.borrow_mut().clear();
                 pending_exif_removals_handle.borrow_mut().clear();
@@ -676,6 +696,7 @@ impl GuiRunner for SlintRunner {
         let app_handle = app.clone();
         let pending_renames = pending_filename_renames.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_gps_date_times_handle = pending_gps_date_times.clone();
         let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
         let pending_exif_removals_handle = pending_exif_removals.clone();
@@ -686,6 +707,7 @@ impl GuiRunner for SlintRunner {
             let Some(ui) = ui_handle.upgrade() else { return; };
             pending_renames.borrow_mut().clear();
             pending_taken_dates.borrow_mut().clear();
+            pending_gps_date_times_handle.borrow_mut().clear();
             pending_created_dates_handle.borrow_mut().clear();
             pending_modified_dates_handle.borrow_mut().clear();
             pending_exif_removals_handle.borrow_mut().clear();
@@ -875,20 +897,72 @@ impl GuiRunner for SlintRunner {
 
         let app_handle = app.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
-        ui.on_update_shift_media_date_preview(move |days, hours, minutes, seconds, subtract| {
-            let selected_paths = {
-                let app = app_handle.borrow();
-                selected_file_paths(&app)
-            };
-            build_shift_media_date_preview(
-                &selected_paths,
-                &pending_taken_dates.borrow(),
-                days.as_str(), hours.as_str(), minutes.as_str(), seconds.as_str(), subtract,
-            ).into()
+        let pending_gps_date_times_handle = pending_gps_date_times.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_request_shift_gps_date_time(move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                if (ui.get_metadata_dirty() && pending_gps_date_times_handle.borrow().is_empty())
+                    || !pending_taken_dates.borrow().is_empty()
+                {
+                    show_message(
+                        &ui,
+                        "Pending Changes",
+                        "Save or revert the current changes before shifting GPS Date/Time.",
+                    );
+                    return;
+                }
+                let selected_paths = {
+                    let app = app_handle.borrow();
+                    selected_file_paths(&app)
+                };
+                if selected_paths.is_empty() {
+                    show_message(&ui, "Unable to Shift GPS Date/Time", "Select one or more JPEG files first.");
+                    return;
+                }
+                ui.set_shift_gps_date_time_mode(true);
+                ui.set_shift_media_date_subtract(false);
+                ui.set_shift_media_date_days("0".into());
+                ui.set_shift_media_date_hours("0".into());
+                ui.set_shift_media_date_minutes("0".into());
+                ui.set_shift_media_date_seconds("0".into());
+                let preview = build_shift_gps_date_time_preview(
+                    &selected_paths,
+                    &pending_gps_date_times_handle.borrow(),
+                    "0", "0", "0", "0", false,
+                );
+                ui.set_shift_media_date_preview(preview.into());
+                ui.set_shift_media_date_visible(true);
+            }
         });
 
         let app_handle = app.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_gps_date_times_handle = pending_gps_date_times.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_update_shift_media_date_preview(move |days, hours, minutes, seconds, subtract| {
+            let Some(ui) = ui_handle.upgrade() else { return String::new().into(); };
+            let selected_paths = {
+                let app = app_handle.borrow();
+                selected_file_paths(&app)
+            };
+            if ui.get_shift_gps_date_time_mode() {
+                build_shift_gps_date_time_preview(
+                    &selected_paths,
+                    &pending_gps_date_times_handle.borrow(),
+                    days.as_str(), hours.as_str(), minutes.as_str(), seconds.as_str(), subtract,
+                ).into()
+            } else {
+                build_shift_media_date_preview(
+                    &selected_paths,
+                    &pending_taken_dates.borrow(),
+                    days.as_str(), hours.as_str(), minutes.as_str(), seconds.as_str(), subtract,
+                ).into()
+            }
+        });
+
+        let app_handle = app.clone();
+        let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_gps_date_times_handle = pending_gps_date_times.clone();
         let ui_handle = ui.as_weak();
         ui.on_apply_shift_media_date(move |days, hours, minutes, seconds, subtract| {
             let Some(ui) = ui_handle.upgrade() else { return false; };
@@ -907,6 +981,69 @@ impl GuiRunner for SlintRunner {
                 let app = app_handle.borrow();
                 selected_file_paths(&app)
             };
+            if ui.get_shift_gps_date_time_mode() {
+                let existing_pending = pending_gps_date_times_handle.borrow().clone();
+                let mut staged = existing_pending.clone();
+                let mut shifted = Vec::new();
+                let mut skipped_count = 0usize;
+                for path in &selected_paths {
+                    let Some(current) = gps_date_time_for_shift(path, &existing_pending) else {
+                        skipped_count += 1;
+                        continue;
+                    };
+                    let Some(new_value) = shift_display_datetime(&current, duration, subtract) else {
+                        skipped_count += 1;
+                        continue;
+                    };
+                    let Some((date, time)) = new_value.split_once(' ') else {
+                        skipped_count += 1;
+                        continue;
+                    };
+                    let values = (date.to_string(), time.to_string());
+                    staged.insert(path.clone(), values.clone());
+                    shifted.push((path.clone(), values));
+                }
+                if shifted.is_empty() {
+                    ui.set_shift_media_date_preview(
+                        "No selected JPEG has both GPS Date Stamp and GPS Time Stamp.".into(),
+                    );
+                    return false;
+                }
+
+                *pending_gps_date_times_handle.borrow_mut() = staged;
+                if shifted.len() == 1 {
+                    ui.set_gps_date_stamp(shifted[0].1.0.clone().into());
+                    ui.set_gps_time_stamp(shifted[0].1.1.clone().into());
+                    ui.set_gps_date_time(
+                        combined_gps_date_time(&shifted[0].1.0, &shifted[0].1.1).into(),
+                    );
+                    ui.set_gps_date_stamp_status("Modified".into());
+                    ui.set_gps_time_stamp_status("Modified".into());
+                    ui.set_gps_date_time_status("Modified".into());
+                    ui.set_gps_date_stamp_dirty(true);
+                    ui.set_gps_time_stamp_dirty(true);
+                    ui.set_gps_date_time_dirty(true);
+                } else {
+                    ui.set_gps_date_stamp("".into());
+                    ui.set_gps_time_stamp("".into());
+                    ui.set_gps_date_time("".into());
+                    ui.set_gps_date_stamp_status("Mixed".into());
+                    ui.set_gps_time_stamp_status("Mixed".into());
+                    ui.set_gps_date_time_status("Mixed".into());
+                }
+                ui.set_metadata_dirty(true);
+                let message = if skipped_count == 0 {
+                    format!("Shifted GPS date/time for {} file(s). Ctrl+S to save.", shifted.len())
+                } else {
+                    format!(
+                        "Shifted GPS date/time for {} file(s); skipped {}. Ctrl+S to save.",
+                        shifted.len(),
+                        skipped_count
+                    )
+                };
+                show_toast(&ui, &message);
+                return true;
+            }
             let existing_pending = pending_taken_dates.borrow().clone();
             let mut staged = existing_pending.clone();
             let mut shifted = Vec::new();
@@ -947,6 +1084,91 @@ impl GuiRunner for SlintRunner {
             };
             show_toast(&ui, &message);
             true
+        });
+
+        let app_handle = app.clone();
+        let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_gps_date_times_handle = pending_gps_date_times.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_fill_taken_date_from_gps(move || {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            let selected_paths = {
+                let app = app_handle.borrow();
+                selected_file_paths(&app)
+            };
+            if selected_paths.is_empty() {
+                show_message(
+                    &ui,
+                    "Unable to Set Media Date",
+                    "Select one or more JPEG files first.",
+                );
+                return;
+            }
+
+            let pending_gps = pending_gps_date_times_handle.borrow().clone();
+            let mut staged = pending_taken_dates.borrow().clone();
+            let mut converted = Vec::new();
+            let mut skipped_count = 0usize;
+            for path in &selected_paths {
+                if !is_jpeg_path(path) {
+                    skipped_count += 1;
+                    continue;
+                }
+                let (date, time) = if selected_paths.len() == 1
+                    && ui.get_gps_date_time_dirty()
+                {
+                    match parse_combined_gps_date_time(ui.get_gps_date_time().as_str()) {
+                        Ok((Some(date), Some(time))) => (date, time),
+                        _ => {
+                            skipped_count += 1;
+                            continue;
+                        }
+                    }
+                } else {
+                    pending_gps.get(path).cloned().unwrap_or_else(|| {
+                        let metadata = read_exif_metadata(path);
+                        (metadata.gps_date_stamp, metadata.gps_time_stamp)
+                    })
+                };
+                let Some(kst_value) = gps_utc_to_kst_display(&date, &time) else {
+                    skipped_count += 1;
+                    continue;
+                };
+                staged.insert(path.clone(), kst_value.clone());
+                converted.push((path.clone(), kst_value));
+            }
+            if converted.is_empty() {
+                show_message(
+                    &ui,
+                    "Unable to Set Media Date",
+                    "No selected JPEG has both GPS Date Stamp and GPS Time Stamp.",
+                );
+                return;
+            }
+
+            *pending_taken_dates.borrow_mut() = staged;
+            if converted.len() == 1 {
+                stage_taken_date_in_ui(&ui, &converted[0].1);
+                ui.set_taken_date_status("Modified".into());
+            } else {
+                ui.set_taken_date("".into());
+                ui.set_taken_date_status("Mixed".into());
+            }
+            ui.set_taken_date_dirty(true);
+            ui.set_metadata_dirty(true);
+            let message = if skipped_count == 0 {
+                format!(
+                    "Staged Media Date from GPS for {} file(s). Ctrl+S to save.",
+                    converted.len()
+                )
+            } else {
+                format!(
+                    "Staged Media Date from GPS for {} file(s); skipped {}. Ctrl+S to save.",
+                    converted.len(),
+                    skipped_count
+                )
+            };
+            show_toast(&ui, &message);
         });
 
         let app_handle = app.clone();
@@ -1336,6 +1558,7 @@ impl GuiRunner for SlintRunner {
         let app_handle = app.clone();
         let pending_renames = pending_filename_renames.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_gps_date_times_handle = pending_gps_date_times.clone();
         let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
         let pending_exif_removals_handle = pending_exif_removals.clone();
@@ -1344,6 +1567,7 @@ impl GuiRunner for SlintRunner {
             if let Some(ui) = ui_handle.upgrade() {
                 pending_renames.borrow_mut().clear();
                 pending_taken_dates.borrow_mut().clear();
+                pending_gps_date_times_handle.borrow_mut().clear();
                 pending_created_dates_handle.borrow_mut().clear();
                 pending_modified_dates_handle.borrow_mut().clear();
                 pending_exif_removals_handle.borrow_mut().clear();
@@ -1590,6 +1814,128 @@ impl GuiRunner for SlintRunner {
 
         let app_handle = app.clone();
         let ui_handle = ui.as_weak();
+        ui.on_request_remove_front_or_rear_numbers(move || {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            let paths = selected_file_paths(&app_handle.borrow());
+            if paths.is_empty() {
+                show_message(&ui, "No Files Selected", "Select one or more files first.");
+                return;
+            }
+            match analyze_front_or_rear_number_removal(&paths) {
+                Ok(stats) if stats.renameable == 0 => {
+                    show_message(
+                        &ui,
+                        "No Files Renamed",
+                        "None of the selected files begin or end with an underscored 2- or 3-digit number.",
+                    );
+                }
+                Ok(stats) => {
+                    ui.set_message_title("Confirm Filename Change".into());
+                    ui.set_message_text(
+                        format!(
+                            "Rename {} file(s)? {} without a matching pattern will be skipped. {} duplicate result(s) will use _dup001, _dup002, and so on. (Y/N)",
+                            stats.renameable, stats.unmatched, stats.deduplicated
+                        )
+                        .into(),
+                    );
+                    ui.set_confirm_yes_selected(false);
+                    ui.set_confirm_number_removal_mode(true);
+                    ui.set_confirm_trailing_rename_visible(true);
+                }
+                Err(err) => show_message(&ui, "Filename Change Failed", &err),
+            }
+        });
+
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_confirm_remove_front_or_rear_numbers(move || {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            let result = {
+                let mut app = app_handle.borrow_mut();
+                let paths = selected_file_paths(&app);
+                remove_front_or_rear_numbers(&paths).map(|stats| {
+                    app.load_folder();
+                    stats
+                })
+            };
+
+            match result {
+                Ok(stats) => {
+                    refresh(None);
+                    show_message(
+                        &ui,
+                        "Filename Change Complete",
+                        &format!(
+                            "Renamed {} file(s). Skipped {} without a matching pattern. Resolved {} duplicate filename(s) with numbered suffixes.",
+                            stats.renameable, stats.unmatched, stats.deduplicated
+                        ),
+                    );
+                }
+                Err(err) => show_message(&ui, "Filename Change Failed", &err),
+            }
+        });
+
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_extract_embedded_thumbnails(move || {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            let paths = selected_file_paths(&app_handle.borrow());
+            if paths.is_empty() {
+                show_message(&ui, "No Files Selected", "Select one or more JPEG files first.");
+                return;
+            }
+
+            let mut extracted = Vec::new();
+            let mut failures = Vec::new();
+            for path in paths {
+                if !is_jpeg_path(&path) {
+                    failures.push(format!("{}: not a JPEG file", path.display()));
+                    continue;
+                }
+                match extract_embedded_thumbnail(&path) {
+                    Ok(target) => {
+                        if let Err(err) = copy_file_times(&path, &target) {
+                            failures.push(format!(
+                                "{}: extracted, but file dates could not be copied ({err})",
+                                target.display()
+                            ));
+                        }
+                        extracted.push(target);
+                    }
+                    Err(err) => failures.push(format!("{}: {err}", path.display())),
+                }
+            }
+
+            if !extracted.is_empty() {
+                app_handle.borrow_mut().load_folder();
+                refresh(extracted.last().cloned());
+            }
+
+            if failures.is_empty() {
+                show_message(
+                    &ui,
+                    "Thumbnail Extraction Complete",
+                    &format!("Extracted {} thumbnail file(s) with the original EXIF metadata.", extracted.len()),
+                );
+            } else {
+                let first_failure = failures.first().cloned().unwrap_or_default();
+                show_message(
+                    &ui,
+                    if extracted.is_empty() { "Thumbnail Extraction Failed" } else { "Thumbnail Extraction Complete" },
+                    &format!(
+                        "Extracted {}; skipped {}.\n{}",
+                        extracted.len(),
+                        failures.len(),
+                        first_failure
+                    ),
+                );
+            }
+        });
+
+        let app_handle = app.clone();
+        let ui_handle = ui.as_weak();
         ui.on_open_in_explorer(move || {
             if let Some(ui) = ui_handle.upgrade() {
                 let path = {
@@ -1640,6 +1986,7 @@ impl GuiRunner for SlintRunner {
         let refresh = refresh_ui.clone();
         let pending_renames = pending_filename_renames.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_gps_date_times_handle = pending_gps_date_times.clone();
         let pending_created_dates_handle = pending_created_dates.clone();
         let pending_modified_dates_handle = pending_modified_dates.clone();
         let pending_exif_removals_handle = pending_exif_removals.clone();
@@ -1706,6 +2053,37 @@ impl GuiRunner for SlintRunner {
                     selected_file_paths(&app)
                 };
 
+                let pending_gps_snapshot = pending_gps_date_times_handle.borrow().clone();
+                if !pending_gps_snapshot.is_empty()
+                    && pending_taken_dates.borrow().is_empty()
+                    && !has_non_gps_metadata_changes(&ui)
+                    && pending_exif_removals_handle.borrow().is_empty()
+                    && pending_exif_tag_removals_handle.borrow().is_empty()
+                {
+                    let mut saved_count = 0usize;
+                    for path in &selected_paths {
+                        let Some((gps_date, gps_time)) = pending_gps_snapshot.get(path) else {
+                            continue;
+                        };
+                        if let Err(err) = write_gps_date_time(path, gps_date, gps_time) {
+                            show_message(&ui, "Apply Failed", &err);
+                            return;
+                        }
+                        saved_count += 1;
+                    }
+                    pending_gps_date_times_handle.borrow_mut().clear();
+                    {
+                        let mut app = app_handle.borrow_mut();
+                        app.load_folder();
+                    }
+                    refresh(selected_path.clone());
+                    show_toast(
+                        &ui,
+                        &format!("Saved GPS Date/Time for {saved_count} file(s)."),
+                    );
+                    return;
+                }
+
                 let has_staged_png_overwrite = selected_paths.iter().any(|path| {
                     if !is_png_path(path) {
                         return false;
@@ -1736,6 +2114,8 @@ impl GuiRunner for SlintRunner {
                     let pending_exif_removals_snapshot =
                         pending_exif_removals_handle.borrow().clone();
                     let pending_taken_dates_snapshot = pending_taken_dates.borrow().clone();
+                    let pending_gps_date_times_snapshot =
+                        pending_gps_date_times_handle.borrow().clone();
                     let pending_created_dates_snapshot =
                         pending_created_dates_handle.borrow().clone();
                     let pending_modified_dates_snapshot = pending_modified_dates_handle.borrow().clone();
@@ -1765,6 +2145,14 @@ impl GuiRunner for SlintRunner {
                             }
                             continue;
                         }
+                        if let Some((gps_date, gps_time)) =
+                            pending_gps_date_times_snapshot.get(path)
+                        {
+                            if let Err(err) = write_gps_date_time(path, gps_date, gps_time) {
+                                show_message(&ui, "Apply Failed", &err);
+                                return;
+                            }
+                        }
                         match apply_metadata_changes_to_path(
                             &ui,
                             path,
@@ -1785,6 +2173,7 @@ impl GuiRunner for SlintRunner {
 
                     store_current_as_original(&ui);
                     pending_taken_dates.borrow_mut().clear();
+                    pending_gps_date_times_handle.borrow_mut().clear();
                     pending_created_dates_handle.borrow_mut().clear();
                     pending_modified_dates_handle.borrow_mut().clear();
                     pending_exif_removals_handle.borrow_mut().clear();
@@ -1840,6 +2229,7 @@ impl GuiRunner for SlintRunner {
                         }
                         store_current_as_original(&ui);
                         pending_taken_dates.borrow_mut().clear();
+                        pending_gps_date_times_handle.borrow_mut().clear();
                         pending_created_dates_handle.borrow_mut().clear();
                         pending_modified_dates_handle.borrow_mut().clear();
                         pending_exif_removals_handle.borrow_mut().clear();
@@ -2064,6 +2454,7 @@ impl GuiRunner for SlintRunner {
                 // Other metadata fields are UI-only until their EXIF writers are implemented.
                 store_current_as_original(&ui);
                 pending_taken_dates.borrow_mut().clear();
+                pending_gps_date_times_handle.borrow_mut().clear();
                 pending_created_dates_handle.borrow_mut().clear();
                 pending_modified_dates_handle.borrow_mut().clear();
                 pending_exif_removals_handle.borrow_mut().clear();
@@ -2232,7 +2623,15 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
         // entries/extensions, so large selections can keep their tools available
         // without performing EXIF aggregation.
         set_selected_media_details(ui, app);
-        set_loaded_exif_metadata(ui, ExifMetadata::default());
+        let mut metadata = ExifMetadata::default();
+        metadata.has_exif = large_selection_exif_available(
+            ui.get_selected_media_kind().as_str(),
+            ui.get_selected_metadata_status().as_str(),
+        );
+        set_loaded_exif_metadata(ui, metadata);
+        if ui.get_exif_available() {
+            set_large_selection_metadata_statuses(ui);
+        }
         return;
     }
 
@@ -2345,7 +2744,13 @@ fn set_selected_media_details(ui: &MainWindow, app: &SlintApp) {
     kinds.dedup();
 
     if kinds.len() == 1 && kinds[0] == "jpeg" {
-        set_media_details(ui, "jpeg", "", "", "");
+        let metadata_status = selection_summary(
+            indices
+                .iter()
+                .map(|index| app.media_details_for_index(*index).3)
+                .collect(),
+        );
+        set_media_details(ui, "jpeg", "", "", &metadata_status);
     } else if kinds.len() == 1 && kinds[0] == "mp4" {
         set_media_details(ui, "mp4", "Multiple videos", "Mixed", "Mixed");
     } else if kinds.len() == 1 && kinds[0] == "png" {
@@ -2465,6 +2870,8 @@ fn update_png_date_source_conflict(ui: &MainWindow) {
 }
 
 fn set_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
+    let gps_date_time =
+        combined_gps_date_time(&metadata.gps_date_stamp, &metadata.gps_time_stamp);
     let date_sources: Vec<&str> = [
         metadata.date_time_original.as_str(),
         metadata.date_time_digitized.as_str(),
@@ -2513,9 +2920,14 @@ fn set_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
     ui.set_gps_latitude(metadata.gps_latitude.into());
     ui.set_gps_longitude(metadata.gps_longitude.into());
     ui.set_gps_altitude(metadata.gps_altitude.into());
+    ui.set_gps_date_stamp(metadata.gps_date_stamp.into());
+    ui.set_gps_time_stamp(metadata.gps_time_stamp.into());
+    ui.set_gps_date_time(gps_date_time.into());
 }
 
 fn set_loaded_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
+    let gps_date_time =
+        combined_gps_date_time(&metadata.gps_date_stamp, &metadata.gps_time_stamp);
     set_exif_metadata(ui, metadata.clone());
     set_metadata_statuses(ui, &metadata);
     ui.set_original_taken_date(metadata.taken_date.into());
@@ -2537,6 +2949,9 @@ fn set_loaded_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
     ui.set_original_gps_latitude(metadata.gps_latitude.into());
     ui.set_original_gps_longitude(metadata.gps_longitude.into());
     ui.set_original_gps_altitude(metadata.gps_altitude.into());
+    ui.set_original_gps_date_stamp(metadata.gps_date_stamp.into());
+    ui.set_original_gps_time_stamp(metadata.gps_time_stamp.into());
+    ui.set_original_gps_date_time(gps_date_time.into());
     ui.set_metadata_dirty(false);
     reset_metadata_dirty_flags(ui);
 }
@@ -2561,6 +2976,15 @@ fn set_metadata_statuses(ui: &MainWindow, metadata: &ExifMetadata) {
     ui.set_gps_latitude_status(status_for_value(&metadata.gps_latitude).into());
     ui.set_gps_longitude_status(status_for_value(&metadata.gps_longitude).into());
     ui.set_gps_altitude_status(status_for_value(&metadata.gps_altitude).into());
+    ui.set_gps_date_stamp_status(status_for_value(&metadata.gps_date_stamp).into());
+    ui.set_gps_time_stamp_status(status_for_value(&metadata.gps_time_stamp).into());
+    ui.set_gps_date_time_status(
+        status_for_value(&combined_gps_date_time(
+            &metadata.gps_date_stamp,
+            &metadata.gps_time_stamp,
+        ))
+        .into(),
+    );
 }
 
 fn set_joined_metadata_statuses(ui: &MainWindow, values: &[ExifMetadata]) {
@@ -2583,10 +3007,51 @@ fn set_joined_metadata_statuses(ui: &MainWindow, values: &[ExifMetadata]) {
     ui.set_gps_latitude_status(selection_display(values.iter().map(|metadata| metadata.gps_latitude.clone()).collect()).status.into());
     ui.set_gps_longitude_status(selection_display(values.iter().map(|metadata| metadata.gps_longitude.clone()).collect()).status.into());
     ui.set_gps_altitude_status(selection_display(values.iter().map(|metadata| metadata.gps_altitude.clone()).collect()).status.into());
+    ui.set_gps_date_stamp_status(selection_display(values.iter().map(|metadata| metadata.gps_date_stamp.clone()).collect()).status.into());
+    ui.set_gps_time_stamp_status(selection_display(values.iter().map(|metadata| metadata.gps_time_stamp.clone()).collect()).status.into());
+    ui.set_gps_date_time_status(selection_display(values.iter().map(|metadata| combined_gps_date_time(&metadata.gps_date_stamp, &metadata.gps_time_stamp)).collect()).status.into());
+}
+
+fn set_large_selection_metadata_statuses(ui: &MainWindow) {
+    ui.set_taken_date_status("Mixed".into());
+    ui.set_camera_make_status("Mixed".into());
+    ui.set_camera_model_status("Mixed".into());
+    ui.set_lens_model_status("Mixed".into());
+    ui.set_software_status("Mixed".into());
+    ui.set_artist_status("Mixed".into());
+    ui.set_shutter_speed_status("Mixed".into());
+    ui.set_aperture_status("Mixed".into());
+    ui.set_iso_speed_status("Mixed".into());
+    ui.set_focal_length_status("Mixed".into());
+    ui.set_flash_fired_status("Mixed".into());
+    ui.set_metering_mode_status("Mixed".into());
+    ui.set_image_width_status("Mixed".into());
+    ui.set_image_height_status("Mixed".into());
+    ui.set_orientation_status("Mixed".into());
+    ui.set_color_space_status("Mixed".into());
+    ui.set_gps_latitude_status("Mixed".into());
+    ui.set_gps_longitude_status("Mixed".into());
+    ui.set_gps_altitude_status("Mixed".into());
+    ui.set_gps_date_stamp_status("Mixed".into());
+    ui.set_gps_time_stamp_status("Mixed".into());
+    ui.set_gps_date_time_status("Mixed".into());
 }
 
 fn joined_selection_value(values: Vec<String>) -> String {
     selection_display(values).value
+}
+
+fn selection_summary(values: Vec<String>) -> String {
+    let display = selection_display(values);
+    if display.status == "Mixed" {
+        "Mixed".to_string()
+    } else {
+        display.value
+    }
+}
+
+fn large_selection_exif_available(media_kind: &str, metadata_status: &str) -> bool {
+    media_kind == "jpeg" && metadata_status != "Not Found"
 }
 
 struct SelectionDisplay {
@@ -2658,6 +3123,8 @@ fn join_metadata(values: &[ExifMetadata]) -> ExifMetadata {
         gps_latitude: joined_selection_value(values.iter().map(|metadata| metadata.gps_latitude.clone()).collect()),
         gps_longitude: joined_selection_value(values.iter().map(|metadata| metadata.gps_longitude.clone()).collect()),
         gps_altitude: joined_selection_value(values.iter().map(|metadata| metadata.gps_altitude.clone()).collect()),
+        gps_date_stamp: joined_selection_value(values.iter().map(|metadata| metadata.gps_date_stamp.clone()).collect()),
+        gps_time_stamp: joined_selection_value(values.iter().map(|metadata| metadata.gps_time_stamp.clone()).collect()),
     }
 }
 
@@ -2713,7 +3180,7 @@ fn filename_from_media_date(
         current_path,
         media_date,
         show_extension,
-        &mut HashSet::new(),
+        &mut FilenameCollisionResolver::new(),
     )
 }
 
@@ -2721,7 +3188,7 @@ fn filename_from_media_date_with_reserved(
     current_path: &std::path::Path,
     media_date: &str,
     show_extension: bool,
-    reserved_names: &mut HashSet<String>,
+    collision_resolver: &mut FilenameCollisionResolver,
 ) -> Result<String, String> {
     let datetime = NaiveDateTime::parse_from_str(media_date.trim(), "%Y-%m-%d %H:%M:%S")
         .map_err(|_| "The selected file does not have a usable Media Date.".to_string())?;
@@ -2731,27 +3198,20 @@ fn filename_from_media_date_with_reserved(
         .parent()
         .ok_or_else(|| "Selected file parent could not be resolved.".to_string())?;
 
-    for index in 0..1000 {
-        let stem = if index == 0 {
-            base.clone()
-        } else {
-            format!("{base}_{index:03}")
-        };
-        let full_name = match extension {
-            Some(extension) if !extension.is_empty() => format!("{stem}.{extension}"),
-            _ => stem.clone(),
-        };
-        let candidate = parent.join(&full_name);
-        let candidate_key = candidate.to_string_lossy().to_lowercase();
-        if (candidate == current_path || !candidate.exists())
-            && !reserved_names.contains(&candidate_key)
-        {
-            reserved_names.insert(candidate_key);
-            return Ok(if show_extension { full_name } else { stem });
-        }
-    }
-
-    Err("Could not find an available filename for the Media Date.".to_string())
+    let desired = parent.join(match extension {
+        Some(extension) if !extension.is_empty() => format!("{base}.{extension}"),
+        _ => base,
+    });
+    let candidate = collision_resolver.resolve_for_rename(&desired, current_path)?;
+    let full_name = candidate
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .ok_or_else(|| "Could not resolve the Media Date filename.".to_string())?;
+    let stem = candidate
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .ok_or_else(|| "Could not resolve the Media Date filename.".to_string())?;
+    Ok(if show_extension { full_name } else { stem })
 }
 
 fn apply_filename_rename_plan(
@@ -2993,17 +3453,48 @@ fn has_gps_metadata_changes(ui: &MainWindow) -> bool {
     ui.get_gps_latitude_dirty()
         || ui.get_gps_longitude_dirty()
         || ui.get_gps_altitude_dirty()
+        || ui.get_gps_date_stamp_dirty()
+        || ui.get_gps_time_stamp_dirty()
+        || ui.get_gps_date_time_dirty()
 }
 
 fn write_dirty_gps_tags(ui: &MainWindow, path: &std::path::Path) -> Result<(), String> {
-    if ui.get_gps_latitude().is_empty()
+    let coordinates_dirty = ui.get_gps_latitude_dirty()
+        || ui.get_gps_longitude_dirty()
+        || ui.get_gps_altitude_dirty();
+    if coordinates_dirty
+        && ui.get_gps_latitude().is_empty()
         && ui.get_gps_longitude().is_empty()
         && ui.get_gps_altitude().is_empty()
     {
-        remove_gps_information(path)
-    } else {
-        Err("Editing GPS values is not supported yet. Use Remove GPS to clear location metadata.".to_string())
+        return remove_gps_information(path);
     }
+    if coordinates_dirty {
+        return Err("Editing GPS coordinates is not supported yet. GPS Date Stamp and GPS Time Stamp can be edited.".to_string());
+    }
+    if ui.get_gps_date_time_dirty() {
+        let (date, time) = parse_combined_gps_date_time(ui.get_gps_date_time().as_str())?;
+        return match (date, time) {
+            (Some(date), Some(time)) => write_gps_date_time(path, &date, &time),
+            (Some(date), None) => write_gps_date_stamp(path, &date),
+            (None, Some(time)) => write_gps_time_stamp(path, &time),
+            (None, None) => Err("GPS Date/Time cannot be empty.".to_string()),
+        };
+    }
+    if ui.get_gps_date_stamp_dirty() && ui.get_gps_time_stamp_dirty() {
+        return write_gps_date_time(
+            path,
+            ui.get_gps_date_stamp().as_str(),
+            ui.get_gps_time_stamp().as_str(),
+        );
+    }
+    if ui.get_gps_date_stamp_dirty() {
+        write_gps_date_stamp(path, ui.get_gps_date_stamp().as_str())?;
+    }
+    if ui.get_gps_time_stamp_dirty() {
+        write_gps_time_stamp(path, ui.get_gps_time_stamp().as_str())?;
+    }
+    Ok(())
 }
 
 fn write_dirty_file_times(
@@ -3071,6 +3562,28 @@ fn has_exif_metadata_changes_without_taken_date(ui: &MainWindow) -> bool {
         || has_gps_metadata_changes(ui)
 }
 
+fn has_non_gps_metadata_changes(ui: &MainWindow) -> bool {
+    ui.get_selected_name_dirty()
+        || ui.get_selected_created_dirty()
+        || ui.get_selected_modified_dirty()
+        || ui.get_taken_date_dirty()
+        || ui.get_camera_make_dirty()
+        || ui.get_camera_model_dirty()
+        || ui.get_lens_model_dirty()
+        || ui.get_software_dirty()
+        || ui.get_artist_dirty()
+        || ui.get_shutter_speed_dirty()
+        || ui.get_aperture_dirty()
+        || ui.get_iso_speed_dirty()
+        || ui.get_focal_length_dirty()
+        || ui.get_flash_fired_dirty()
+        || ui.get_metering_mode_dirty()
+        || ui.get_orientation_dirty()
+        || ui.get_color_space_dirty()
+        || ui.get_png_creation_time_dirty()
+        || ui.get_png_exif_date_time_original_dirty()
+}
+
 fn collect_current_exif_metadata(ui: &MainWindow) -> ExifMetadata {
     ExifMetadata {
         has_exif: true,
@@ -3102,6 +3615,8 @@ fn collect_current_exif_metadata(ui: &MainWindow) -> ExifMetadata {
         gps_latitude: ui.get_gps_latitude().to_string(),
         gps_longitude: ui.get_gps_longitude().to_string(),
         gps_altitude: ui.get_gps_altitude().to_string(),
+        gps_date_stamp: ui.get_gps_date_stamp().to_string(),
+        gps_time_stamp: ui.get_gps_time_stamp().to_string(),
     }
 }
 
@@ -3164,6 +3679,22 @@ fn collect_dirty_exif_metadata(
     }
     if ui.get_gps_altitude_dirty() {
         metadata.gps_altitude = ui.get_gps_altitude().to_string();
+    }
+    if ui.get_gps_date_stamp_dirty() {
+        metadata.gps_date_stamp = ui.get_gps_date_stamp().to_string();
+    }
+    if ui.get_gps_time_stamp_dirty() {
+        metadata.gps_time_stamp = ui.get_gps_time_stamp().to_string();
+    }
+    if ui.get_gps_date_time_dirty() {
+        if let Ok((date, time)) = parse_combined_gps_date_time(ui.get_gps_date_time().as_str()) {
+            if let Some(date) = date {
+                metadata.gps_date_stamp = date;
+            }
+            if let Some(time) = time {
+                metadata.gps_time_stamp = time;
+            }
+        }
     }
     metadata
 }
@@ -3254,6 +3785,117 @@ fn build_shift_media_date_preview(
     }
     if lines.is_empty() {
         return format!("No usable Media Date found.  Skipped: {skipped_count}");
+    }
+    lines.push(format!("Ready: {valid_count} file(s)   Skipped: {skipped_count}"));
+    lines.join("\n")
+}
+
+fn gps_date_time_for_shift(
+    path: &std::path::Path,
+    pending: &HashMap<PathBuf, (String, String)>,
+) -> Option<String> {
+    if !is_jpeg_path(path) {
+        return None;
+    }
+    let (date, time) = pending
+        .get(path)
+        .cloned()
+        .unwrap_or_else(|| {
+            let metadata = read_exif_metadata(path);
+            (metadata.gps_date_stamp, metadata.gps_time_stamp)
+        });
+    if date.is_empty() || time.is_empty() {
+        return None;
+    }
+    let value = format!("{} {}", date.trim(), time.trim().trim_end_matches("UTC").trim());
+    parse_display_datetime_or_date(&value)?;
+    Some(value)
+}
+
+fn combined_gps_date_time(date: &str, time: &str) -> String {
+    let date = date.trim();
+    let time = time.trim().trim_end_matches("UTC").trim();
+    match (date.is_empty(), time.is_empty()) {
+        (false, false) => format!("{date} {time}"),
+        (false, true) => format!("{date} (date only)"),
+        (true, false) => format!("{time} (time only)"),
+        (true, true) => String::new(),
+    }
+}
+
+fn parse_combined_gps_date_time(value: &str) -> Result<(Option<String>, Option<String>), String> {
+    let value = value
+        .trim()
+        .trim_end_matches("UTC")
+        .trim()
+        .trim_end_matches("(date only)")
+        .trim_end_matches("(time only)")
+        .trim();
+    if let Ok(datetime) = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S") {
+        return Ok((
+            Some(datetime.format("%Y-%m-%d").to_string()),
+            Some(datetime.format("%H:%M:%S").to_string()),
+        ));
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return Ok((Some(date.format("%Y-%m-%d").to_string()), None));
+    }
+    if chrono::NaiveTime::parse_from_str(value, "%H:%M:%S").is_ok() {
+        return Ok((None, Some(value.to_string())));
+    }
+    Err(
+        "Expected GPS UTC format: YYYY-MM-DD HH:MM:SS, YYYY-MM-DD, or HH:MM:SS"
+            .to_string(),
+    )
+}
+
+fn gps_utc_to_kst_display(date: &str, time: &str) -> Option<String> {
+    let combined = combined_gps_date_time(date, time);
+    let naive = NaiveDateTime::parse_from_str(&combined, "%Y-%m-%d %H:%M:%S").ok()?;
+    let utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+    let kst = FixedOffset::east_opt(9 * 60 * 60)?;
+    Some(
+        utc.with_timezone(&kst)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+    )
+}
+
+fn build_shift_gps_date_time_preview(
+    paths: &[PathBuf],
+    pending: &HashMap<PathBuf, (String, String)>,
+    days: &str,
+    hours: &str,
+    minutes: &str,
+    seconds: &str,
+    subtract: bool,
+) -> String {
+    let duration = match parse_media_date_shift(days, hours, minutes, seconds) {
+        Ok(duration) => duration,
+        Err(err) => return err,
+    };
+    let mut lines = Vec::new();
+    let mut valid_count = 0usize;
+    let mut skipped_count = 0usize;
+    for path in paths {
+        let Some(current) = gps_date_time_for_shift(path, pending) else {
+            skipped_count += 1;
+            continue;
+        };
+        let Some(shifted) = shift_display_datetime(&current, duration, subtract) else {
+            skipped_count += 1;
+            continue;
+        };
+        valid_count += 1;
+        if lines.len() < 3 {
+            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("(unknown)");
+            lines.push(format!("{name}: {current} UTC  ->  {shifted} UTC"));
+        }
+    }
+    if lines.is_empty() {
+        return format!(
+            "No JPEG with both GPS Date Stamp and GPS Time Stamp.  Skipped: {skipped_count}"
+        );
     }
     lines.push(format!("Ready: {valid_count} file(s)   Skipped: {skipped_count}"));
     lines.join("\n")
@@ -3462,6 +4104,9 @@ fn reset_metadata_dirty_flags(ui: &MainWindow) {
     ui.set_gps_latitude_dirty(false);
     ui.set_gps_longitude_dirty(false);
     ui.set_gps_altitude_dirty(false);
+    ui.set_gps_date_stamp_dirty(false);
+    ui.set_gps_time_stamp_dirty(false);
+    ui.set_gps_date_time_dirty(false);
     ui.set_png_creation_time_dirty(false);
     ui.set_png_exif_date_time_original_dirty(false);
 }
@@ -3489,6 +4134,9 @@ fn store_current_as_original(ui: &MainWindow) {
     ui.set_original_gps_latitude(ui.get_gps_latitude());
     ui.set_original_gps_longitude(ui.get_gps_longitude());
     ui.set_original_gps_altitude(ui.get_gps_altitude());
+    ui.set_original_gps_date_stamp(ui.get_gps_date_stamp());
+    ui.set_original_gps_time_stamp(ui.get_gps_time_stamp());
+    ui.set_original_gps_date_time(ui.get_gps_date_time());
     ui.set_original_png_creation_time(ui.get_png_creation_time());
     ui.set_original_png_exif_date_time_original(ui.get_date_time_original());
 }
@@ -3516,6 +4164,9 @@ fn update_metadata_dirty_state(ui: &MainWindow) {
     let gps_latitude_dirty = ui.get_gps_latitude() != ui.get_original_gps_latitude();
     let gps_longitude_dirty = ui.get_gps_longitude() != ui.get_original_gps_longitude();
     let gps_altitude_dirty = ui.get_gps_altitude() != ui.get_original_gps_altitude();
+    let gps_date_stamp_dirty = ui.get_gps_date_stamp() != ui.get_original_gps_date_stamp();
+    let gps_time_stamp_dirty = ui.get_gps_time_stamp() != ui.get_original_gps_time_stamp();
+    let gps_date_time_dirty = ui.get_gps_date_time() != ui.get_original_gps_date_time();
     let png_creation_time_dirty =
         ui.get_png_creation_time() != ui.get_original_png_creation_time();
     let png_exif_date_time_original_dirty =
@@ -3543,6 +4194,9 @@ fn update_metadata_dirty_state(ui: &MainWindow) {
     ui.set_gps_latitude_dirty(gps_latitude_dirty);
     ui.set_gps_longitude_dirty(gps_longitude_dirty);
     ui.set_gps_altitude_dirty(gps_altitude_dirty);
+    ui.set_gps_date_stamp_dirty(gps_date_stamp_dirty);
+    ui.set_gps_time_stamp_dirty(gps_time_stamp_dirty);
+    ui.set_gps_date_time_dirty(gps_date_time_dirty);
     ui.set_png_creation_time_dirty(png_creation_time_dirty);
     ui.set_png_exif_date_time_original_dirty(png_exif_date_time_original_dirty);
 
@@ -3569,6 +4223,9 @@ fn update_metadata_dirty_state(ui: &MainWindow) {
             || gps_latitude_dirty
             || gps_longitude_dirty
             || gps_altitude_dirty
+            || gps_date_stamp_dirty
+            || gps_time_stamp_dirty
+            || gps_date_time_dirty
             || png_creation_time_dirty
             || png_exif_date_time_original_dirty,
     );
@@ -3614,7 +4271,7 @@ fn collect_exif_section(ui: &MainWindow, section: &str) -> Vec<(String, String)>
         "camera" => &["taken_date", "camera_make", "camera_model", "lens_model", "software", "artist"],
         "exposure" => &["shutter_speed", "aperture", "iso_speed", "focal_length", "flash_fired", "metering_mode"],
         "image" => &["orientation", "color_space"],
-        "location" => &["gps_latitude", "gps_longitude", "gps_altitude"],
+        "location" => &["gps_latitude", "gps_longitude", "gps_altitude", "gps_date_time"],
         _ => &[],
     };
     keys.iter()
@@ -3643,6 +4300,9 @@ fn is_writable_exif_key(key: &str) -> bool {
             | "metering_mode"
             | "orientation"
             | "color_space"
+            | "gps_date_stamp"
+            | "gps_time_stamp"
+            | "gps_date_time"
     )
 }
 
@@ -3675,6 +4335,9 @@ fn is_removable_exif_key(key: &str) -> bool {
             | "gps_latitude"
             | "gps_longitude"
             | "gps_altitude"
+            | "gps_date_stamp"
+            | "gps_time_stamp"
+            | "gps_date_time"
             | "image_description"
             | "copyright"
             | "exif_version"
@@ -3717,6 +4380,12 @@ fn exif_key_label(key: &str) -> &'static str {
         "metering_mode" => "Metering Mode",
         "orientation" => "Orientation",
         "color_space" => "Color Space",
+        "gps_latitude" => "GPS Latitude",
+        "gps_longitude" => "GPS Longitude",
+        "gps_altitude" => "GPS Altitude",
+        "gps_date_stamp" => "GPS Date Stamp",
+        "gps_time_stamp" => "GPS Time Stamp (UTC)",
+        "gps_date_time" => "GPS Date/Time (UTC)",
         _ => "EXIF Tag",
     }
 }
@@ -3742,6 +4411,9 @@ fn set_exif_key_dirty(ui: &MainWindow, key: &str, dirty: bool) {
         "gps_latitude" => ui.set_gps_latitude_dirty(dirty),
         "gps_longitude" => ui.set_gps_longitude_dirty(dirty),
         "gps_altitude" => ui.set_gps_altitude_dirty(dirty),
+        "gps_date_stamp" => ui.set_gps_date_stamp_dirty(dirty),
+        "gps_time_stamp" => ui.set_gps_time_stamp_dirty(dirty),
+        "gps_date_time" => ui.set_gps_date_time_dirty(dirty),
         _ => {}
     }
 }
@@ -3787,6 +4459,9 @@ fn get_exif_value(ui: &MainWindow, key: &str) -> String {
         "gps_latitude" => ui.get_gps_latitude().to_string(),
         "gps_longitude" => ui.get_gps_longitude().to_string(),
         "gps_altitude" => ui.get_gps_altitude().to_string(),
+        "gps_date_stamp" => ui.get_gps_date_stamp().to_string(),
+        "gps_time_stamp" => ui.get_gps_time_stamp().to_string(),
+        "gps_date_time" => ui.get_gps_date_time().to_string(),
         _ => String::new(),
     }
 }
@@ -3820,6 +4495,9 @@ fn set_exif_value(ui: &MainWindow, key: &str, value: &str) {
         "gps_latitude" => ui.set_gps_latitude(value.into()),
         "gps_longitude" => ui.set_gps_longitude(value.into()),
         "gps_altitude" => ui.set_gps_altitude(value.into()),
+        "gps_date_stamp" => ui.set_gps_date_stamp(value.into()),
+        "gps_time_stamp" => ui.set_gps_time_stamp(value.into()),
+        "gps_date_time" => ui.set_gps_date_time(value.into()),
         _ => {}
     }
 }
@@ -3831,14 +4509,34 @@ mod tests {
         auto_format_date_edit,
         earliest_available_timestamp,
         apply_filename_rename_plan,
+        combined_gps_date_time,
         filename_from_media_date,
         filename_from_media_date_with_reserved,
+        FilenameCollisionResolver,
+        gps_date_time_for_shift,
+        gps_utc_to_kst_display,
+        parse_combined_gps_date_time,
         parse_media_date_shift,
+        large_selection_exif_available,
+        selection_summary,
         shift_display_datetime,
         should_mirror_png_date_source,
     };
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn large_jpeg_selection_uses_cached_metadata_state_without_offering_creation() {
+        assert_eq!(
+            selection_summary(vec!["Available".to_string(); 7]),
+            "Available"
+        );
+        assert!(large_selection_exif_available("jpeg", "Available"));
+        assert!(large_selection_exif_available("jpeg", "Mixed"));
+        assert!(large_selection_exif_available("jpeg", "Scanning..."));
+        assert!(!large_selection_exif_available("jpeg", "Not Found"));
+        assert!(!large_selection_exif_available("png", "Available"));
+    }
 
     #[test]
     fn chooses_the_earlier_available_file_timestamp() {
@@ -3862,6 +4560,51 @@ mod tests {
         assert_eq!(
             shift_display_datetime("2015-07-11 13:00:00", shift, true).as_deref(),
             Some("2015-05-15 03:00:00")
+        );
+    }
+
+    #[test]
+    fn combines_staged_gps_date_and_time_as_an_independent_utc_value() {
+        let path = std::path::PathBuf::from("sample.jpg");
+        let pending = HashMap::from([(
+            path.clone(),
+            ("2015-05-14".to_string(), "23:25:43".to_string()),
+        )]);
+        assert_eq!(
+            gps_date_time_for_shift(&path, &pending).as_deref(),
+            Some("2015-05-14 23:25:43")
+        );
+        let shift = parse_media_date_shift("0", "2", "0", "0").unwrap();
+        assert_eq!(
+            shift_display_datetime("2015-05-14 23:25:43", shift, false).as_deref(),
+            Some("2015-05-15 01:25:43")
+        );
+    }
+
+    #[test]
+    fn combines_and_splits_gps_date_time_for_the_details_row() {
+        assert_eq!(
+            combined_gps_date_time("2015-05-14", "19:31:13"),
+            "2015-05-14 19:31:13"
+        );
+        assert_eq!(
+            parse_combined_gps_date_time("2015-05-14 19:31:13 UTC").unwrap(),
+            (
+                Some("2015-05-14".to_string()),
+                Some("19:31:13".to_string())
+            )
+        );
+        assert_eq!(
+            combined_gps_date_time("2015-05-14", ""),
+            "2015-05-14 (date only)"
+        );
+    }
+
+    #[test]
+    fn converts_combined_gps_utc_to_kst_for_media_date() {
+        assert_eq!(
+            gps_utc_to_kst_display("2015-05-14", "19:31:13").as_deref(),
+            Some("2015-05-15 04:31:13")
         );
     }
 
@@ -3949,7 +4692,7 @@ mod tests {
         let _ = std::fs::remove_file(current);
         let _ = std::fs::remove_file(collision);
         let _ = std::fs::remove_dir(dir);
-        assert_eq!(result, "20120815_023000_001.jpg");
+        assert_eq!(result, "20120815_023000_dup001.jpg");
     }
 
     #[test]
@@ -3964,7 +4707,7 @@ mod tests {
         std::fs::write(&first, []).unwrap();
         std::fs::write(&second, []).unwrap();
 
-        let mut reserved = HashSet::new();
+        let mut reserved = FilenameCollisionResolver::new();
         let first_name = filename_from_media_date_with_reserved(
             &first,
             "2012-08-15 02:30:00",
@@ -3987,7 +4730,7 @@ mod tests {
         let renamed = apply_filename_rename_plan(&plan).unwrap();
 
         assert_eq!(first_name, "20120815_023000.jpg");
-        assert_eq!(second_name, "20120815_023000_001.jpg");
+        assert_eq!(second_name, "20120815_023000_dup001.jpg");
         assert_eq!(renamed.len(), 2);
         assert!(dir.join(first_name).is_file());
         assert!(dir.join(second_name).is_file());

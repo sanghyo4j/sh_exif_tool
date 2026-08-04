@@ -106,6 +106,7 @@ component ActionButton inherits Rectangle {
 }
 
 export component MetadataPanel inherits Rectangle {
+    in property <string> header_title: "Details";
     in property <int> selected_file_count: 0;
     in-out property <string> selected_name;
     in-out property <string> selected_created;
@@ -139,6 +140,9 @@ export component MetadataPanel inherits Rectangle {
     in-out property <string> gps_latitude;
     in-out property <string> gps_longitude;
     in-out property <string> gps_altitude;
+    in-out property <string> gps_date_stamp;
+    in-out property <string> gps_time_stamp;
+    in-out property <string> gps_date_time;
     in-out property <string> date_time_original;
     in-out property <string> date_time_digitized;
     in-out property <string> image_date_time;
@@ -167,6 +171,9 @@ export component MetadataPanel inherits Rectangle {
     in-out property <string> gps_latitude_status;
     in-out property <string> gps_longitude_status;
     in-out property <string> gps_altitude_status;
+    in-out property <string> gps_date_stamp_status;
+    in-out property <string> gps_time_stamp_status;
+    in-out property <string> gps_date_time_status;
     in-out property <bool> exif_available: false;
     in-out property <bool> has_pending_changes: false;
     in-out property <bool> selected_name_dirty: false;
@@ -191,6 +198,9 @@ export component MetadataPanel inherits Rectangle {
     in-out property <bool> gps_latitude_dirty: false;
     in-out property <bool> gps_longitude_dirty: false;
     in-out property <bool> gps_altitude_dirty: false;
+    in-out property <bool> gps_date_stamp_dirty: false;
+    in-out property <bool> gps_time_stamp_dirty: false;
+    in-out property <bool> gps_date_time_dirty: false;
     in-out property <bool> png_creation_time_dirty: false;
     in-out property <bool> png_exif_date_time_original_dirty: false;
 
@@ -199,6 +209,8 @@ export component MetadataPanel inherits Rectangle {
     callback fill_taken_date_from_filename();
     callback fill_taken_date_from_created_date();
     callback shift_media_date();
+    callback shift_gps_date_time();
+    callback fill_taken_date_from_gps();
     callback set_modified_date_from_created_date();
     callback set_file_dates_from_media_date();
     callback set_filename_from_media_date();
@@ -287,7 +299,7 @@ export component MetadataPanel inherits Rectangle {
                 x: 12px;
                 width: parent.width - 188px;
                 height: 100%;
-                text: "Details";
+                text: root.header_title;
                 font-family: FontSettings.details_font_family;
                 font-size: max(10pt, FontSettings.font_size_pt * 1pt);
                 font-weight: 600;
@@ -395,13 +407,14 @@ export component MetadataPanel inherits Rectangle {
                         title: "LOCATION";
                         metadata_section: "location";
                         action_title: "Remove GPS";
-                        action_enabled: root.gps_latitude != "" || root.gps_longitude != "" || root.gps_altitude != "" || root.gps_latitude_status == "Mixed" || root.gps_longitude_status == "Mixed" || root.gps_altitude_status == "Mixed";
+                        action_enabled: root.gps_latitude != "" || root.gps_longitude != "" || root.gps_altitude != "" || root.gps_date_time != "" || root.gps_latitude_status == "Mixed" || root.gps_longitude_status == "Mixed" || root.gps_altitude_status == "Mixed" || root.gps_date_time_status == "Mixed";
                         action_clicked => { root.remove_gps_information(); }
                         section_right_clicked(section) => { root.exif_section_right_clicked(section); }
                     }
                     if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "GPS Latitude"; metadata_key: "gps_latitude"; value <=> root.gps_latitude; status <=> root.gps_latitude_status; dirty <=> root.gps_latitude_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "GPS Longitude"; metadata_key: "gps_longitude"; value <=> root.gps_longitude; status <=> root.gps_longitude_status; dirty <=> root.gps_longitude_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "GPS Altitude"; metadata_key: "gps_altitude"; value <=> root.gps_altitude; status <=> root.gps_altitude_status; dirty <=> root.gps_altitude_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available && (root.gps_date_time != "" || root.gps_date_time_status == "Mixed"): EditableInfoRow { label: "GPS Date/Time (UTC)"; metadata_key: "gps_date_time"; value <=> root.gps_date_time; status <=> root.gps_date_time_status; dirty <=> root.gps_date_time_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
 
                     if root.selected_media_kind == "jpeg" && root.exif_available && (root.image_description != "" || root.copyright != "" || root.exif_version != "" || root.exposure_program != "" || root.white_balance != "" || root.focal_length_35mm != ""): SectionHeader { title: "EXTRA"; }
                     if root.selected_media_kind == "jpeg" && root.exif_available && root.image_description != "": ReadOnlyInfoRow { label: "Image Description"; metadata_key: "image_description"; value: root.image_description; metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } }
@@ -471,7 +484,7 @@ export component MetadataPanel inherits Rectangle {
         x: parent.width - 292px;
         y: 30px;
         width: 280px;
-        height: (root.selected_media_kind == "jpeg" || root.selected_media_kind == "png") ? 114px : 86px;
+        height: root.selected_media_kind == "jpeg" ? 170px : (root.selected_media_kind == "png" ? 114px : 86px);
         background: NativeColors.menu_bg;
         border-width: 1px;
         border-color: #a0a0a0;
@@ -480,6 +493,9 @@ export component MetadataPanel inherits Rectangle {
         MenuRow { y: 1px; title: "Set Media Date from Filename"; clicked => { root.metadata_tools_menu_visible = false; root.fill_taken_date_from_filename(); } }
         MenuRow { y: 29px; title: "Set Media Date from File Timestamp"; clicked => { root.metadata_tools_menu_visible = false; root.fill_taken_date_from_created_date(); } }
         MenuRow { y: 57px; title: "Shift Media Date..."; clicked => { root.metadata_tools_menu_visible = false; root.shift_media_date(); } }
-        if root.selected_media_kind == "jpeg" || root.selected_media_kind == "png": MenuRow { y: 85px; title: "Remove Metadata Tags"; danger: true; clicked => { root.metadata_tools_menu_visible = false; root.remove_exif_tags(); } }
+        if root.selected_media_kind == "jpeg": MenuRow { y: 85px; title: "Shift GPS Date/Time..."; clicked => { root.metadata_tools_menu_visible = false; root.shift_gps_date_time(); } }
+        if root.selected_media_kind == "jpeg": MenuRow { y: 113px; title: "Set Media Date from GPS Date/Time"; clicked => { root.metadata_tools_menu_visible = false; root.fill_taken_date_from_gps(); } }
+        if root.selected_media_kind == "jpeg": MenuRow { y: 141px; title: "Remove Metadata Tags"; danger: true; clicked => { root.metadata_tools_menu_visible = false; root.remove_exif_tags(); } }
+        if root.selected_media_kind == "png": MenuRow { y: 85px; title: "Remove Metadata Tags"; danger: true; clicked => { root.metadata_tools_menu_visible = false; root.remove_exif_tags(); } }
     }
 }

@@ -1,11 +1,12 @@
 use std::fs;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 const DISPLAY_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const EXIF_DATETIME_FORMAT: &str = "%Y:%m:%d %H:%M:%S";
 const DEFAULT_WRITABLE_ASCII_LEN: usize = 64;
+const THUMBNAIL_EXTRACTED_SOFTWARE: &str = "SH148 Thumbnail Extracted";
 
 #[derive(Clone, Debug)]
 pub struct ExifMetadata {
@@ -38,6 +39,8 @@ pub struct ExifMetadata {
     pub gps_latitude: String,
     pub gps_longitude: String,
     pub gps_altitude: String,
+    pub gps_date_stamp: String,
+    pub gps_time_stamp: String,
 }
 
 impl Default for ExifMetadata {
@@ -72,6 +75,8 @@ impl Default for ExifMetadata {
             gps_latitude: empty_value(),
             gps_longitude: empty_value(),
             gps_altitude: empty_value(),
+            gps_date_stamp: empty_value(),
+            gps_time_stamp: empty_value(),
         }
     }
 }
@@ -102,6 +107,108 @@ pub fn read_exif_metadata(path: &Path) -> ExifMetadata {
     };
 
     parse_tiff(tiff).unwrap_or_default()
+}
+
+pub fn extract_embedded_thumbnail(path: &Path) -> Result<PathBuf, String> {
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let (_, exif_end) = find_exif_app1_range(&bytes)
+        .ok_or_else(|| "JPEG EXIF data was not found.".to_string())?;
+    let tiff_start = find_exif_tiff_start(&bytes)
+        .ok_or_else(|| "JPEG EXIF data was not found.".to_string())?;
+    let tiff_end = exif_end;
+    let tiff = bytes
+        .get(tiff_start..tiff_end)
+        .ok_or_else(|| "The EXIF TIFF data is truncated.".to_string())?;
+    let thumbnail = embedded_jpeg_thumbnail(tiff)?;
+
+    if !thumbnail.starts_with(&[0xff, 0xd8]) || !thumbnail.ends_with(&[0xff, 0xd9]) {
+        return Err("The embedded EXIF thumbnail is not a complete JPEG image.".to_string());
+    }
+
+    let existing_software = parse_tiff(tiff)
+        .map(|metadata| metadata.software)
+        .unwrap_or_default();
+    let software = thumbnail_extracted_software_value(&existing_software);
+    let updated_tiff = rewrite_exif_tiff_software(tiff, &software)?;
+    let updated_exif = build_exif_app1_from_tiff(&updated_tiff)?;
+
+    let mut output = Vec::with_capacity(2 + updated_exif.len() + thumbnail.len() - 2);
+    output.extend_from_slice(&[0xff, 0xd8]);
+    output.extend_from_slice(&updated_exif);
+    output.extend_from_slice(&thumbnail[2..]);
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "The selected file folder could not be resolved.".to_string())?;
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "The selected file name could not be resolved.".to_string())?;
+    let desired = parent.join(format!("{stem}_thumbnail.jpg"));
+    let target = crate::fs::FilenameCollisionResolver::new().resolve_for_create(&desired)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .map_err(|err| format!("Unable to create {}: {err}", target.display()))?;
+    if let Err(err) = file.write_all(&output).and_then(|_| file.flush()) {
+        drop(file);
+        let _ = fs::remove_file(&target);
+        return Err(format!("Unable to write {}: {err}", target.display()));
+    }
+
+    Ok(target)
+}
+
+fn thumbnail_extracted_software_value(existing: &str) -> String {
+    let existing = existing.trim();
+    if existing.is_empty() {
+        THUMBNAIL_EXTRACTED_SOFTWARE.to_string()
+    } else if existing.contains(THUMBNAIL_EXTRACTED_SOFTWARE) {
+        existing.to_string()
+    } else {
+        format!("{existing} ({THUMBNAIL_EXTRACTED_SOFTWARE})")
+    }
+}
+
+fn embedded_jpeg_thumbnail(tiff: &[u8]) -> Result<&[u8], String> {
+    let endian = read_tiff_endian(tiff)
+        .ok_or_else(|| "The EXIF TIFF byte order is invalid.".to_string())?;
+    if read_u16(tiff, 2, endian) != Some(42) {
+        return Err("The EXIF TIFF header is invalid.".to_string());
+    }
+
+    let ifd0_offset = read_u32(tiff, 4, endian)
+        .ok_or_else(|| "The EXIF IFD0 offset is missing.".to_string())? as usize;
+    let ifd0_count = read_u16(tiff, ifd0_offset, endian)
+        .ok_or_else(|| "The EXIF IFD0 is truncated.".to_string())? as usize;
+    let next_ifd_position = ifd0_offset
+        .checked_add(2)
+        .and_then(|value| value.checked_add(ifd0_count.checked_mul(12)?))
+        .ok_or_else(|| "The EXIF IFD0 is too large.".to_string())?;
+    let ifd1_offset = read_u32(tiff, next_ifd_position, endian)
+        .filter(|offset| *offset != 0)
+        .ok_or_else(|| "No embedded EXIF thumbnail was found.".to_string())? as usize;
+    let entries = read_ifd_entries(tiff, ifd1_offset, endian)
+        .ok_or_else(|| "The EXIF thumbnail directory is invalid.".to_string())?;
+    let thumbnail_offset = entries
+        .iter()
+        .find(|entry| entry.tag == 0x0201)
+        .and_then(Entry::as_long)
+        .ok_or_else(|| "The EXIF thumbnail offset was not found.".to_string())? as usize;
+    let thumbnail_length = entries
+        .iter()
+        .find(|entry| entry.tag == 0x0202)
+        .and_then(Entry::as_long)
+        .filter(|length| *length > 0)
+        .ok_or_else(|| "The EXIF thumbnail length was not found.".to_string())? as usize;
+    let thumbnail_end = thumbnail_offset
+        .checked_add(thumbnail_length)
+        .ok_or_else(|| "The EXIF thumbnail range is too large.".to_string())?;
+
+    tiff.get(thumbnail_offset..thumbnail_end)
+        .ok_or_else(|| "The embedded EXIF thumbnail is truncated.".to_string())
 }
 
 pub(crate) fn read_exif_metadata_for_scan(path: &Path) -> ExifMetadata {
@@ -168,6 +275,7 @@ fn write_exif_tag_values<F>(path: &Path, tags: &[u16], mut make_bytes: F) -> Res
 where
     F: FnMut(&Entry<'_>) -> Option<Vec<u8>>,
 {
+    let matching_file_time = matching_created_modified_time(path);
     let mut bytes = fs::read(path).map_err(|err| err.to_string())?;
     let tiff_start = find_exif_tiff_start(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
     let tiff = bytes
@@ -230,7 +338,27 @@ where
         target[..value_bytes.len()].copy_from_slice(&value_bytes);
     }
 
-    fs::write(path, bytes).map_err(|err| err.to_string())
+    fs::write(path, bytes).map_err(|err| err.to_string())?;
+    restore_matching_file_time(path, matching_file_time)
+}
+
+fn matching_created_modified_time(path: &Path) -> Option<std::time::SystemTime> {
+    let metadata = fs::metadata(path).ok()?;
+    let created = metadata.created().ok()?;
+    let modified = metadata.modified().ok()?;
+    let created_second = DateTime::<Local>::from(created).timestamp();
+    let modified_second = DateTime::<Local>::from(modified).timestamp();
+    (created_second == modified_second).then_some(created)
+}
+
+fn restore_matching_file_time(
+    path: &Path,
+    matching_time: Option<std::time::SystemTime>,
+) -> Result<(), String> {
+    let Some(time) = matching_time else {
+        return Ok(());
+    };
+    crate::fs::set_file_times(path, Some(time), Some(time))
 }
 
 fn writable_entry_range(entry: &Entry<'_>, value_len: usize) -> Option<(usize, usize)> {
@@ -238,9 +366,10 @@ fn writable_entry_range(entry: &Entry<'_>, value_len: usize) -> Option<(usize, u
         2 => writable_ascii_range(entry, value_len),
         3 if entry.count == 1 && value_len <= 2 => entry.data.get(entry.value_field..entry.value_field + 2).map(|_| (entry.value_field, 2)),
         4 if entry.count == 1 && value_len <= 4 => entry.data.get(entry.value_field..entry.value_field + 4).map(|_| (entry.value_field, 4)),
-        5 if entry.count == 1 => {
+        5 if value_len <= entry.count as usize * 8 => {
             let offset = read_u32(entry.data, entry.value_field, entry.endian)? as usize;
-            entry.data.get(offset..offset + 8).map(|_| (offset, 8))
+            let len = entry.count as usize * 8;
+            entry.data.get(offset..offset + len).map(|_| (offset, len))
         }
         _ => None,
     }
@@ -290,6 +419,108 @@ fn write_exif_rational_tag(path: &Path, tags: &[u16], numerator: u32, denominato
 pub fn write_taken_date(path: &Path, display_value: &str) -> Result<(), String> {
     let exif_value = display_datetime_to_exif(display_value)?;
     write_exif_ascii_tags(path, &[0x0132, 0x9003, 0x9004], &exif_value)
+}
+
+fn write_gps_tag_value<F>(path: &Path, tag: u16, make_bytes: F) -> Result<(), String>
+where
+    F: FnOnce(&Entry<'_>) -> Option<Vec<u8>>,
+{
+    let matching_file_time = matching_created_modified_time(path);
+    let mut bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let tiff_start = find_exif_tiff_start(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
+    let tiff = bytes
+        .get(tiff_start..)
+        .ok_or_else(|| "Invalid EXIF data offset.".to_string())?;
+    let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid TIFF header.".to_string())?;
+    let ifd0_offset = read_u32(tiff, 4, endian).ok_or_else(|| "Invalid IFD0 offset.".to_string())? as usize;
+    let ifd0_entries = read_ifd_entries(tiff, ifd0_offset, endian)
+        .ok_or_else(|| "Unable to read IFD0 entries.".to_string())?;
+    let gps_offset = ifd0_entries
+        .iter()
+        .find(|entry| entry.tag == 0x8825)
+        .and_then(|entry| entry.as_long())
+        .map(|offset| offset as usize)
+        .ok_or_else(|| "GPS metadata was not found.".to_string())?;
+    let gps_entries = read_ifd_entries(tiff, gps_offset, endian)
+        .ok_or_else(|| "Unable to read GPS entries.".to_string())?;
+    let entry = gps_entries
+        .iter()
+        .find(|entry| entry.tag == tag)
+        .ok_or_else(|| format!("GPS tag 0x{tag:04X} was not found."))?;
+    let value_bytes = make_bytes(entry)
+        .ok_or_else(|| format!("GPS tag 0x{tag:04X} has an unsupported format."))?;
+    let (relative_start, len) = writable_entry_range(entry, value_bytes.len())
+        .ok_or_else(|| format!("GPS tag 0x{tag:04X} cannot hold the new value."))?;
+    let start = tiff_start
+        .checked_add(relative_start)
+        .ok_or_else(|| "Invalid GPS write offset.".to_string())?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| "Invalid GPS write length.".to_string())?;
+    let target = bytes
+        .get_mut(start..end)
+        .ok_or_else(|| "GPS write range is outside the file.".to_string())?;
+    target.fill(0);
+    target[..value_bytes.len()].copy_from_slice(&value_bytes);
+
+    fs::write(path, bytes).map_err(|err| err.to_string())?;
+    restore_matching_file_time(path, matching_file_time)
+}
+
+pub fn write_gps_date_stamp(path: &Path, display_value: &str) -> Result<(), String> {
+    let date = NaiveDate::parse_from_str(display_value.trim(), "%Y-%m-%d")
+        .map_err(|_| "Expected GPS date format: YYYY-MM-DD".to_string())?;
+    let mut bytes = date.format("%Y:%m:%d").to_string().into_bytes();
+    bytes.push(0);
+    write_gps_tag_value(path, 0x001d, move |entry| {
+        (entry.field_type == 2 && entry.count >= bytes.len() as u32).then(|| bytes.clone())
+    })
+}
+
+pub fn write_gps_time_stamp(path: &Path, display_value: &str) -> Result<(), String> {
+    let value = display_value.trim().trim_end_matches("UTC").trim();
+    let time = NaiveTime::parse_from_str(value, "%H:%M:%S")
+        .map_err(|_| "Expected GPS time format: HH:MM:SS".to_string())?;
+    write_gps_tag_value(path, 0x0007, move |entry| {
+        if entry.field_type != 5 || entry.count != 3 {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(24);
+        for number in [time.hour(), time.minute(), time.second()] {
+            match entry.endian {
+                Endian::Little => {
+                    bytes.extend_from_slice(&number.to_le_bytes());
+                    bytes.extend_from_slice(&1u32.to_le_bytes());
+                }
+                Endian::Big => {
+                    bytes.extend_from_slice(&number.to_be_bytes());
+                    bytes.extend_from_slice(&1u32.to_be_bytes());
+                }
+            }
+        }
+        Some(bytes)
+    })
+}
+
+pub fn write_gps_date_time(
+    path: &Path,
+    date_value: &str,
+    time_value: &str,
+) -> Result<(), String> {
+    let original = fs::read(path).map_err(|err| err.to_string())?;
+    let file_metadata = fs::metadata(path).map_err(|err| err.to_string())?;
+    let original_created = file_metadata.created().ok();
+    let original_modified = file_metadata.modified().ok();
+
+    write_gps_date_stamp(path, date_value)?;
+    if let Err(err) = write_gps_time_stamp(path, time_value) {
+        fs::write(path, original)
+            .map_err(|rollback_err| format!("{err} Rollback failed: {rollback_err}"))?;
+        crate::fs::set_file_times(path, original_created, original_modified)
+            .map_err(|rollback_err| format!("{err} Rollback timestamp restore failed: {rollback_err}"))?;
+        return Err(err);
+    }
+    Ok(())
 }
 
 pub fn write_camera_make(path: &Path, value: &str) -> Result<(), String> {
@@ -353,6 +584,7 @@ pub fn write_color_space(path: &Path, value: &str) -> Result<(), String> {
 }
 
 pub fn remove_gps_information(path: &Path) -> Result<(), String> {
+    let matching_file_time = matching_created_modified_time(path);
     let mut bytes = fs::read(path).map_err(|err| err.to_string())?;
     let tiff_start = find_exif_tiff_start(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
 
@@ -413,7 +645,8 @@ pub fn remove_gps_information(path: &Path) -> Result<(), String> {
         }
     }
 
-    fs::write(path, bytes).map_err(|err| err.to_string())
+    fs::write(path, bytes).map_err(|err| err.to_string())?;
+    restore_matching_file_time(path, matching_file_time)
 }
 
 pub fn remove_exif_metadata(path: &Path, backup_before_changes: bool) -> Result<(), String> {
@@ -503,6 +736,7 @@ pub fn rewrite_basic_exif_metadata(
 }
 
 pub fn rewrite_generated_basic_exif_metadata(path: &Path, metadata: &ExifMetadata) -> Result<(), String> {
+    let matching_file_time = matching_created_modified_time(path);
     if !is_generated_new_exif_path(path) {
         return Err("Refusing to rewrite EXIF in place unless this is a generated EXIF file.".to_string());
     }
@@ -514,7 +748,8 @@ pub fn rewrite_generated_basic_exif_metadata(path: &Path, metadata: &ExifMetadat
 
     let exif_segment = build_basic_exif_app1(metadata)?;
     let updated = replace_or_insert_exif_app1(&bytes, &exif_segment)?;
-    fs::write(path, updated).map_err(|err| err.to_string())
+    fs::write(path, updated).map_err(|err| err.to_string())?;
+    restore_matching_file_time(path, matching_file_time)
 }
 
 pub fn rewrite_repairable_exif_metadata(
@@ -522,6 +757,7 @@ pub fn rewrite_repairable_exif_metadata(
     metadata: &ExifMetadata,
     backup_before_changes: bool,
 ) -> Result<(), String> {
+    let matching_file_time = matching_created_modified_time(path);
     let bytes = fs::read(path).map_err(|err| err.to_string())?;
     let tiff = find_exif_tiff(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
     if !is_basic_generated_tiff(tiff) {
@@ -547,7 +783,7 @@ pub fn rewrite_repairable_exif_metadata(
         let _ = fs::write(path, &bytes);
         return Err(err.to_string());
     }
-    Ok(())
+    restore_matching_file_time(path, matching_file_time)
 }
 
 pub fn is_generated_new_exif_path(path: &Path) -> bool {
@@ -584,6 +820,9 @@ pub fn remove_exif_tag(path: &Path, key: &str, backup_before_changes: bool) -> R
         "gps_latitude" => (&[], &[], &[0x0001, 0x0002]),
         "gps_longitude" => (&[], &[], &[0x0003, 0x0004]),
         "gps_altitude" => (&[], &[], &[0x0005, 0x0006]),
+        "gps_date_stamp" => (&[], &[], &[0x001d]),
+        "gps_time_stamp" => (&[], &[], &[0x0007]),
+        "gps_date_time" => (&[], &[], &[0x0007, 0x001d]),
         _ => return Err("This metadata row cannot be removed individually.".to_string()),
     };
 
@@ -1348,6 +1587,79 @@ pub(crate) fn rewrite_exif_tiff_dates(
     Ok(output)
 }
 
+fn rewrite_exif_tiff_software(tiff: &[u8], value: &str) -> Result<Vec<u8>, String> {
+    let endian = read_tiff_endian(tiff)
+        .ok_or_else(|| "Invalid EXIF TIFF header.".to_string())?;
+    if read_u16(tiff, 2, endian) != Some(42) {
+        return Err("Invalid EXIF TIFF marker.".to_string());
+    }
+    let old_ifd0_offset = read_u32(tiff, 4, endian)
+        .map(|offset| offset as usize)
+        .ok_or_else(|| "Invalid EXIF IFD0 offset.".to_string())?;
+    let old_ifd0 = raw_ifd_entries(tiff, old_ifd0_offset, endian)?;
+    let old_next_ifd = raw_ifd_next_offset(tiff, old_ifd0_offset, old_ifd0.len(), endian)?;
+
+    let mut software_bytes = value.trim().as_bytes().to_vec();
+    if software_bytes.is_empty() {
+        return Err("Software metadata cannot be empty.".to_string());
+    }
+    software_bytes.push(0);
+
+    let mut entries: Vec<_> = old_ifd0
+        .into_iter()
+        .filter(|(tag, _)| *tag != 0x0131)
+        .collect();
+    let mut output = tiff.to_vec();
+    if output.len() % 2 != 0 {
+        output.push(0);
+    }
+    let new_ifd0_offset = output.len();
+    let entry_count = entries
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| "EXIF IFD0 contains too many entries.".to_string())?;
+    let table_len = 2usize
+        .checked_add(
+            entry_count
+                .checked_mul(12)
+                .ok_or_else(|| "EXIF IFD0 is too large.".to_string())?,
+        )
+        .and_then(|length| length.checked_add(4))
+        .ok_or_else(|| "EXIF IFD0 is too large.".to_string())?;
+    let software_offset = new_ifd0_offset
+        .checked_add(table_len)
+        .ok_or_else(|| "EXIF data is too large.".to_string())?;
+    entries.push((
+        0x0131,
+        make_tiff_entry(
+            0x0131,
+            2,
+            u32::try_from(software_bytes.len())
+                .map_err(|_| "Software metadata is too large.".to_string())?,
+            u32::try_from(software_offset)
+                .map_err(|_| "EXIF data is too large.".to_string())?,
+            endian,
+        ),
+    ));
+    entries.sort_by_key(|(tag, _)| *tag);
+    append_raw_ifd(
+        &mut output,
+        new_ifd0_offset,
+        &entries,
+        old_next_ifd,
+        endian,
+    )?;
+    output.extend_from_slice(&software_bytes);
+    write_u32_at(
+        &mut output,
+        4,
+        u32::try_from(new_ifd0_offset)
+            .map_err(|_| "EXIF data is too large.".to_string())?,
+        endian,
+    )?;
+    Ok(output)
+}
+
 pub(crate) fn remove_exif_tiff_date_time_original(tiff: &[u8]) -> Result<Vec<u8>, String> {
     rewrite_exif_tiff_removing_tags(tiff, &[], &[0x9003], &[])
 }
@@ -1730,6 +2042,8 @@ fn parse_gps_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMeta
     let mut lon = None;
     let mut alt_ref = 0u8;
     let mut alt = None;
+    let mut date_stamp = None;
+    let mut time_stamp = None;
 
     for entry in entries {
         match entry.tag {
@@ -1739,6 +2053,8 @@ fn parse_gps_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMeta
             0x0004 => lon = entry.as_rational_array3(),
             0x0005 => alt_ref = entry.as_byte().unwrap_or(0),
             0x0006 => alt = entry.as_rational(),
+            0x0007 => time_stamp = entry.as_rational_array3(),
+            0x001d => date_stamp = entry.as_ascii(),
             _ => {}
         }
     }
@@ -1756,6 +2072,14 @@ fn parse_gps_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMeta
         } else {
             format!("{meters:.2} m")
         };
+    }
+    if let Some(value) = date_stamp {
+        meta.gps_date_stamp = NaiveDate::parse_from_str(&value, "%Y:%m:%d")
+            .map(|date| date.format("%Y-%m-%d").to_string())
+            .unwrap_or(value);
+    }
+    if let Some(value) = time_stamp {
+        meta.gps_time_stamp = format_gps_time(value);
     }
 }
 
@@ -2069,11 +2393,18 @@ fn format_gps_coord(reference: &str, parts: [(u32, u32); 3]) -> String {
     let degrees = rational_to_f64(parts[0]);
     let minutes = rational_to_f64(parts[1]);
     let seconds = rational_to_f64(parts[2]);
-    let mut decimal = degrees + minutes / 60.0 + seconds / 3600.0;
-    if reference == "S" || reference == "W" {
-        decimal = -decimal;
-    }
-    format!("{decimal:.6}")
+    let seconds = format!("{seconds:.4}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string();
+    format!("{degrees:.0}°{minutes:02.0}'{seconds}\"{reference}")
+}
+
+fn format_gps_time(parts: [(u32, u32); 3]) -> String {
+    let hour = rational_to_f64(parts[0]);
+    let minute = rational_to_f64(parts[1]);
+    let second = rational_to_f64(parts[2]);
+    format!("{hour:02.0}:{minute:02.0}:{second:02.0}")
 }
 
 fn parse_known_datetime(value: &str) -> Option<NaiveDateTime> {
@@ -2098,6 +2429,109 @@ fn empty_value() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn minimal_jpeg_with_embedded_thumbnail() -> Vec<u8> {
+        let thumbnail = [0xff, 0xd8, 0xff, 0xd9];
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&42u16.to_le_bytes());
+        tiff.extend_from_slice(&8u32.to_le_bytes());
+
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0xc001u16.to_le_bytes());
+        tiff.extend_from_slice(&3u16.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&42u16.to_le_bytes());
+        tiff.extend_from_slice(&0u16.to_le_bytes());
+        tiff.extend_from_slice(&26u32.to_le_bytes());
+
+        tiff.extend_from_slice(&2u16.to_le_bytes());
+        tiff.extend_from_slice(&0x0201u16.to_le_bytes());
+        tiff.extend_from_slice(&4u16.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&56u32.to_le_bytes());
+        tiff.extend_from_slice(&0x0202u16.to_le_bytes());
+        tiff.extend_from_slice(&4u16.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&(thumbnail.len() as u32).to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(tiff.len(), 56);
+        tiff.extend_from_slice(&thumbnail);
+
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend_from_slice(&tiff);
+        let segment_len = u16::try_from(payload.len() + 2).unwrap();
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+        jpeg.extend_from_slice(&segment_len.to_be_bytes());
+        jpeg.extend_from_slice(&payload);
+        jpeg.extend_from_slice(&[0xff, 0xd9]);
+        jpeg
+    }
+
+    #[test]
+    fn extracts_embedded_thumbnail_and_preserves_existing_exif() {
+        let directory = std::env::temp_dir().join(format!(
+            "sh148_exif_thumbnail_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let source = directory.join("damaged.jpg");
+        let source_bytes = minimal_jpeg_with_embedded_thumbnail();
+        fs::write(&source, &source_bytes).unwrap();
+
+        let first = extract_embedded_thumbnail(&source).unwrap();
+        let second = extract_embedded_thumbnail(&source).unwrap();
+        assert_eq!(first.file_name().unwrap(), "damaged_thumbnail.jpg");
+        assert_eq!(second.file_name().unwrap(), "damaged_thumbnail_dup001.jpg");
+
+        let output = fs::read(&first).unwrap();
+        assert_eq!(&output[..2], &[0xff, 0xd8]);
+        assert_eq!(&output[output.len() - 2..], &[0xff, 0xd9]);
+        let output_tiff = find_exif_tiff(&output).unwrap();
+        let metadata = parse_tiff(output_tiff).unwrap();
+        assert_eq!(metadata.software, THUMBNAIL_EXTRACTED_SOFTWARE);
+        assert_eq!(embedded_jpeg_thumbnail(output_tiff).unwrap(), &[0xff, 0xd8, 0xff, 0xd9]);
+        let endian = read_tiff_endian(output_tiff).unwrap();
+        let ifd0_offset = read_u32(output_tiff, 4, endian).unwrap() as usize;
+        let unknown = read_ifd_entries(output_tiff, ifd0_offset, endian)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.tag == 0xc001)
+            .unwrap();
+        assert_eq!(unknown.as_short(), Some(42));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn appends_thumbnail_marker_to_existing_software_once() {
+        assert_eq!(
+            thumbnail_extracted_software_value(""),
+            "SH148 Thumbnail Extracted"
+        );
+        assert_eq!(
+            thumbnail_extracted_software_value("PhotoScape"),
+            "PhotoScape (SH148 Thumbnail Extracted)"
+        );
+        assert_eq!(
+            thumbnail_extracted_software_value("PhotoScape (SH148 Thumbnail Extracted)"),
+            "PhotoScape (SH148 Thumbnail Extracted)"
+        );
+
+        let mut metadata = ExifMetadata::default();
+        metadata.software = "PhotoScape".to_string();
+        let original = build_basic_tiff(&metadata).unwrap();
+        let updated_value = thumbnail_extracted_software_value(&metadata.software);
+        let updated = rewrite_exif_tiff_software(&original, &updated_value).unwrap();
+        assert_eq!(
+            parse_tiff(&updated).unwrap().software,
+            "PhotoScape (SH148 Thumbnail Extracted)"
+        );
+    }
 
     fn minimal_jpeg_with_camera_make(value: &str) -> Vec<u8> {
         let mut tiff = Vec::new();
@@ -2210,12 +2644,19 @@ mod tests {
         tiff.extend_from_slice(&42u16.to_le_bytes());
         tiff.extend_from_slice(&8u32.to_le_bytes());
 
-        let gps_ifd_offset = 26u32;
-        let lat_offset = 104u32;
-        let lon_offset = 128u32;
-        let alt_offset = 152u32;
+        let gps_ifd_offset = 38u32;
+        let lat_offset = 140u32;
+        let lon_offset = 164u32;
+        let alt_offset = 188u32;
+        let time_offset = 196u32;
+        let date_offset = 220u32;
+        let taken_date_offset = 231u32;
 
-        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&2u16.to_le_bytes());
+        tiff.extend_from_slice(&0x0132u16.to_le_bytes());
+        tiff.extend_from_slice(&2u16.to_le_bytes());
+        tiff.extend_from_slice(&20u32.to_le_bytes());
+        tiff.extend_from_slice(&taken_date_offset.to_le_bytes());
         tiff.extend_from_slice(&0x8825u16.to_le_bytes());
         tiff.extend_from_slice(&4u16.to_le_bytes());
         tiff.extend_from_slice(&1u32.to_le_bytes());
@@ -2223,7 +2664,7 @@ mod tests {
         tiff.extend_from_slice(&0u32.to_le_bytes());
 
         assert_eq!(tiff.len(), gps_ifd_offset as usize);
-        tiff.extend_from_slice(&6u16.to_le_bytes());
+        tiff.extend_from_slice(&8u16.to_le_bytes());
         tiff.extend_from_slice(&0x0001u16.to_le_bytes());
         tiff.extend_from_slice(&2u16.to_le_bytes());
         tiff.extend_from_slice(&2u32.to_le_bytes());
@@ -2248,6 +2689,14 @@ mod tests {
         tiff.extend_from_slice(&5u16.to_le_bytes());
         tiff.extend_from_slice(&1u32.to_le_bytes());
         tiff.extend_from_slice(&alt_offset.to_le_bytes());
+        tiff.extend_from_slice(&0x0007u16.to_le_bytes());
+        tiff.extend_from_slice(&5u16.to_le_bytes());
+        tiff.extend_from_slice(&3u32.to_le_bytes());
+        tiff.extend_from_slice(&time_offset.to_le_bytes());
+        tiff.extend_from_slice(&0x001du16.to_le_bytes());
+        tiff.extend_from_slice(&2u16.to_le_bytes());
+        tiff.extend_from_slice(&11u32.to_le_bytes());
+        tiff.extend_from_slice(&date_offset.to_le_bytes());
         tiff.extend_from_slice(&0u32.to_le_bytes());
 
         assert_eq!(tiff.len(), lat_offset as usize);
@@ -2263,6 +2712,15 @@ mod tests {
         assert_eq!(tiff.len(), alt_offset as usize);
         tiff.extend_from_slice(&42u32.to_le_bytes());
         tiff.extend_from_slice(&1u32.to_le_bytes());
+        assert_eq!(tiff.len(), time_offset as usize);
+        for value in [19u32, 31, 13] {
+            tiff.extend_from_slice(&value.to_le_bytes());
+            tiff.extend_from_slice(&1u32.to_le_bytes());
+        }
+        assert_eq!(tiff.len(), date_offset as usize);
+        tiff.extend_from_slice(b"2015:05:14\0");
+        assert_eq!(tiff.len(), taken_date_offset as usize);
+        tiff.extend_from_slice(b"2015:07:11 18:25:43\0");
 
         let mut payload = b"Exif\0\0".to_vec();
         payload.extend_from_slice(&tiff);
@@ -2288,6 +2746,18 @@ mod tests {
         assert_eq!(
             display_datetime_to_exif("2012-08-27 00:29:55").unwrap(),
             "2012:08:27 00:29:55"
+        );
+    }
+
+    #[test]
+    fn formats_gps_coordinates_as_dms_with_direction() {
+        assert_eq!(
+            format_gps_coord("N", [(47, 1), (38, 1), (216, 10)]),
+            "47°38'21.6\"N"
+        );
+        assert_eq!(
+            format_gps_coord("W", [(122, 1), (7, 1), (422, 10)]),
+            "122°07'42.2\"W"
         );
     }
 
@@ -2408,6 +2878,28 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn preserves_matching_created_and_modified_times_when_writing_exif() {
+        let path = std::env::temp_dir().join(format!(
+            "sh148_exif_file_tool_matching_times_test_{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, minimal_jpeg_with_datetime_original("2012:08:27 00:29:55"))
+            .unwrap();
+        let matching_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+        crate::fs::set_file_times(&path, Some(matching_time), Some(matching_time)).unwrap();
+
+        write_taken_date(&path, "2026-05-09 12:34:56").unwrap();
+
+        let file_metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(file_metadata.created().unwrap(), matching_time);
+        assert_eq!(file_metadata.modified().unwrap(), matching_time);
+
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn writes_existing_camera_make_tag_in_place() {
         let path = std::env::temp_dir().join(format!(
@@ -2489,9 +2981,11 @@ mod tests {
         std::fs::write(&path, minimal_jpeg_with_gps()).unwrap();
 
         let before = read_exif_metadata(&path);
-        assert_eq!(before.gps_latitude, "37.570000");
-        assert_eq!(before.gps_longitude, "127.025000");
+        assert_eq!(before.gps_latitude, "37°34'12\"N");
+        assert_eq!(before.gps_longitude, "127°01'30\"E");
         assert_eq!(before.gps_altitude, "42.00 m");
+        assert_eq!(before.gps_date_stamp, "2015-05-14");
+        assert_eq!(before.gps_time_stamp, "19:31:13");
 
         remove_gps_information(&path).unwrap();
 
@@ -2499,6 +2993,30 @@ mod tests {
         assert_eq!(after.gps_latitude, "");
         assert_eq!(after.gps_longitude, "");
         assert_eq!(after.gps_altitude, "");
+        assert_eq!(after.gps_date_stamp, "");
+        assert_eq!(after.gps_time_stamp, "");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn updates_existing_gps_tags_without_changing_coordinates() {
+        let path = std::env::temp_dir().join(format!(
+            "sh148_exif_file_tool_write_gps_datetime_test_{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, minimal_jpeg_with_gps()).unwrap();
+
+        write_gps_date_stamp(&path, "2015-07-11").unwrap();
+        write_gps_time_stamp(&path, "05:31:13").unwrap();
+
+        let metadata = read_exif_metadata(&path);
+        assert_eq!(metadata.gps_latitude, "37°34'12\"N");
+        assert_eq!(metadata.gps_longitude, "127°01'30\"E");
+        assert_eq!(metadata.gps_altitude, "42.00 m");
+        assert_eq!(metadata.gps_date_stamp, "2015-07-11");
+        assert_eq!(metadata.gps_time_stamp, "05:31:13");
+        assert_eq!(metadata.taken_date, "2015-07-11 18:25:43");
 
         let _ = std::fs::remove_file(path);
     }
@@ -2541,6 +3059,8 @@ mod tests {
             gps_latitude: String::new(),
             gps_longitude: String::new(),
             gps_altitude: String::new(),
+            gps_date_stamp: String::new(),
+            gps_time_stamp: String::new(),
         };
 
         let output_path = rewrite_basic_exif_metadata(&path, &metadata, true).unwrap();

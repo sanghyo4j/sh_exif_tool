@@ -19,7 +19,9 @@ export component SectionHeader inherits Rectangle {
         width: 100%;
         height: 100%;
         pointer-event(event) => {
-            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.metadata_section != "") {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.section_right_clicked("");
+            } else if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.metadata_section != "") {
                 MetadataContextMenuState.x = section_touch.absolute-position.x + section_touch.mouse-x;
                 MetadataContextMenuState.y = section_touch.absolute-position.y + section_touch.mouse-y;
                 root.section_right_clicked(root.metadata_section);
@@ -106,7 +108,9 @@ export component EditableInfoRow inherits Rectangle {
         width: 154px;
         height: 100%;
         pointer-event(event) => {
-            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.metadata_key != "") {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.metadata_right_clicked("", "");
+            } else if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.metadata_key != "") {
                 MetadataContextMenuState.x = tag_touch.absolute-position.x + tag_touch.mouse-x;
                 MetadataContextMenuState.y = tag_touch.absolute-position.y + tag_touch.mouse-y;
                 root.metadata_right_clicked(root.metadata_key, root.value);
@@ -258,7 +262,9 @@ export component ReadOnlyInfoRow inherits Rectangle {
         width: 100%;
         height: 100%;
         pointer-event(event) => {
-            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.metadata_key != "") {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.metadata_right_clicked("", "");
+            } else if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.metadata_key != "") {
                 MetadataContextMenuState.x = tag_touch.absolute-position.x + tag_touch.mouse-x;
                 MetadataContextMenuState.y = tag_touch.absolute-position.y + tag_touch.mouse-y;
                 root.metadata_right_clicked(root.metadata_key, root.value);

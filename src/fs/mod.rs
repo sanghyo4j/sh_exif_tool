@@ -12,6 +12,73 @@ pub struct FileSystemEntry {
     pub is_dir: bool,
 }
 
+#[derive(Default)]
+pub struct FilenameCollisionResolver {
+    reserved: HashSet<String>,
+}
+
+impl FilenameCollisionResolver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn resolve_for_create(&mut self, desired_path: &Path) -> Result<PathBuf, String> {
+        self.resolve(desired_path, None)
+    }
+
+    pub fn resolve_for_rename(
+        &mut self,
+        desired_path: &Path,
+        current_path: &Path,
+    ) -> Result<PathBuf, String> {
+        self.resolve(desired_path, Some(current_path))
+    }
+
+    fn resolve(
+        &mut self,
+        desired_path: &Path,
+        allowed_existing_path: Option<&Path>,
+    ) -> Result<PathBuf, String> {
+        let parent = desired_path
+            .parent()
+            .ok_or_else(|| "Could not resolve the target folder.".to_string())?;
+        let stem = desired_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Could not resolve the target filename.".to_string())?;
+        let extension = desired_path.extension().and_then(|value| value.to_str());
+
+        for index in 0..1000 {
+            let candidate_stem = if index == 0 {
+                stem.to_string()
+            } else {
+                format!("{stem}_dup{index:03}")
+            };
+            let candidate = parent.join(match extension {
+                Some(extension) if !extension.is_empty() => {
+                    format!("{candidate_stem}.{extension}")
+                }
+                _ => candidate_stem,
+            });
+            let candidate_key = comparable_path_key(&candidate);
+            let is_allowed_existing = allowed_existing_path
+                .is_some_and(|allowed| comparable_path_key(allowed) == candidate_key);
+            if (!candidate.exists() || is_allowed_existing)
+                && !self.reserved.contains(&candidate_key)
+            {
+                self.reserved.insert(candidate_key);
+                return Ok(candidate);
+            }
+        }
+
+        Err(format!(
+            "Could not find an available filename based on {}.",
+            desired_path.display()
+        ))
+    }
+}
+
 pub fn read_directory(path: &Path) -> Result<Vec<FileSystemEntry>, String> {
     let read_dir = std::fs::read_dir(path).map_err(|err| err.to_string())?;
     let mut entries: Vec<FileSystemEntry> = read_dir
@@ -76,6 +143,38 @@ pub fn trailing_number_rename_candidate_count(paths: &[PathBuf]) -> Result<usize
 
 pub fn move_trailing_numbers_to_front(paths: &[PathBuf]) -> Result<usize, String> {
     let plan = build_trailing_number_rename_plan(paths)?;
+    apply_atomic_rename_plan(plan)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrontRearNumberRemovalStats {
+    pub renameable: usize,
+    pub unmatched: usize,
+    pub deduplicated: usize,
+}
+
+pub fn analyze_front_or_rear_number_removal(
+    paths: &[PathBuf],
+) -> Result<FrontRearNumberRemovalStats, String> {
+    let removal_plan = build_front_or_rear_number_removal_plan(paths)?;
+    Ok(removal_plan.stats())
+}
+
+pub fn remove_front_or_rear_numbers(
+    paths: &[PathBuf],
+) -> Result<FrontRearNumberRemovalStats, String> {
+    let removal_plan = build_front_or_rear_number_removal_plan(paths)?;
+    let unmatched = removal_plan.unmatched;
+    let deduplicated = removal_plan.deduplicated;
+    let renamed = apply_atomic_rename_plan(removal_plan.renames)?;
+    Ok(FrontRearNumberRemovalStats {
+        renameable: renamed,
+        unmatched,
+        deduplicated,
+    })
+}
+
+fn apply_atomic_rename_plan(plan: Vec<(PathBuf, PathBuf)>) -> Result<usize, String> {
     if plan.is_empty() {
         return Ok(0);
     }
@@ -127,6 +226,60 @@ pub fn move_trailing_numbers_to_front(paths: &[PathBuf]) -> Result<usize, String
     Ok(staged.len())
 }
 
+fn build_front_or_rear_number_removal_plan(
+    paths: &[PathBuf],
+) -> Result<FrontRearNumberRemovalPlan, String> {
+    let mut candidates = Vec::new();
+    let mut unmatched = 0usize;
+    for source in paths {
+        if !source.is_file() {
+            continue;
+        }
+        let Some(target_name) = remove_front_or_rear_number_name(source) else {
+            unmatched += 1;
+            continue;
+        };
+        let directory = source
+            .parent()
+            .ok_or_else(|| format!("Could not resolve the folder for {}.", source.display()))?;
+        candidates.push((source.clone(), directory.join(target_name)));
+    }
+
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut renames = Vec::new();
+    let mut resolver = FilenameCollisionResolver::new();
+    let mut deduplicated = 0usize;
+    for (source, desired_target) in candidates {
+        let target = resolver.resolve_for_create(&desired_target)?;
+        if target != desired_target {
+            deduplicated += 1;
+        }
+        renames.push((source, target));
+    }
+
+    Ok(FrontRearNumberRemovalPlan {
+        renames,
+        unmatched,
+        deduplicated,
+    })
+}
+
+struct FrontRearNumberRemovalPlan {
+    renames: Vec<(PathBuf, PathBuf)>,
+    unmatched: usize,
+    deduplicated: usize,
+}
+
+impl FrontRearNumberRemovalPlan {
+    fn stats(&self) -> FrontRearNumberRemovalStats {
+        FrontRearNumberRemovalStats {
+            renameable: self.renames.len(),
+            unmatched: self.unmatched,
+            deduplicated: self.deduplicated,
+        }
+    }
+}
+
 fn build_trailing_number_rename_plan(paths: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, String> {
     let mut plan = Vec::new();
     for source in paths {
@@ -142,6 +295,12 @@ fn build_trailing_number_rename_plan(paths: &[PathBuf]) -> Result<Vec<(PathBuf, 
         plan.push((source.clone(), directory.join(target_name)));
     }
 
+    validate_rename_plan(plan)
+}
+
+fn validate_rename_plan(
+    mut plan: Vec<(PathBuf, PathBuf)>,
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
     plan.sort_by(|left, right| left.0.cmp(&right.0));
     let source_keys: HashSet<String> = plan
         .iter()
@@ -159,6 +318,36 @@ fn build_trailing_number_rename_plan(paths: &[PathBuf]) -> Result<Vec<(PathBuf, 
     }
 
     Ok(plan)
+}
+
+fn remove_front_or_rear_number_name(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let extension = path.extension().and_then(|value| value.to_str());
+    let mut base = stem;
+    let mut changed = false;
+
+    if let Some((number, remainder)) = base.split_once('_') {
+        if matches!(number.len(), 2 | 3) && number.chars().all(|ch| ch.is_ascii_digit()) {
+            base = remainder;
+            changed = true;
+        }
+    }
+
+    if let Some((remainder, number)) = base.rsplit_once('_') {
+        if matches!(number.len(), 2 | 3) && number.chars().all(|ch| ch.is_ascii_digit()) {
+            base = remainder;
+            changed = true;
+        }
+    }
+
+    if !changed || base.is_empty() {
+        return None;
+    }
+
+    Some(match extension {
+        Some(extension) => format!("{base}.{extension}"),
+        None => base.to_string(),
+    })
 }
 
 fn move_trailing_number_to_front_name(path: &Path) -> Option<String> {
@@ -214,30 +403,16 @@ pub fn save_file_copy(source_path: &Path) -> Result<PathBuf, String> {
         .map(|value| value.to_string_lossy().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "copy".to_string());
-    let extension = source_path
-        .extension()
-        .map(|value| value.to_string_lossy().to_string());
-
-    for index in 1..1000 {
-        let suffix = if index == 1 {
-            "_copy".to_string()
-        } else {
-            format!("_copy_{index}")
-        };
-        let file_name = match &extension {
-            Some(extension) => format!("{stem}{suffix}.{extension}"),
-            None => format!("{stem}{suffix}"),
-        };
-        let target_path = parent.join(file_name);
-
-        if !target_path.exists() {
-            std::fs::copy(source_path, &target_path).map_err(|err| err.to_string())?;
-            copy_file_times(source_path, &target_path)?;
-            return Ok(target_path);
-        }
-    }
-
-    Err("Could not find an available copy filename.".to_string())
+    let base_stem = duplicate_copy_base_stem(&stem);
+    let desired = path_with_stem_and_extension(
+        parent,
+        &format!("{base_stem}_copy"),
+        source_path.extension().and_then(|value| value.to_str()),
+    );
+    let target_path = FilenameCollisionResolver::new().resolve_for_create(&desired)?;
+    std::fs::copy(source_path, &target_path).map_err(|err| err.to_string())?;
+    copy_file_times(source_path, &target_path)?;
+    Ok(target_path)
 }
 
 pub fn duplicate_file(source_path: &Path) -> Result<PathBuf, String> {
@@ -268,42 +443,20 @@ pub fn copy_file_to_folder(source_path: &Path, target_dir: &Path) -> Result<Path
         .parent()
         .map(|parent| parent == target_dir)
         .unwrap_or(false);
-    let stem = if same_folder {
-        duplicate_base_stem(&stem)
+    let desired_stem = if same_folder {
+        format!("{}_copy", duplicate_copy_base_stem(&stem))
     } else {
         stem
     };
-    let extension = source_path
-        .extension()
-        .map(|value| value.to_string_lossy().to_string());
-
-    if !same_folder {
-        let target_path = target_dir.join(match &extension {
-            Some(extension) => format!("{stem}.{extension}"),
-            None => stem.clone(),
-        });
-        if !target_path.exists() {
-            std::fs::copy(source_path, &target_path).map_err(|err| err.to_string())?;
-            copy_file_times(source_path, &target_path)?;
-            return Ok(target_path);
-        }
-    }
-
-    for index in 1..1000 {
-        let file_name = match &extension {
-            Some(extension) => format!("{stem} ({index}).{extension}"),
-            None => format!("{stem} ({index})"),
-        };
-        let target_path = target_dir.join(file_name);
-
-        if !target_path.exists() {
-            std::fs::copy(source_path, &target_path).map_err(|err| err.to_string())?;
-            copy_file_times(source_path, &target_path)?;
-            return Ok(target_path);
-        }
-    }
-
-    Err("Could not find an available duplicate filename.".to_string())
+    let desired = path_with_stem_and_extension(
+        target_dir,
+        &desired_stem,
+        source_path.extension().and_then(|value| value.to_str()),
+    );
+    let target_path = FilenameCollisionResolver::new().resolve_for_create(&desired)?;
+    std::fs::copy(source_path, &target_path).map_err(|err| err.to_string())?;
+    copy_file_times(source_path, &target_path)?;
+    Ok(target_path)
 }
 
 pub fn copy_file_times(source_path: &Path, target_path: &Path) -> Result<(), String> {
@@ -314,20 +467,23 @@ pub fn copy_file_times(source_path: &Path, target_path: &Path) -> Result<(), Str
     set_file_times(target_path, created, modified)
 }
 
-fn duplicate_base_stem(stem: &str) -> String {
-    let trimmed = stem.trim_end();
-    let Some(number_end) = trimmed.strip_suffix(')') else {
-        return stem.to_string();
-    };
-    let Some(open_index) = number_end.rfind(" (") else {
-        return stem.to_string();
-    };
+fn duplicate_copy_base_stem(stem: &str) -> String {
+    let without_duplicate_suffix = stem
+        .rsplit_once("_dup")
+        .filter(|(_, number)| number.len() == 3 && number.chars().all(|ch| ch.is_ascii_digit()))
+        .map(|(base, _)| base)
+        .unwrap_or(stem);
+    without_duplicate_suffix
+        .strip_suffix("_copy")
+        .unwrap_or(without_duplicate_suffix)
+        .to_string()
+}
 
-    if number_end[open_index + 2..].parse::<u32>().is_ok() {
-        number_end[..open_index].to_string()
-    } else {
-        stem.to_string()
-    }
+fn path_with_stem_and_extension(parent: &Path, stem: &str, extension: Option<&str>) -> PathBuf {
+    parent.join(match extension {
+        Some(extension) if !extension.is_empty() => format!("{stem}.{extension}"),
+        _ => stem.to_string(),
+    })
 }
 
 pub fn move_file_to_recycle_bin(path: &Path) -> Result<(), String> {
@@ -817,6 +973,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn collision_resolver_uses_stable_dup_suffixes_and_reserves_batch_names() {
+        let directory = std::env::temp_dir().join(format!(
+            "sh148_collision_resolver_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let desired = directory.join("photo.jpg");
+        std::fs::write(&desired, b"existing").unwrap();
+
+        let mut resolver = FilenameCollisionResolver::new();
+        assert_eq!(
+            resolver.resolve_for_create(&desired).unwrap(),
+            directory.join("photo_dup001.jpg")
+        );
+        assert_eq!(
+            resolver.resolve_for_create(&desired).unwrap(),
+            directory.join("photo_dup002.jpg")
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn directory_sort_is_case_insensitive_with_folders_first() {
         let directory = std::env::temp_dir().join(format!(
             "sh148_exif_file_tool_case_sort_{}_{}",
@@ -863,6 +1046,62 @@ mod tests {
         assert_eq!(move_trailing_number_to_front_name(Path::new("photo_1.jpg")), None);
         assert_eq!(move_trailing_number_to_front_name(Path::new("photo_1000.jpg")), None);
         assert_eq!(move_trailing_number_to_front_name(Path::new("photo123.jpg")), None);
+    }
+
+    #[test]
+    fn removes_only_underscored_two_or_three_digit_front_or_rear_numbers() {
+        assert_eq!(
+            remove_front_or_rear_number_name(Path::new("photo_001.jpg")).as_deref(),
+            Some("photo.jpg")
+        );
+        assert_eq!(
+            remove_front_or_rear_number_name(Path::new("25_photo.png")).as_deref(),
+            Some("photo.png")
+        );
+        assert_eq!(
+            remove_front_or_rear_number_name(Path::new("001_photo_25.jpg")).as_deref(),
+            Some("photo.jpg")
+        );
+        assert_eq!(remove_front_or_rear_number_name(Path::new("20140809_131712.jpg")), None);
+        assert_eq!(remove_front_or_rear_number_name(Path::new("photo_1.jpg")), None);
+        assert_eq!(remove_front_or_rear_number_name(Path::new("photo_1000.jpg")), None);
+    }
+
+    #[test]
+    fn resolves_front_or_rear_number_removal_name_collisions() {
+        let directory = std::env::temp_dir().join(format!(
+            "sh148_exif_file_tool_number_removal_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("photo_25.jpg"), b"one").unwrap();
+        std::fs::write(directory.join("001_photo.jpg"), b"two").unwrap();
+        std::fs::write(directory.join("keep_25.jpg"), b"three").unwrap();
+        std::fs::write(directory.join("not-numbered.jpg"), b"four").unwrap();
+
+        let selected = vec![
+            directory.join("photo_25.jpg"),
+            directory.join("001_photo.jpg"),
+            directory.join("keep_25.jpg"),
+            directory.join("not-numbered.jpg"),
+        ];
+        let analysis = analyze_front_or_rear_number_removal(&selected).unwrap();
+        assert_eq!(analysis.renameable, 3);
+        assert_eq!(analysis.unmatched, 1);
+        assert_eq!(analysis.deduplicated, 1);
+
+        let result = remove_front_or_rear_numbers(&selected).unwrap();
+        assert_eq!(result, analysis);
+        assert!(directory.join("photo.jpg").is_file());
+        assert!(directory.join("photo_dup001.jpg").is_file());
+        assert!(directory.join("keep.jpg").is_file());
+        assert!(directory.join("not-numbered.jpg").is_file());
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

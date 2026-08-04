@@ -60,6 +60,9 @@ export component MainWindow inherits Window {
     in-out property <string> gps_latitude: "";
     in-out property <string> gps_longitude: "";
     in-out property <string> gps_altitude: "";
+    in-out property <string> gps_date_stamp: "";
+    in-out property <string> gps_time_stamp: "";
+    in-out property <string> gps_date_time: "";
     in-out property <string> date_time_original: "";
     in-out property <string> date_time_digitized: "";
     in-out property <string> image_date_time: "";
@@ -90,6 +93,9 @@ export component MainWindow inherits Window {
     in-out property <string> gps_latitude_status: "";
     in-out property <string> gps_longitude_status: "";
     in-out property <string> gps_altitude_status: "";
+    in-out property <string> gps_date_stamp_status: "";
+    in-out property <string> gps_time_stamp_status: "";
+    in-out property <string> gps_date_time_status: "";
     in-out property <string> original_selected_name: "N/A";
     in-out property <string> original_selected_created: "N/A";
     in-out property <string> original_selected_modified: "N/A";
@@ -112,6 +118,9 @@ export component MainWindow inherits Window {
     in-out property <string> original_gps_latitude: "";
     in-out property <string> original_gps_longitude: "";
     in-out property <string> original_gps_altitude: "";
+    in-out property <string> original_gps_date_stamp: "";
+    in-out property <string> original_gps_time_stamp: "";
+    in-out property <string> original_gps_date_time: "";
     in-out property <bool> exif_available: false;
     in-out property <bool> metadata_dirty: false;
     in-out property <bool> selected_name_dirty: false;
@@ -136,6 +145,9 @@ export component MainWindow inherits Window {
     in-out property <bool> gps_latitude_dirty: false;
     in-out property <bool> gps_longitude_dirty: false;
     in-out property <bool> gps_altitude_dirty: false;
+    in-out property <bool> gps_date_stamp_dirty: false;
+    in-out property <bool> gps_time_stamp_dirty: false;
+    in-out property <bool> gps_date_time_dirty: false;
     in-out property <bool> png_creation_time_dirty: false;
     in-out property <bool> png_exif_date_time_original_dirty: false;
     in-out property <bool> message_visible: false;
@@ -144,9 +156,11 @@ export component MainWindow inherits Window {
     in-out property <bool> confirm_delete_visible: false;
     in-out property <bool> confirm_metadata_paste_visible: false;
     in-out property <bool> confirm_trailing_rename_visible: false;
+    in-out property <bool> confirm_number_removal_mode: false;
     in-out property <bool> confirm_date_overwrite_visible: false;
     in-out property <bool> confirm_yes_selected: false;
     in-out property <bool> shift_media_date_visible: false;
+    in-out property <bool> shift_gps_date_time_mode: false;
     in-out property <bool> shift_media_date_subtract: false;
     in-out property <string> shift_media_date_days: "0";
     in-out property <string> shift_media_date_hours: "0";
@@ -163,6 +177,8 @@ export component MainWindow inherits Window {
     in-out property <bool> backup_before_changes: false;
     in-out property <bool> show_extension_in_file_name: false;
     in-out property <bool> mark_file_date_mismatches: false;
+    in-out property <bool> duplicate_results_tab_visible: false;
+    in-out property <int> active_right_tab: 0;
 
     callback open_dir(int);
     callback reload();
@@ -183,6 +199,7 @@ export component MainWindow inherits Window {
     callback create_exif_structure();
     callback fill_taken_date_from_filename();
     callback fill_taken_date_from_created_date();
+    callback fill_taken_date_from_gps();
     callback set_modified_date_from_created_date();
     callback set_file_dates_from_media_date();
     callback set_filename_from_media_date();
@@ -206,7 +223,11 @@ export component MainWindow inherits Window {
     callback confirm_date_overwrite(bool);
     callback request_move_trailing_numbers();
     callback confirm_move_trailing_numbers();
+    callback request_remove_front_or_rear_numbers();
+    callback confirm_remove_front_or_rear_numbers();
+    callback extract_embedded_thumbnails();
     callback request_shift_media_date();
+    callback request_shift_gps_date_time();
     callback update_shift_media_date_preview(string, string, string, string, bool) -> string;
     callback apply_shift_media_date(string, string, string, string, bool) -> bool;
 
@@ -281,7 +302,26 @@ export component MainWindow inherits Window {
             MenuItem { title: "Analyze &Folder"; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
             MenuItem { title: "Analyze &Missing Metadata"; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
             MenuSeparator {}
-            MenuItem { title: "&Clear Results"; activated => { root.file_context_menu_visible = false; root.editing_path = false; } }
+            MenuItem {
+                title: "Find &Duplicate Files in This Folder...";
+                activated => {
+                    root.file_context_menu_visible = false;
+                    root.editing_path = false;
+                    root.duplicate_results_tab_visible = true;
+                    root.active_right_tab = 1;
+                }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: "&Clear Results";
+                enabled: root.duplicate_results_tab_visible;
+                activated => {
+                    root.file_context_menu_visible = false;
+                    root.editing_path = false;
+                    root.duplicate_results_tab_visible = false;
+                    root.active_right_tab = 0;
+                }
+            }
         }
 
         Menu {
@@ -453,6 +493,25 @@ export component MainWindow inherits Window {
                     root.request_move_trailing_numbers();
                 }
             }
+
+            MenuItem {
+                title: "Remove Front/Rear Number...";
+                activated => {
+                    root.file_context_menu_visible = false;
+                    root.editing_path = false;
+                    root.request_remove_front_or_rear_numbers();
+                }
+            }
+
+
+            MenuItem {
+                title: "Extract Embedded Thumbnail";
+                activated => {
+                    root.file_context_menu_visible = false;
+                    root.editing_path = false;
+                    root.extract_embedded_thumbnails();
+                }
+            }
         }
 
         Menu {
@@ -585,6 +644,8 @@ export component MainWindow inherits Window {
                     root.gps_latitude_dirty = false;
                     root.gps_longitude_dirty = false;
                     root.gps_altitude_dirty = false;
+                    root.gps_date_stamp_dirty = false;
+                    root.gps_time_stamp_dirty = false;
                     root.png_creation_time_dirty = false;
                     root.png_exif_date_time_original_dirty = false;
                     if (index >= 0 && index < root.files.length) {
@@ -655,6 +716,7 @@ export component MainWindow inherits Window {
                     root.exit_app();
                 }
             }
+
         }
 
         StrongVDivider {
@@ -663,11 +725,122 @@ export component MainWindow inherits Window {
             height: 100%;
         }
 
+        if root.duplicate_results_tab_visible: Rectangle {
+            x: 752px;
+            y: 0px;
+            width: max(320px, root.width - 752px);
+            height: 31px;
+            background: NativeColors.subtle_surface;
+
+            details_tab := Rectangle {
+                x: 0px;
+                width: 92px;
+                height: 30px;
+                background: root.active_right_tab == 0
+                    ? NativeColors.surface
+                    : (details_tab_touch.has-hover ? NativeColors.hover : NativeColors.subtle_surface);
+
+                Rectangle {
+                    width: 100%;
+                    height: 2px;
+                    background: root.active_right_tab == 0 ? NativeColors.accent : transparent;
+                }
+
+                Text {
+                    x: 12px;
+                    width: parent.width - 24px;
+                    height: 100%;
+                    text: "Details";
+                    color: NativeColors.text;
+                    font-family: FontSettings.details_font_family;
+                    font-size: FontSettings.font_size_pt * 1pt;
+                    vertical-alignment: center;
+                }
+
+                details_tab_touch := TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => {
+                        root.file_context_menu_visible = false;
+                        root.active_right_tab = 0;
+                    }
+                }
+            }
+
+            duplicate_tab := Rectangle {
+                x: 92px;
+                width: 168px;
+                height: 30px;
+                background: root.active_right_tab == 1
+                    ? NativeColors.surface
+                    : (duplicate_tab_touch.has-hover ? NativeColors.hover : NativeColors.subtle_surface);
+
+                Rectangle {
+                    width: 100%;
+                    height: 2px;
+                    background: root.active_right_tab == 1 ? NativeColors.accent : transparent;
+                }
+
+                Text {
+                    x: 12px;
+                    width: parent.width - 42px;
+                    height: 100%;
+                    text: "Duplicate Results";
+                    color: NativeColors.text;
+                    font-family: FontSettings.details_font_family;
+                    font-size: FontSettings.font_size_pt * 1pt;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                close_duplicate_tab := Rectangle {
+                    x: parent.width - 30px;
+                    y: 4px;
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 2px;
+                    background: close_duplicate_touch.has-hover ? NativeColors.hover : transparent;
+
+                    Text {
+                        width: 100%;
+                        height: 100%;
+                        text: "×";
+                        color: NativeColors.secondary_text;
+                        font-size: (FontSettings.font_size_pt + 2) * 1pt;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    close_duplicate_touch := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => {
+                            root.duplicate_results_tab_visible = false;
+                            root.active_right_tab = 0;
+                        }
+                    }
+                }
+
+                duplicate_tab_touch := TouchArea {
+                    width: parent.width - 34px;
+                    height: 100%;
+                    clicked => {
+                        root.file_context_menu_visible = false;
+                        root.active_right_tab = 1;
+                    }
+                }
+            }
+
+            HDivider { y: parent.height - 1px; }
+        }
+
         metadata_panel := MetadataPanel {
                 x: 752px;
-                y: 0px;
+                y: root.duplicate_results_tab_visible ? 31px : 0px;
                 width: max(320px, root.width - 752px);
-                height: 100%;
+                height: root.duplicate_results_tab_visible ? parent.height - 31px : parent.height;
+                visible: !root.duplicate_results_tab_visible || root.active_right_tab == 0;
+                header_title: root.duplicate_results_tab_visible ? "Selected File" : "Details";
                 selected_file_count: root.selected_file_count;
                 selected_name <=> root.selected_name;
                 selected_created <=> root.selected_created;
@@ -701,6 +874,9 @@ export component MainWindow inherits Window {
                 gps_latitude <=> root.gps_latitude;
                 gps_longitude <=> root.gps_longitude;
                 gps_altitude <=> root.gps_altitude;
+                gps_date_stamp <=> root.gps_date_stamp;
+                gps_time_stamp <=> root.gps_time_stamp;
+                gps_date_time <=> root.gps_date_time;
                 date_time_original <=> root.date_time_original;
                 date_time_digitized <=> root.date_time_digitized;
                 image_date_time <=> root.image_date_time;
@@ -729,6 +905,9 @@ export component MainWindow inherits Window {
                 gps_latitude_status <=> root.gps_latitude_status;
                 gps_longitude_status <=> root.gps_longitude_status;
                 gps_altitude_status <=> root.gps_altitude_status;
+                gps_date_stamp_status <=> root.gps_date_stamp_status;
+                gps_time_stamp_status <=> root.gps_time_stamp_status;
+                gps_date_time_status <=> root.gps_date_time_status;
                 exif_available <=> root.exif_available;
                 has_pending_changes <=> root.metadata_dirty;
                 selected_name_dirty <=> root.selected_name_dirty;
@@ -753,6 +932,9 @@ export component MainWindow inherits Window {
                 gps_latitude_dirty <=> root.gps_latitude_dirty;
                 gps_longitude_dirty <=> root.gps_longitude_dirty;
                 gps_altitude_dirty <=> root.gps_altitude_dirty;
+                gps_date_stamp_dirty <=> root.gps_date_stamp_dirty;
+                gps_time_stamp_dirty <=> root.gps_time_stamp_dirty;
+                gps_date_time_dirty <=> root.gps_date_time_dirty;
                 png_creation_time_dirty <=> root.png_creation_time_dirty;
                 png_exif_date_time_original_dirty <=> root.png_exif_date_time_original_dirty;
                 apply_changes() => {
@@ -785,6 +967,9 @@ export component MainWindow inherits Window {
                     root.gps_latitude_dirty = false;
                     root.gps_longitude_dirty = false;
                     root.gps_altitude_dirty = false;
+                    root.gps_date_stamp_dirty = false;
+                    root.gps_time_stamp_dirty = false;
+                    root.gps_date_time_dirty = false;
                     root.png_creation_time_dirty = false;
                     root.png_exif_date_time_original_dirty = false;
                 }
@@ -802,6 +987,16 @@ export component MainWindow inherits Window {
                     root.editing_path = false;
                     metadata_panel.clear_editor_focus();
                     root.request_shift_media_date();
+                }
+                shift_gps_date_time() => {
+                    root.editing_path = false;
+                    metadata_panel.clear_editor_focus();
+                    root.request_shift_gps_date_time();
+                }
+                fill_taken_date_from_gps() => {
+                    root.editing_path = false;
+                    metadata_panel.clear_editor_focus();
+                    root.fill_taken_date_from_gps();
                 }
                 set_modified_date_from_created_date() => {
                     root.editing_path = false;
@@ -836,6 +1031,9 @@ export component MainWindow inherits Window {
                     root.gps_latitude = "";
                     root.gps_longitude = "";
                     root.gps_altitude = "";
+                    root.gps_date_stamp = "";
+                    root.gps_time_stamp = "";
+                    root.gps_date_time = "";
                     root.metadata_value_edited();
                 }
                 create_exif_structure() => {
@@ -873,6 +1071,63 @@ export component MainWindow inherits Window {
                     root.exif_section_right_clicked(section);
                 }
         }
+
+        if root.duplicate_results_tab_visible && root.active_right_tab == 1: Rectangle {
+            x: 752px;
+            y: 31px;
+            width: max(320px, root.width - 752px);
+            height: parent.height - 31px;
+            background: NativeColors.surface;
+
+            Text {
+                x: 18px;
+                y: 18px;
+                width: parent.width - 36px;
+                height: 28px;
+                text: "Duplicate Files";
+                color: NativeColors.text;
+                font-family: FontSettings.details_font_family;
+                font-size: (FontSettings.font_size_pt + 2) * 1pt;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            Text {
+                x: 18px;
+                y: 52px;
+                width: parent.width - 36px;
+                height: 60px;
+                text: "Duplicate groups and actions will appear here. The file list remains visible on the left.";
+                color: NativeColors.secondary_text;
+                font-family: FontSettings.details_font_family;
+                font-size: FontSettings.font_size_pt * 1pt;
+                wrap: word-wrap;
+                vertical-alignment: top;
+            }
+
+            Rectangle {
+                x: 18px;
+                y: 122px;
+                width: parent.width - 36px;
+                height: 88px;
+                background: NativeColors.subtle_surface;
+                border-width: 1px;
+                border-color: NativeColors.border;
+                border-radius: 3px;
+
+                Text {
+                    x: 12px;
+                    width: parent.width - 24px;
+                    height: 100%;
+                    text: "Prototype only — duplicate scanning and grouped results are not connected yet.";
+                    color: NativeColors.secondary_text;
+                    font-family: FontSettings.details_font_family;
+                    font-size: FontSettings.font_size_pt * 1pt;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                }
+            }
+        }
         }
     }
 
@@ -886,7 +1141,24 @@ export component MainWindow inherits Window {
         y: 41px;
         width: 752px;
         height: root.height - 41px;
-        clicked => { root.exif_context_menu_visible = false; }
+        clicked => {
+            root.exif_context_menu_visible = false;
+            content_focus.focus();
+        }
+    }
+
+    if root.exif_context_menu_visible: TouchArea {
+        x: 906px;
+        y: 71px;
+        width: root.width - 906px;
+        height: root.height - 97px;
+
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.exif_context_menu_visible = false;
+                content_focus.focus();
+            }
+        }
     }
 
     if root.exif_context_menu_visible: TouchArea {
@@ -894,7 +1166,10 @@ export component MainWindow inherits Window {
         y: root.height - 26px;
         width: root.width - 752px;
         height: 26px;
-        clicked => { root.exif_context_menu_visible = false; }
+        clicked => {
+            root.exif_context_menu_visible = false;
+            content_focus.focus();
+        }
     }
 
     if root.exif_context_menu_visible: Rectangle {
@@ -1035,7 +1310,7 @@ export component MainWindow inherits Window {
 
             Text {
                 x: 22px; y: 16px; width: parent.width - 44px; height: 30px;
-                text: "Shift Media Date";
+                text: root.shift_gps_date_time_mode ? "Shift GPS Date/Time (UTC)" : "Shift Media Date";
                 color: NativeColors.text; font-size: 15px; font-weight: 700;
                 vertical-alignment: center;
             }
@@ -1107,6 +1382,15 @@ export component MainWindow inherits Window {
             modal_focus.focus();
         }
 
+        modal_focus_timer := Timer {
+            interval: 1ms;
+            running: true;
+            triggered => {
+                self.running = false;
+                modal_focus.focus();
+            }
+        }
+
         modal_focus := FocusScope {
             x: 0px;
             y: 0px;
@@ -1118,6 +1402,7 @@ export component MainWindow inherits Window {
                     root.message_visible = false;
                     root.message_title = "Operation Failed";
                     root.message_text = "";
+                    content_focus.focus();
                     return accept;
                 }
 
@@ -1125,6 +1410,7 @@ export component MainWindow inherits Window {
                     root.message_visible = false;
                     root.message_title = "Operation Failed";
                     root.message_text = "";
+                    content_focus.focus();
                     return accept;
                 }
 
@@ -1142,6 +1428,7 @@ export component MainWindow inherits Window {
                     root.confirm_delete_visible = false;
                     root.message_title = "Operation Failed";
                     root.message_text = "";
+                    content_focus.focus();
                     return accept;
                 }
 
@@ -1150,43 +1437,56 @@ export component MainWindow inherits Window {
                     root.message_title = "Operation Failed";
                     root.message_text = "";
                     root.confirm_delete_file();
+                    content_focus.focus();
                     return accept;
                 }
 
                 if (root.confirm_metadata_paste_visible && (event.text == "Y" || event.text == "y" || (event.text == Key.Return && root.confirm_yes_selected))) {
                     root.confirm_metadata_paste_visible = false;
                     root.confirm_metadata_paste(true);
+                    content_focus.focus();
                     return accept;
                 }
 
                 if (root.confirm_metadata_paste_visible && (event.text == "N" || event.text == "n" || event.text == Key.Escape || (event.text == Key.Return && !root.confirm_yes_selected))) {
                     root.confirm_metadata_paste_visible = false;
                     root.confirm_metadata_paste(false);
+                    content_focus.focus();
                     return accept;
                 }
 
                 if (root.confirm_date_overwrite_visible && (event.text == "Y" || event.text == "y" || (event.text == Key.Return && root.confirm_yes_selected))) {
                     root.confirm_date_overwrite_visible = false;
                     root.confirm_date_overwrite(true);
+                    content_focus.focus();
                     return accept;
                 }
 
                 if (root.confirm_date_overwrite_visible && (event.text == "N" || event.text == "n" || event.text == Key.Escape || (event.text == Key.Return && !root.confirm_yes_selected))) {
                     root.confirm_date_overwrite_visible = false;
                     root.confirm_date_overwrite(false);
+                    content_focus.focus();
                     return accept;
                 }
 
                 if (root.confirm_trailing_rename_visible && (event.text == "Y" || event.text == "y" || (event.text == Key.Return && root.confirm_yes_selected))) {
                     root.confirm_trailing_rename_visible = false;
-                    root.confirm_move_trailing_numbers();
+                    if (root.confirm_number_removal_mode) {
+                        root.confirm_number_removal_mode = false;
+                        root.confirm_remove_front_or_rear_numbers();
+                    } else {
+                        root.confirm_move_trailing_numbers();
+                    }
+                    content_focus.focus();
                     return accept;
                 }
 
                 if (root.confirm_trailing_rename_visible && (event.text == "N" || event.text == "n" || event.text == Key.Escape || (event.text == Key.Return && !root.confirm_yes_selected))) {
                     root.confirm_trailing_rename_visible = false;
+                    root.confirm_number_removal_mode = false;
                     root.message_title = "Operation Failed";
                     root.message_text = "";
+                    content_focus.focus();
                     return accept;
                 }
 
@@ -1202,8 +1502,8 @@ export component MainWindow inherits Window {
         Rectangle {
             x: (root.width - self.width) / 2;
             y: (root.height - self.height) / 2;
-            width: min(420px, root.width - 48px);
-            height: 150px;
+            width: min(540px, root.width - 48px);
+            height: 190px;
             background: NativeColors.surface;
             border-width: 1px;
             border-color: NativeColors.border;
@@ -1225,7 +1525,7 @@ export component MainWindow inherits Window {
                 x: 20px;
                 y: 56px;
                 width: parent.width - 40px;
-                height: 40px;
+                height: 82px;
                 text: root.message_text;
                 color: NativeColors.text;
                 font-size: FontSettings.font_size_pt * 1pt;
@@ -1261,6 +1561,7 @@ export component MainWindow inherits Window {
                             root.message_visible = false;
                             root.message_title = "Operation Failed";
                             root.message_text = "";
+                            content_focus.focus();
                         }
                     }
                 }
@@ -1295,17 +1596,22 @@ export component MainWindow inherits Window {
                             if (root.confirm_metadata_paste_visible) {
                                 root.confirm_metadata_paste_visible = false;
                                 root.confirm_metadata_paste(false);
+                                content_focus.focus();
                             } else if (root.confirm_date_overwrite_visible) {
                                 root.confirm_date_overwrite_visible = false;
                                 root.confirm_date_overwrite(false);
+                                content_focus.focus();
                             } else if (root.confirm_trailing_rename_visible) {
                                 root.confirm_trailing_rename_visible = false;
+                                root.confirm_number_removal_mode = false;
                                 root.message_title = "Operation Failed";
                                 root.message_text = "";
+                                content_focus.focus();
                             } else {
                                 root.confirm_delete_visible = false;
                                 root.message_title = "Operation Failed";
                                 root.message_text = "";
+                                content_focus.focus();
                             }
                         }
                     }
@@ -1341,19 +1647,28 @@ export component MainWindow inherits Window {
                             if (root.confirm_metadata_paste_visible) {
                                 root.confirm_metadata_paste_visible = false;
                                 root.confirm_metadata_paste(true);
+                                content_focus.focus();
                             } else if (root.confirm_date_overwrite_visible) {
                                 root.confirm_date_overwrite_visible = false;
                                 root.confirm_date_overwrite(true);
+                                content_focus.focus();
                             } else if (root.confirm_trailing_rename_visible) {
                                 root.confirm_trailing_rename_visible = false;
                                 root.message_title = "Operation Failed";
                                 root.message_text = "";
-                                root.confirm_move_trailing_numbers();
+                                if (root.confirm_number_removal_mode) {
+                                    root.confirm_number_removal_mode = false;
+                                    root.confirm_remove_front_or_rear_numbers();
+                                } else {
+                                    root.confirm_move_trailing_numbers();
+                                }
+                                content_focus.focus();
                             } else {
                                 root.confirm_delete_visible = false;
                                 root.message_title = "Operation Failed";
                                 root.message_text = "";
                                 root.confirm_delete_file();
+                                content_focus.focus();
                             }
                         }
                     }
