@@ -161,6 +161,18 @@ pub fn extract_embedded_thumbnail(path: &Path) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+pub fn read_embedded_thumbnail(path: &Path) -> Result<Vec<u8>, String> {
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let (_, exif_end) = find_exif_app1_range(&bytes)
+        .ok_or_else(|| "JPEG EXIF data was not found.".to_string())?;
+    let tiff_start = find_exif_tiff_start(&bytes)
+        .ok_or_else(|| "JPEG EXIF data was not found.".to_string())?;
+    let tiff = bytes
+        .get(tiff_start..exif_end)
+        .ok_or_else(|| "The EXIF TIFF data is truncated.".to_string())?;
+    Ok(embedded_jpeg_thumbnail(tiff)?.to_vec())
+}
+
 fn thumbnail_extracted_software_value(existing: &str) -> String {
     let existing = existing.trim();
     if existing.is_empty() {

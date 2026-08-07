@@ -3,11 +3,12 @@ pub mod app;
 use chrono::{Duration as ChronoDuration, FixedOffset, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use slint::{language::ColorScheme, ComponentHandle};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Read;
 use std::rc::Rc;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use self::app::{CachedMediaScan, SlintApp};
 use crate::exif::{
@@ -16,6 +17,7 @@ use crate::exif::{
     exif_backup_path,
     is_generated_new_exif_path,
     read_exif_metadata,
+    read_embedded_thumbnail,
     remove_exif_metadata,
     remove_exif_tag,
     remove_gps_information,
@@ -42,12 +44,14 @@ use crate::exif::{
     ExifMetadata,
 };
 use crate::fs::{
+    analyze_img_vid_prefix_removal,
     analyze_front_or_rear_number_removal,
     copy_file_times,
     copy_file_to_folder,
     move_file_to_recycle_bin,
     move_trailing_numbers_to_front,
     remove_front_or_rear_numbers,
+    remove_img_vid_prefixes,
     reveal_in_file_manager,
     rename_entry,
     save_file_copy,
@@ -110,6 +114,7 @@ fn start_media_scan_worker(
     current_epoch: Arc<std::sync::atomic::AtomicU64>,
     results: Arc<std::sync::Mutex<HashMap<PathBuf, CachedMediaScan>>>,
     results_dirty: Arc<AtomicBool>,
+    scan_active: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
         while let Ok(mut batch) = batches.recv() {
@@ -140,8 +145,314 @@ fn start_media_scan_worker(
                     .insert(job.path, cached);
                 results_dirty.store(true, Ordering::Release);
             }
+            if current_epoch.load(Ordering::Acquire) == batch.epoch {
+                scan_active.store(false, Ordering::Release);
+                results_dirty.store(true, Ordering::Release);
+            }
         }
     });
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct PreviewCacheKey {
+    path: PathBuf,
+    size: u64,
+    modified_nanos: u128,
+}
+
+#[derive(Clone)]
+struct PreviewResult {
+    width: u32,
+    height: u32,
+    pixels: Arc<Vec<u8>>,
+    status: String,
+}
+
+#[derive(Default)]
+struct PreviewCache {
+    entries: HashMap<PreviewCacheKey, PreviewResult>,
+    order: VecDeque<PreviewCacheKey>,
+    bytes: usize,
+}
+
+impl PreviewCache {
+    fn get(&mut self, key: &PreviewCacheKey) -> Option<PreviewResult> {
+        let value = self.entries.get(key).cloned()?;
+        self.order.retain(|existing| existing != key);
+        self.order.push_back(key.clone());
+        Some(value)
+    }
+
+    fn insert(&mut self, key: PreviewCacheKey, value: PreviewResult) {
+        const MAX_PREVIEW_CACHE_BYTES: usize = 48 * 1024 * 1024;
+        const MAX_PREVIEW_CACHE_ITEMS: usize = 8;
+        if let Some(previous) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(previous.pixels.len());
+            self.order.retain(|existing| existing != &key);
+        }
+        self.bytes = self.bytes.saturating_add(value.pixels.len());
+        self.entries.insert(key.clone(), value);
+        self.order.push_back(key);
+        while self.bytes > MAX_PREVIEW_CACHE_BYTES || self.order.len() > MAX_PREVIEW_CACHE_ITEMS {
+            let Some(oldest) = self.order.pop_front() else { break; };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(removed.pixels.len());
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreviewMediaKind {
+    Jpeg,
+    Png,
+}
+
+#[derive(Clone)]
+struct PreviewController {
+    generation: Arc<AtomicU64>,
+    current: Rc<RefCell<Option<PreviewCacheKey>>>,
+    cache: Arc<Mutex<PreviewCache>>,
+}
+
+impl PreviewController {
+    fn new() -> Self {
+        Self {
+            generation: Arc::new(AtomicU64::new(0)),
+            current: Rc::new(RefCell::new(None)),
+            cache: Arc::new(Mutex::new(PreviewCache::default())),
+        }
+    }
+
+    fn update(&self, ui: &MainWindow, app: &SlintApp) {
+        let started_at = Instant::now();
+        let selected = selected_file_paths(app);
+        let Some(path) = selected.into_iter().next().filter(|_| app.selected_indices().len() == 1) else {
+            self.clear(ui);
+            return;
+        };
+        let Some(kind) = preview_media_kind(&path) else {
+            self.clear(ui);
+            return;
+        };
+        let initial_dimensions = preview_dimensions(&path);
+        let Ok(metadata) = path.metadata() else {
+            self.clear(ui);
+            return;
+        };
+        let modified_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|value| value.as_nanos())
+            .unwrap_or(0);
+        let key = PreviewCacheKey {
+            path: path.clone(),
+            size: metadata.len(),
+            modified_nanos,
+        };
+        if self.current.borrow().as_ref() == Some(&key) {
+            return;
+        }
+
+        *self.current.borrow_mut() = Some(key.clone());
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        ui.set_preview_available(true);
+        ui.set_preview_ready(false);
+        ui.set_preview_image(slint::Image::default());
+        ui.set_preview_status("".into());
+        if let Some((width, height)) = initial_dimensions {
+            ui.set_preview_pixel_width(width as i32);
+            ui.set_preview_pixel_height(height as i32);
+        } else {
+            ui.set_preview_pixel_width(0);
+            ui.set_preview_pixel_height(0);
+        }
+
+        if let Some(cached) = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+        {
+            apply_preview_result(ui, &cached);
+            ui.set_activity_text(
+                format!("Image loaded in {} ms.", started_at.elapsed().as_millis()).into(),
+            );
+            return;
+        }
+
+        ui.set_activity_text("Loading image...".into());
+
+        let ui_handle = ui.as_weak();
+        let generation_handle = self.generation.clone();
+        let cache = self.cache.clone();
+        std::thread::spawn(move || {
+            let result = decode_preview(&path, kind);
+            if generation_handle.load(Ordering::Acquire) != generation {
+                return;
+            }
+            if let Some(value) = result.as_ref() {
+                cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(key, value.clone());
+            }
+            let _ = slint::invoke_from_event_loop(move || {
+                if generation_handle.load(Ordering::Acquire) != generation {
+                    return;
+                }
+                let Some(ui) = ui_handle.upgrade() else { return; };
+                match result {
+                    Some(value) => {
+                        apply_preview_result(&ui, &value);
+                        ui.set_activity_text(
+                            format!(
+                                "Image loaded in {} ms.",
+                                started_at.elapsed().as_millis()
+                            )
+                            .into(),
+                        );
+                    }
+                    None => {
+                        ui.set_preview_ready(false);
+                        ui.set_preview_status("Image could not be decoded".into());
+                        ui.set_activity_text(
+                            format!(
+                                "Image loading failed after {} ms.",
+                                started_at.elapsed().as_millis()
+                            )
+                            .into(),
+                        );
+                    }
+                }
+            });
+        });
+    }
+
+    fn clear(&self, ui: &MainWindow) {
+        if self.current.borrow_mut().take().is_some() || ui.get_preview_available() {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
+        ui.set_preview_available(false);
+        ui.set_preview_ready(false);
+        ui.set_preview_image(slint::Image::default());
+        ui.set_preview_status("".into());
+        ui.set_preview_pixel_width(0);
+        ui.set_preview_pixel_height(0);
+    }
+}
+
+fn preview_media_kind(path: &std::path::Path) -> Option<PreviewMediaKind> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut signature = [0u8; 8];
+    let count = file.read(&mut signature).ok()?;
+    if count >= 2 && signature[..2] == [0xff, 0xd8] {
+        Some(PreviewMediaKind::Jpeg)
+    } else if count == 8 && signature == [137, 80, 78, 71, 13, 10, 26, 10] {
+        Some(PreviewMediaKind::Png)
+    } else {
+        None
+    }
+}
+
+fn preview_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
+    use image::ImageDecoder;
+
+    let reader = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    let (width, height) = decoder.dimensions();
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    match orientation {
+        image::metadata::Orientation::Rotate90
+        | image::metadata::Orientation::Rotate270
+        | image::metadata::Orientation::Rotate90FlipH
+        | image::metadata::Orientation::Rotate270FlipH => Some((height, width)),
+        _ => Some((width, height)),
+    }
+}
+
+fn decode_preview(path: &std::path::Path, kind: PreviewMediaKind) -> Option<PreviewResult> {
+    match decode_preview_image(path) {
+        Ok(image) => Some(preview_result_from_image(image, String::new())),
+        Err(_) if kind == PreviewMediaKind::Jpeg => {
+            let thumbnail = read_embedded_thumbnail(path).ok()?;
+            let mut image = image::load_from_memory(&thumbnail).ok()?;
+            if let Some(orientation) = jpeg_orientation(path) {
+                image.apply_orientation(orientation);
+            }
+            Some(preview_result_from_image(
+                image,
+                "EXIF Thumbnail — full image could not be decoded".to_string(),
+            ))
+        }
+        Err(_) => None,
+    }
+}
+
+fn decode_preview_image(path: &std::path::Path) -> Result<image::DynamicImage, String> {
+    use image::ImageDecoder;
+
+    let mut reader = image::ImageReader::open(path)
+        .map_err(|err| err.to_string())?
+        .with_guessed_format()
+        .map_err(|err| err.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(30_000);
+    limits.max_image_height = Some(30_000);
+    limits.max_alloc = Some(192 * 1024 * 1024);
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder().map_err(|err| err.to_string())?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut image = image::DynamicImage::from_decoder(decoder).map_err(|err| err.to_string())?;
+    image.apply_orientation(orientation);
+    Ok(image)
+}
+
+fn jpeg_orientation(path: &std::path::Path) -> Option<image::metadata::Orientation> {
+    let value = read_exif_metadata(path).orientation;
+    match value.as_str() {
+        "Normal" | "1" => Some(image::metadata::Orientation::NoTransforms),
+        "Mirrored horizontal" | "2" => Some(image::metadata::Orientation::FlipHorizontal),
+        "Rotated 180" | "3" => Some(image::metadata::Orientation::Rotate180),
+        "Mirrored vertical" | "4" => Some(image::metadata::Orientation::FlipVertical),
+        "Mirrored horizontal rotated 270" | "5" => Some(image::metadata::Orientation::Rotate90FlipH),
+        "Rotated 90" | "6" => Some(image::metadata::Orientation::Rotate90),
+        "Mirrored horizontal rotated 90" | "7" => Some(image::metadata::Orientation::Rotate270FlipH),
+        "Rotated 270" | "8" => Some(image::metadata::Orientation::Rotate270),
+        _ => None,
+    }
+}
+
+fn preview_result_from_image(image: image::DynamicImage, status: String) -> PreviewResult {
+    let resized = image.thumbnail(1200, 900).to_rgba8();
+    PreviewResult {
+        width: resized.width(),
+        height: resized.height(),
+        pixels: Arc::new(resized.into_raw()),
+        status,
+    }
+}
+
+fn apply_preview_result(ui: &MainWindow, result: &PreviewResult) {
+    let mut buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(
+        result.width,
+        result.height,
+    );
+    buffer.make_mut_bytes().copy_from_slice(result.pixels.as_slice());
+    ui.set_preview_image(slint::Image::from_rgba8(buffer));
+    ui.set_preview_pixel_width(result.width as i32);
+    ui.set_preview_pixel_height(result.height as i32);
+    ui.set_preview_ready(true);
+    ui.set_preview_status(result.status.as_str().into());
+}
+
+fn selection_index_after_deletion(selection_index: i32, remaining_count: usize) -> Option<i32> {
+    (remaining_count > 0).then(|| selection_index.max(1).min(remaining_count as i32))
 }
 
 impl GuiRunner for SlintRunner {
@@ -149,6 +460,7 @@ impl GuiRunner for SlintRunner {
         let ui = MainWindow::new()?;
         ui.global::<Palette>().set_color_scheme(ColorScheme::Light);
         let app = Rc::new(RefCell::new(SlintApp::new()));
+        let preview_controller = PreviewController::new();
         let copied_files = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
         let pending_filename_renames =
             Rc::new(RefCell::new(HashMap::<PathBuf, String>::new()));
@@ -168,6 +480,7 @@ impl GuiRunner for SlintRunner {
         let previous_png_exif_original_input = Rc::new(RefCell::new(String::new()));
         let date_overwrite_confirmed = Rc::new(Cell::new(false));
         let scan_results_dirty = Arc::new(AtomicBool::new(false));
+        let scan_active = Arc::new(AtomicBool::new(false));
         let (scan_batch_sender, scan_batch_receiver) = std::sync::mpsc::channel();
 
         {
@@ -177,21 +490,62 @@ impl GuiRunner for SlintRunner {
                 app.scan_epoch.clone(),
                 app.scan_results.clone(),
                 scan_results_dirty.clone(),
+                scan_active.clone(),
             );
         }
 
         // 1. 초기 데이터 로드
         app.borrow_mut().load_folder();
 
+        let scan_refresh_timer = Rc::new(slint::Timer::default());
+        {
+            let ui_handle = ui.as_weak();
+            let app_handle = app.clone();
+            let scan_results_dirty = scan_results_dirty.clone();
+            let scan_active = scan_active.clone();
+            let preview = preview_controller.clone();
+            let timer_handle = Rc::downgrade(&scan_refresh_timer);
+            scan_refresh_timer.start(
+                slint::TimerMode::Repeated,
+                Duration::from_millis(33),
+                move || {
+                    if scan_results_dirty.swap(false, Ordering::AcqRel) {
+                        if let Some(ui) = ui_handle.upgrade() {
+                            let mut app = app_handle.borrow_mut();
+                            if app.show_only_missing_media_date {
+                                // Rows can disappear as their Media Date is discovered. Numeric
+                                // selections would otherwise point at a different file.
+                                app.select_ui_index(-1, false, false);
+                            }
+                            ui.set_item_count(app.file_count() as i32);
+                            ui.set_files(app.get_ui_model());
+                            set_selected_files(&ui, &app);
+                            preview.update(&ui, &app);
+                        }
+                    }
+                    if !scan_active.load(Ordering::Acquire) {
+                        if let Some(timer) = timer_handle.upgrade() {
+                            timer.stop();
+                        }
+                    }
+                },
+            );
+            scan_refresh_timer.stop();
+        }
+
         let schedule_media_scan = {
             let app_handle = app.clone();
             let scan_batch_sender = scan_batch_sender.clone();
+            let scan_active = scan_active.clone();
+            let scan_refresh_timer = scan_refresh_timer.clone();
             move || {
                 let app = app_handle.borrow();
                 app.restart_scan();
                 let (epoch, jobs) = app.prepare_scan_jobs();
                 drop(app);
+                scan_active.store(!jobs.is_empty(), Ordering::Release);
                 let _ = scan_batch_sender.send(MediaScanBatch { epoch, jobs });
+                scan_refresh_timer.restart();
             }
         };
 
@@ -201,6 +555,7 @@ impl GuiRunner for SlintRunner {
             let app_handle = app.clone();
             let schedule_scan = schedule_media_scan.clone();
             let pending_filename_renames = pending_filename_renames.clone();
+            let preview = preview_controller.clone();
             move |selected_path: Option<PathBuf>| {
                 if let Some(ui) = ui_handle.upgrade() {
                     pending_filename_renames.borrow_mut().clear();
@@ -213,38 +568,16 @@ impl GuiRunner for SlintRunner {
                         app.select_ui_index(selected_index, false, false);
                     }
                     ui.set_current_path(app.current_path.as_str().into());
-                    ui.set_activity_text("Ready".into());
+                    ui.set_activity_text("".into());
                     ui.set_item_count(app.file_count() as i32);
                     ui.set_files(app.get_ui_model());
                     set_selected_files(&ui, &app);
+                    preview.update(&ui, &app);
                     drop(app);
                     schedule_scan();
                 }
             }
         };
-
-        let scan_refresh_timer = slint::Timer::default();
-        {
-            let ui_handle = ui.as_weak();
-            let app_handle = app.clone();
-            let scan_results_dirty = scan_results_dirty.clone();
-            scan_refresh_timer.start(slint::TimerMode::Repeated, Duration::from_millis(33), move || {
-                if !scan_results_dirty.swap(false, Ordering::AcqRel) {
-                    return;
-                }
-                if let Some(ui) = ui_handle.upgrade() {
-                    let mut app = app_handle.borrow_mut();
-                    if app.show_only_missing_media_date {
-                        // Rows can disappear as their Media Date is discovered. Numeric
-                        // selections would otherwise point at a different file.
-                        app.select_ui_index(-1, false, false);
-                    }
-                    ui.set_item_count(app.file_count() as i32);
-                    ui.set_files(app.get_ui_model());
-                    set_selected_files(&ui, &app);
-                }
-            });
-        }
 
         // 초기 실행
         refresh_ui(None);
@@ -426,12 +759,14 @@ impl GuiRunner for SlintRunner {
 
         let app_handle = app.clone();
         let ui_handle = ui.as_weak();
+        let preview = preview_controller.clone();
         ui.on_select_files_without_exif(move || {
             if let Some(ui) = ui_handle.upgrade() {
                 let mut app = app_handle.borrow_mut();
                 app.select_files_without_exif();
                 ui.set_files(app.get_ui_model());
                 set_selected_files(&ui, &app);
+                preview.update(&ui, &app);
             }
         });
 
@@ -673,6 +1008,7 @@ impl GuiRunner for SlintRunner {
         let pending_exif_tag_removals_handle = pending_exif_tag_removals.clone();
         let ui_handle = ui.as_weak();
         let schedule_scan = schedule_media_scan.clone();
+        let preview = preview_controller.clone();
         ui.on_table_row_selected(move |index, ctrl, shift| {
             if let Some(ui) = ui_handle.upgrade() {
                 pending_renames.borrow_mut().clear();
@@ -682,12 +1018,13 @@ impl GuiRunner for SlintRunner {
                 pending_modified_dates_handle.borrow_mut().clear();
                 pending_exif_removals_handle.borrow_mut().clear();
                 pending_exif_tag_removals_handle.borrow_mut().clear();
-                ui.set_activity_text("Ready".into());
+                ui.set_activity_text("".into());
                 let mut app = app_handle.borrow_mut();
                 app.select_ui_index(index, ctrl, shift);
                 ui.set_selected_index(index);
                 ui.set_files(app.get_ui_model());
                 set_selected_files(&ui, &app);
+                preview.update(&ui, &app);
                 drop(app);
                 schedule_scan();
             }
@@ -703,6 +1040,7 @@ impl GuiRunner for SlintRunner {
         let pending_exif_tag_removals_handle = pending_exif_tag_removals.clone();
         let ui_handle = ui.as_weak();
         let schedule_scan = schedule_media_scan.clone();
+        let preview = preview_controller.clone();
         ui.on_select_all_table_rows(move || {
             let Some(ui) = ui_handle.upgrade() else { return; };
             pending_renames.borrow_mut().clear();
@@ -712,11 +1050,12 @@ impl GuiRunner for SlintRunner {
             pending_modified_dates_handle.borrow_mut().clear();
             pending_exif_removals_handle.borrow_mut().clear();
             pending_exif_tag_removals_handle.borrow_mut().clear();
-            ui.set_activity_text("Ready".into());
+            ui.set_activity_text("".into());
             let mut app = app_handle.borrow_mut();
             app.select_all_visible_entries();
             ui.set_files(app.get_ui_model());
             set_selected_files(&ui, &app);
+            preview.update(&ui, &app);
             drop(app);
             schedule_scan();
         });
@@ -1734,10 +2073,17 @@ impl GuiRunner for SlintRunner {
 
                 let result = (|| {
                     let mut app = app_handle.borrow_mut();
+                    let selection_index = app
+                        .selected_indices()
+                        .iter()
+                        .copied()
+                        .filter(|index| *index > 0)
+                        .min()
+                        .unwrap_or(1);
                     let paths = selected_recyclable_paths(&app);
                     if paths.is_empty() {
                         show_message(&ui, "Delete Failed", "Selected file could not be resolved.");
-                        return Ok(());
+                        return Ok::<Option<PathBuf>, String>(None);
                     }
 
                     for path in paths {
@@ -1745,11 +2091,16 @@ impl GuiRunner for SlintRunner {
                     }
 
                     app.load_folder();
-                    Ok::<(), String>(())
+                    let next_path = selection_index_after_deletion(
+                        selection_index,
+                        app.visible_entry_count(),
+                    )
+                    .and_then(|next_index| app.path_for_ui_index(next_index));
+                    Ok::<Option<PathBuf>, String>(next_path)
                 })();
 
                 match result {
-                    Ok(_) => refresh(None),
+                    Ok(next_path) => refresh(next_path),
                     Err(err) => show_message(&ui, "Delete Failed", &err),
                 }
             }
@@ -1779,6 +2130,8 @@ impl GuiRunner for SlintRunner {
                         .into(),
                     );
                     ui.set_confirm_yes_selected(false);
+                    ui.set_confirm_number_removal_mode(false);
+                    ui.set_confirm_media_prefix_removal_mode(false);
                     ui.set_confirm_trailing_rename_visible(true);
                 }
                 Err(err) => show_message(&ui, "Filename Change Failed", &err),
@@ -1840,6 +2193,7 @@ impl GuiRunner for SlintRunner {
                     );
                     ui.set_confirm_yes_selected(false);
                     ui.set_confirm_number_removal_mode(true);
+                    ui.set_confirm_media_prefix_removal_mode(false);
                     ui.set_confirm_trailing_rename_visible(true);
                 }
                 Err(err) => show_message(&ui, "Filename Change Failed", &err),
@@ -1868,6 +2222,69 @@ impl GuiRunner for SlintRunner {
                         "Filename Change Complete",
                         &format!(
                             "Renamed {} file(s). Skipped {} without a matching pattern. Resolved {} duplicate filename(s) with numbered suffixes.",
+                            stats.renameable, stats.unmatched, stats.deduplicated
+                        ),
+                    );
+                }
+                Err(err) => show_message(&ui, "Filename Change Failed", &err),
+            }
+        });
+
+        let app_handle = app.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_request_remove_img_vid_prefixes(move || {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            let paths = selected_file_paths(&app_handle.borrow());
+            if paths.is_empty() {
+                show_message(&ui, "No Files Selected", "Select one or more files first.");
+                return;
+            }
+            match analyze_img_vid_prefix_removal(&paths) {
+                Ok(stats) if stats.renameable == 0 => show_message(
+                    &ui,
+                    "No Files Renamed",
+                    "None of the selected filenames begin with IMG_ or VID_.",
+                ),
+                Ok(stats) => {
+                    ui.set_message_title("Confirm Filename Change".into());
+                    ui.set_message_text(
+                        format!(
+                            "Rename {} file(s)? {} non-matching file(s) will be skipped. {} collision(s) will use _dupNNN. (Y/N)",
+                            stats.renameable, stats.unmatched, stats.deduplicated
+                        )
+                        .into(),
+                    );
+                    ui.set_confirm_yes_selected(false);
+                    ui.set_confirm_number_removal_mode(false);
+                    ui.set_confirm_media_prefix_removal_mode(true);
+                    ui.set_confirm_trailing_rename_visible(true);
+                }
+                Err(err) => show_message(&ui, "Filename Change Failed", &err),
+            }
+        });
+
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_confirm_remove_img_vid_prefixes(move || {
+            let Some(ui) = ui_handle.upgrade() else { return; };
+            let result = {
+                let mut app = app_handle.borrow_mut();
+                let paths = selected_file_paths(&app);
+                remove_img_vid_prefixes(&paths).map(|stats| {
+                    app.load_folder();
+                    stats
+                })
+            };
+
+            match result {
+                Ok(stats) => {
+                    refresh(None);
+                    show_message(
+                        &ui,
+                        "Filename Change Complete",
+                        &format!(
+                            "Renamed {} file(s). Skipped {}. Resolved {} filename collision(s).",
                             stats.renameable, stats.unmatched, stats.deduplicated
                         ),
                     );
@@ -4517,13 +4934,57 @@ mod tests {
         gps_utc_to_kst_display,
         parse_combined_gps_date_time,
         parse_media_date_shift,
+        preview_media_kind,
+        selection_index_after_deletion,
         large_selection_exif_available,
+        PreviewMediaKind,
         selection_summary,
         shift_display_datetime,
         should_mirror_png_date_source,
     };
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn deletion_keeps_the_same_row_or_selects_the_previous_last_row() {
+        assert_eq!(selection_index_after_deletion(3, 5), Some(3));
+        assert_eq!(selection_index_after_deletion(5, 4), Some(4));
+        assert_eq!(selection_index_after_deletion(1, 0), None);
+    }
+
+    #[test]
+    fn preview_type_is_detected_from_file_signature() {
+        let dir = std::env::temp_dir().join(format!(
+            "sh148_preview_signature_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let jpeg_with_wrong_extension = dir.join("jpeg.bin");
+        let png_with_wrong_extension = dir.join("png.jpg");
+        let unsupported = dir.join("unsupported.png");
+        std::fs::write(&jpeg_with_wrong_extension, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+        std::fs::write(
+            &png_with_wrong_extension,
+            [137, 80, 78, 71, 13, 10, 26, 10],
+        )
+        .unwrap();
+        std::fs::write(&unsupported, b"not an image").unwrap();
+
+        assert_eq!(
+            preview_media_kind(&jpeg_with_wrong_extension),
+            Some(PreviewMediaKind::Jpeg)
+        );
+        assert_eq!(
+            preview_media_kind(&png_with_wrong_extension),
+            Some(PreviewMediaKind::Png)
+        );
+        assert_eq!(preview_media_kind(&unsupported), None);
+
+        let _ = std::fs::remove_file(jpeg_with_wrong_extension);
+        let _ = std::fs::remove_file(png_with_wrong_extension);
+        let _ = std::fs::remove_file(unsupported);
+        let _ = std::fs::remove_dir(dir);
+    }
 
     #[test]
     fn large_jpeg_selection_uses_cached_metadata_state_without_offering_creation() {

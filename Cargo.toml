@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 chrono = "0.4"
 filetime = "0.2"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 slint = { version = "1.9", optional = true }
 
 [build-dependencies]
@@ -17,3 +18,13 @@ gui-slint = ["dep:slint"]
 
 [package.metadata.slint]
 include-path = ["src/gui_slint"]
+
+# Keep application code debuggable while making high-resolution preview decoding practical.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.zune-core]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3

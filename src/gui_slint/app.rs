@@ -157,6 +157,10 @@ impl SlintApp {
         self.visible_files().iter().filter(|entry| !entry.is_dir).count()
     }
 
+    pub fn visible_entry_count(&self) -> usize {
+        self.visible_files().len()
+    }
+
     pub fn path_for_ui_index(&self, index: i32) -> Option<PathBuf> {
         let idx = usize::try_from(index).ok()?;
         if idx == 0 {

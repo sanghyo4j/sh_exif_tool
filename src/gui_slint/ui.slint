@@ -10,8 +10,12 @@ import { FontSettings, MetadataContextMenuState, NativeColors } from "theme.slin
 export { FileEntry, Palette, FontSettings }
 
 export component MainWindow inherits Window {
-    width: 1200px;
-    height: 800px;
+    preferred-width: 1200px;
+    preferred-height: 800px;
+    min-width: 804px;
+    min-height: 600px;
+    max-width: 100000px;
+    max-height: 100000px;
     background: NativeColors.window_bg;
     default-font-family: "Segoe UI Variable Text";
     default-font-size: 10pt;
@@ -157,6 +161,7 @@ export component MainWindow inherits Window {
     in-out property <bool> confirm_metadata_paste_visible: false;
     in-out property <bool> confirm_trailing_rename_visible: false;
     in-out property <bool> confirm_number_removal_mode: false;
+    in-out property <bool> confirm_media_prefix_removal_mode: false;
     in-out property <bool> confirm_date_overwrite_visible: false;
     in-out property <bool> confirm_yes_selected: false;
     in-out property <bool> shift_media_date_visible: false;
@@ -167,7 +172,7 @@ export component MainWindow inherits Window {
     in-out property <string> shift_media_date_minutes: "0";
     in-out property <string> shift_media_date_seconds: "0";
     in-out property <string> shift_media_date_preview: "";
-    in-out property <string> activity_text: "Ready";
+    in-out property <string> activity_text: "";
     in-out property <bool> file_context_menu_visible: false;
     in-out property <bool> exif_context_menu_visible: false;
     in-out property <bool> exif_context_paste_enabled: false;
@@ -179,6 +184,25 @@ export component MainWindow inherits Window {
     in-out property <bool> mark_file_date_mismatches: false;
     in-out property <bool> duplicate_results_tab_visible: false;
     in-out property <int> active_right_tab: 0;
+    in-out property <length> panel_split_x: 750px;
+    in-out property <bool> preview_available: false;
+    in-out property <bool> preview_ready: false;
+    in-out property <image> preview_image;
+    in-out property <string> preview_status: "";
+    in-out property <int> preview_pixel_width: 0;
+    in-out property <int> preview_pixel_height: 0;
+    property <length> right_panel_x: root.panel_split_x + 2px;
+    property <length> right_panel_width: max(320px, root.width - root.right_panel_x);
+    property <length> right_content_y: root.duplicate_results_tab_visible ? 31px : 0px;
+    property <bool> preview_shown: root.preview_available
+        && (!root.duplicate_results_tab_visible || root.active_right_tab == 0);
+    property <length> preview_natural_height: root.preview_pixel_width > 0
+        ? root.right_panel_width * root.preview_pixel_height / root.preview_pixel_width
+        : root.right_panel_width * 3 / 4;
+    property <length> preview_height: min(
+        root.preview_natural_height,
+        max(80px, content_focus.height - root.right_content_y - 180px)
+    );
 
     callback open_dir(int);
     callback reload();
@@ -225,6 +249,8 @@ export component MainWindow inherits Window {
     callback confirm_move_trailing_numbers();
     callback request_remove_front_or_rear_numbers();
     callback confirm_remove_front_or_rear_numbers();
+    callback request_remove_img_vid_prefixes();
+    callback confirm_remove_img_vid_prefixes();
     callback extract_embedded_thumbnails();
     callback request_shift_media_date();
     callback request_shift_gps_date_time();
@@ -503,6 +529,14 @@ export component MainWindow inherits Window {
                 }
             }
 
+            MenuItem {
+                title: "Remove IMG_/VID_ Prefix...";
+                activated => {
+                    root.file_context_menu_visible = false;
+                    root.editing_path = false;
+                    root.request_remove_img_vid_prefixes();
+                }
+            }
 
             MenuItem {
                 title: "Extract Embedded Thumbnail";
@@ -605,7 +639,7 @@ export component MainWindow inherits Window {
         Rectangle {
             x: 0px;
             y: 0px;
-            width: 750px;
+            width: root.panel_split_x;
             height: 100%;
 
             file_table := CustomFileTable {
@@ -720,15 +754,37 @@ export component MainWindow inherits Window {
         }
 
         StrongVDivider {
-            x: 750px;
+            x: root.panel_split_x;
             y: 0px;
             height: 100%;
         }
 
-        if root.duplicate_results_tab_visible: Rectangle {
-            x: 752px;
+        splitter_drag := TouchArea {
+            x: root.panel_split_x - 3px;
             y: 0px;
-            width: max(320px, root.width - 752px);
+            width: 8px;
+            height: 100%;
+            mouse-cursor: ew-resize;
+
+            moved => {
+                if (self.pressed) {
+                    root.panel_split_x = min(
+                        root.width - 322px,
+                        max(
+                            480px,
+                            self.absolute-position.x - content_focus.absolute-position.x + self.mouse-x
+                        )
+                    );
+                    root.file_context_menu_visible = false;
+                    root.exif_context_menu_visible = false;
+                }
+            }
+        }
+
+        if root.duplicate_results_tab_visible: Rectangle {
+            x: root.right_panel_x;
+            y: 0px;
+            width: root.right_panel_width;
             height: 31px;
             background: NativeColors.subtle_surface;
 
@@ -834,11 +890,50 @@ export component MainWindow inherits Window {
             HDivider { y: parent.height - 1px; }
         }
 
+        if root.preview_shown: Rectangle {
+            x: root.right_panel_x;
+            y: root.right_content_y;
+            width: root.right_panel_width;
+            height: root.preview_height;
+            background: #eef0f2;
+
+            if root.preview_ready: Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.preview_image;
+                image-fit: contain;
+            }
+
+            if root.preview_status != "": Rectangle {
+                x: 8px;
+                y: parent.height - 28px;
+                width: min(parent.width - 16px, status_text.preferred-width + 16px);
+                height: 22px;
+                background: #f5f5f5e8;
+                border-width: 1px;
+                border-color: NativeColors.border;
+                border-radius: 2px;
+
+                status_text := Text {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    height: 100%;
+                    text: root.preview_status;
+                    color: NativeColors.secondary_text;
+                    font-size: max(8pt, (FontSettings.font_size_pt - 1) * 1pt);
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            HDivider { y: parent.height - 1px; }
+        }
+
         metadata_panel := MetadataPanel {
-                x: 752px;
-                y: root.duplicate_results_tab_visible ? 31px : 0px;
-                width: max(320px, root.width - 752px);
-                height: root.duplicate_results_tab_visible ? parent.height - 31px : parent.height;
+                x: root.right_panel_x;
+                y: root.right_content_y + (root.preview_shown ? root.preview_height + 1px : 0px);
+                width: root.right_panel_width;
+                height: parent.height - self.y;
                 visible: !root.duplicate_results_tab_visible || root.active_right_tab == 0;
                 header_title: root.duplicate_results_tab_visible ? "Selected File" : "Details";
                 selected_file_count: root.selected_file_count;
@@ -1073,9 +1168,9 @@ export component MainWindow inherits Window {
         }
 
         if root.duplicate_results_tab_visible && root.active_right_tab == 1: Rectangle {
-            x: 752px;
+            x: root.right_panel_x;
             y: 31px;
-            width: max(320px, root.width - 752px);
+            width: root.right_panel_width;
             height: parent.height - 31px;
             background: NativeColors.surface;
 
@@ -1139,7 +1234,7 @@ export component MainWindow inherits Window {
 
     if root.exif_context_menu_visible: TouchArea {
         y: 41px;
-        width: 752px;
+        width: root.right_panel_x;
         height: root.height - 41px;
         clicked => {
             root.exif_context_menu_visible = false;
@@ -1148,9 +1243,9 @@ export component MainWindow inherits Window {
     }
 
     if root.exif_context_menu_visible: TouchArea {
-        x: 906px;
+        x: root.right_panel_x + 154px;
         y: 71px;
-        width: root.width - 906px;
+        width: root.width - root.right_panel_x - 154px;
         height: root.height - 97px;
 
         pointer-event(event) => {
@@ -1162,9 +1257,9 @@ export component MainWindow inherits Window {
     }
 
     if root.exif_context_menu_visible: TouchArea {
-        x: 752px;
+        x: root.right_panel_x;
         y: root.height - 26px;
-        width: root.width - 752px;
+        width: root.width - root.right_panel_x;
         height: 26px;
         clicked => {
             root.exif_context_menu_visible = false;
@@ -1253,9 +1348,9 @@ export component MainWindow inherits Window {
     }
 
     if root.file_context_menu_visible: TouchArea {
-        x: 750px;
+        x: root.panel_split_x;
         y: 41px;
-        width: root.width - 750px;
+        width: root.width - root.panel_split_x;
         height: root.height - 67px;
 
         pointer-event(event) => {
@@ -1471,7 +1566,10 @@ export component MainWindow inherits Window {
 
                 if (root.confirm_trailing_rename_visible && (event.text == "Y" || event.text == "y" || (event.text == Key.Return && root.confirm_yes_selected))) {
                     root.confirm_trailing_rename_visible = false;
-                    if (root.confirm_number_removal_mode) {
+                    if (root.confirm_media_prefix_removal_mode) {
+                        root.confirm_media_prefix_removal_mode = false;
+                        root.confirm_remove_img_vid_prefixes();
+                    } else if (root.confirm_number_removal_mode) {
                         root.confirm_number_removal_mode = false;
                         root.confirm_remove_front_or_rear_numbers();
                     } else {
@@ -1484,6 +1582,7 @@ export component MainWindow inherits Window {
                 if (root.confirm_trailing_rename_visible && (event.text == "N" || event.text == "n" || event.text == Key.Escape || (event.text == Key.Return && !root.confirm_yes_selected))) {
                     root.confirm_trailing_rename_visible = false;
                     root.confirm_number_removal_mode = false;
+                    root.confirm_media_prefix_removal_mode = false;
                     root.message_title = "Operation Failed";
                     root.message_text = "";
                     content_focus.focus();
@@ -1604,6 +1703,7 @@ export component MainWindow inherits Window {
                             } else if (root.confirm_trailing_rename_visible) {
                                 root.confirm_trailing_rename_visible = false;
                                 root.confirm_number_removal_mode = false;
+                                root.confirm_media_prefix_removal_mode = false;
                                 root.message_title = "Operation Failed";
                                 root.message_text = "";
                                 content_focus.focus();
@@ -1656,7 +1756,10 @@ export component MainWindow inherits Window {
                                 root.confirm_trailing_rename_visible = false;
                                 root.message_title = "Operation Failed";
                                 root.message_text = "";
-                                if (root.confirm_number_removal_mode) {
+                                if (root.confirm_media_prefix_removal_mode) {
+                                    root.confirm_media_prefix_removal_mode = false;
+                                    root.confirm_remove_img_vid_prefixes();
+                                } else if (root.confirm_number_removal_mode) {
                                     root.confirm_number_removal_mode = false;
                                     root.confirm_remove_front_or_rear_numbers();
                                 } else {

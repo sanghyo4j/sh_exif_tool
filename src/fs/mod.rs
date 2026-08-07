@@ -174,6 +174,29 @@ pub fn remove_front_or_rear_numbers(
     })
 }
 
+pub type MediaPrefixRemovalStats = FrontRearNumberRemovalStats;
+
+pub fn analyze_img_vid_prefix_removal(
+    paths: &[PathBuf],
+) -> Result<MediaPrefixRemovalStats, String> {
+    let removal_plan = build_img_vid_prefix_removal_plan(paths)?;
+    Ok(removal_plan.stats())
+}
+
+pub fn remove_img_vid_prefixes(
+    paths: &[PathBuf],
+) -> Result<MediaPrefixRemovalStats, String> {
+    let removal_plan = build_img_vid_prefix_removal_plan(paths)?;
+    let unmatched = removal_plan.unmatched;
+    let deduplicated = removal_plan.deduplicated;
+    let renamed = apply_atomic_rename_plan(removal_plan.renames)?;
+    Ok(MediaPrefixRemovalStats {
+        renameable: renamed,
+        unmatched,
+        deduplicated,
+    })
+}
+
 fn apply_atomic_rename_plan(plan: Vec<(PathBuf, PathBuf)>) -> Result<usize, String> {
     if plan.is_empty() {
         return Ok(0);
@@ -236,6 +259,44 @@ fn build_front_or_rear_number_removal_plan(
             continue;
         }
         let Some(target_name) = remove_front_or_rear_number_name(source) else {
+            unmatched += 1;
+            continue;
+        };
+        let directory = source
+            .parent()
+            .ok_or_else(|| format!("Could not resolve the folder for {}.", source.display()))?;
+        candidates.push((source.clone(), directory.join(target_name)));
+    }
+
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut renames = Vec::new();
+    let mut resolver = FilenameCollisionResolver::new();
+    let mut deduplicated = 0usize;
+    for (source, desired_target) in candidates {
+        let target = resolver.resolve_for_create(&desired_target)?;
+        if target != desired_target {
+            deduplicated += 1;
+        }
+        renames.push((source, target));
+    }
+
+    Ok(FrontRearNumberRemovalPlan {
+        renames,
+        unmatched,
+        deduplicated,
+    })
+}
+
+fn build_img_vid_prefix_removal_plan(
+    paths: &[PathBuf],
+) -> Result<FrontRearNumberRemovalPlan, String> {
+    let mut candidates = Vec::new();
+    let mut unmatched = 0usize;
+    for source in paths {
+        if !source.is_file() {
+            continue;
+        }
+        let Some(target_name) = remove_img_vid_prefix_name(source) else {
             unmatched += 1;
             continue;
         };
@@ -345,6 +406,22 @@ fn remove_front_or_rear_number_name(path: &Path) -> Option<String> {
     }
 
     Some(match extension {
+        Some(extension) => format!("{base}.{extension}"),
+        None => base.to_string(),
+    })
+}
+
+fn remove_img_vid_prefix_name(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let prefix = stem.get(..4)?;
+    if !prefix.eq_ignore_ascii_case("IMG_") && !prefix.eq_ignore_ascii_case("VID_") {
+        return None;
+    }
+    let base = stem.get(4..)?;
+    if base.is_empty() {
+        return None;
+    }
+    Some(match path.extension().and_then(|value| value.to_str()) {
         Some(extension) => format!("{base}.{extension}"),
         None => base.to_string(),
     })
@@ -1065,6 +1142,48 @@ mod tests {
         assert_eq!(remove_front_or_rear_number_name(Path::new("20140809_131712.jpg")), None);
         assert_eq!(remove_front_or_rear_number_name(Path::new("photo_1.jpg")), None);
         assert_eq!(remove_front_or_rear_number_name(Path::new("photo_1000.jpg")), None);
+    }
+
+    #[test]
+    fn removes_img_and_vid_prefixes_case_insensitively() {
+        assert_eq!(
+            remove_img_vid_prefix_name(Path::new("IMG_20150711_143113.jpg")).as_deref(),
+            Some("20150711_143113.jpg")
+        );
+        assert_eq!(
+            remove_img_vid_prefix_name(Path::new("vid_20150711_143113.mp4")).as_deref(),
+            Some("20150711_143113.mp4")
+        );
+        assert_eq!(remove_img_vid_prefix_name(Path::new("IMAGE_001.jpg")), None);
+        assert_eq!(remove_img_vid_prefix_name(Path::new("IMG_.jpg")), None);
+    }
+
+    #[test]
+    fn resolves_img_vid_prefix_removal_collisions_with_common_suffixes() {
+        let directory = std::env::temp_dir().join(format!(
+            "sh148_exif_file_tool_prefix_removal_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("photo.jpg"), b"existing").unwrap();
+        std::fs::write(directory.join("IMG_photo.jpg"), b"image").unwrap();
+        std::fs::write(directory.join("VID_photo.jpg"), b"video").unwrap();
+
+        let selected = vec![
+            directory.join("IMG_photo.jpg"),
+            directory.join("VID_photo.jpg"),
+        ];
+        let stats = remove_img_vid_prefixes(&selected).unwrap();
+        assert_eq!(stats.renameable, 2);
+        assert_eq!(stats.deduplicated, 2);
+        assert!(directory.join("photo_dup001.jpg").is_file());
+        assert!(directory.join("photo_dup002.jpg").is_file());
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
