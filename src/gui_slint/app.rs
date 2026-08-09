@@ -1,13 +1,14 @@
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
-use slint::{ModelRc, StandardListViewItem, VecModel};
-use super::FileEntry as UiFileEntry; 
-use crate::exif::read_exif_metadata;
+use super::FileEntry as UiFileEntry;
+use crate::exif::{read_exif_metadata, ExifMetadata};
 use crate::fs::{read_directory, FileSystemEntry};
 use crate::media::{MediaScanJob, MediaScanResult};
+use slint::{ModelRc, StandardListViewItem, VecModel};
+use std::cmp::Ordering as CmpOrdering;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 #[derive(Clone, Debug)]
 pub struct CachedMediaScan {
@@ -16,15 +17,34 @@ pub struct CachedMediaScan {
     pub result: MediaScanResult,
 }
 
+#[derive(Clone, Debug)]
+pub struct SelectedEntryDetails {
+    pub path: Option<PathBuf>,
+    pub name: String,
+    pub exact_size: String,
+    pub created: String,
+    pub modified: String,
+    pub is_dir: bool,
+    pub media_kind: String,
+    pub media_type: String,
+    pub media_date: String,
+    pub metadata_status: String,
+    pub time_interpretation: String,
+    pub exif_metadata: Option<ExifMetadata>,
+}
+
 pub struct SlintApp {
     pub current_path: String,
     pub files: Vec<FileSystemEntry>,
     pub selected_indices: Vec<i32>,
     pub file_filter: i32,
     pub show_only_missing_media_date: bool,
+    pub sort_column: i32,
+    pub sort_direction: i32,
     pub scan_results: Arc<Mutex<HashMap<PathBuf, CachedMediaScan>>>,
     pub scan_epoch: Arc<AtomicU64>,
     selection_anchor: Option<i32>,
+    dynamic_sort_ready: bool,
 }
 
 impl SlintApp {
@@ -40,9 +60,12 @@ impl SlintApp {
             selected_indices: Vec::new(),
             file_filter: 0,
             show_only_missing_media_date: false,
+            sort_column: 0,
+            sort_direction: 0,
             scan_results: Arc::new(Mutex::new(HashMap::new())),
             scan_epoch: Arc::new(AtomicU64::new(0)),
             selection_anchor: None,
+            dynamic_sort_ready: true,
         };
         app.load_folder();
         app
@@ -70,6 +93,21 @@ impl SlintApp {
         }
     }
 
+    pub fn remove_deleted_paths(&mut self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        self.scan_epoch.fetch_add(1, Ordering::Relaxed);
+        let deleted: HashSet<&PathBuf> = paths.iter().collect();
+        self.files.retain(|entry| !deleted.contains(&entry.path));
+        self.scan_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|path, _| !deleted.contains(path));
+        self.selected_indices.clear();
+        self.selection_anchor = None;
+    }
+
     pub fn get_ui_model(&self) -> ModelRc<UiFileEntry> {
         let mut ui_items: Vec<UiFileEntry> = Vec::new();
 
@@ -83,27 +121,112 @@ impl SlintApp {
             media_kind: "folder".into(),
             media_date: "-".into(),
             metadata_status: "-".into(),
+            duplicate_name: false,
+            duplicate_size: false,
+            duplicate_modified: false,
+            duplicate_media_date: false,
         });
 
         let visible_files = self.visible_files();
-        let cache = self.scan_results.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cache = self
+            .scan_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (duplicate_groups, duplicate_cells) = if self.sort_direction != 0
+            && matches!(self.sort_column, 1..=4)
+            && (self.dynamic_sort_ready || !matches!(self.sort_column, 4 | 5))
+        {
+            let mut groups = HashMap::new();
+            let mut cells = HashMap::new();
+            for entry in &visible_files {
+                if let Some(group_key) = active_sort_value(entry, self.sort_column, &cache) {
+                    *groups.entry(group_key.clone()).or_insert(0usize) += 1;
+                    for column in 1..=4 {
+                        if let Some(value) = active_sort_value(entry, column, &cache) {
+                            *cells
+                                .entry((group_key.clone(), column, value))
+                                .or_insert(0usize) += 1;
+                        }
+                    }
+                }
+            }
+            (groups, cells)
+        } else {
+            (HashMap::new(), HashMap::new())
+        };
         for (visible_index, f) in visible_files.into_iter().enumerate() {
-            let name_str = f.path.file_name()
+            let name_str = f
+                .path
+                .file_name()
                 .map(|os_str| os_str.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
             let ui_index = i32::try_from(visible_index + 1).unwrap_or(i32::MAX);
-            
+
             let scan = scan_result_from_cache(&cache, f);
+            let group_key = active_sort_value(f, self.sort_column, &cache);
+            let group_is_duplicate = group_key
+                .as_ref()
+                .and_then(|key| duplicate_groups.get(key))
+                .is_some_and(|count| *count > 1);
+            let duplicate_in_column = |column| {
+                group_is_duplicate
+                    && group_key.as_ref().is_some_and(|group| {
+                        active_sort_value(f, column, &cache)
+                            .and_then(|value| {
+                                duplicate_cells
+                                    .get(&(group.clone(), column, value))
+                                    .copied()
+                            })
+                            .is_some_and(|count| count > 1)
+                    })
+            };
             ui_items.push(UiFileEntry {
                 name: name_str.into(),
-                size: if f.is_dir { "-".into() } else { format_file_size(f.size).into() },
-                modified: f.modified.map(format_time).unwrap_or_else(|| "-".into()).into(),
-                created: f.created.map(format_time).unwrap_or_else(|| "-".into()).into(),
+                size: if f.is_dir {
+                    "-".into()
+                } else {
+                    format_file_size(f.size).into()
+                },
+                modified: f
+                    .modified
+                    .map(format_time)
+                    .unwrap_or_else(|| "-".into())
+                    .into(),
+                created: f
+                    .created
+                    .map(format_time)
+                    .unwrap_or_else(|| "-".into())
+                    .into(),
                 is_dir: f.is_dir,
                 selected: self.selected_indices.contains(&ui_index),
-                media_kind: if f.is_dir { "folder" } else { scan.as_ref().map(|value| value.media_kind.as_str()).unwrap_or("pending") }.into(),
-                media_date: if f.is_dir { "-" } else { scan.as_ref().map(|value| value.media_date.as_str()).unwrap_or("…") }.into(),
-                metadata_status: if f.is_dir { "-" } else { scan.as_ref().map(|value| value.metadata_status.as_str()).unwrap_or("…") }.into(),
+                media_kind: if f.is_dir {
+                    "folder"
+                } else {
+                    scan.as_ref()
+                        .map(|value| value.media_kind.as_str())
+                        .unwrap_or("pending")
+                }
+                .into(),
+                media_date: if f.is_dir {
+                    "-"
+                } else {
+                    scan.as_ref()
+                        .map(|value| value.media_date.as_str())
+                        .unwrap_or("…")
+                }
+                .into(),
+                metadata_status: if f.is_dir {
+                    "-"
+                } else {
+                    scan.as_ref()
+                        .map(|value| value.metadata_status.as_str())
+                        .unwrap_or("…")
+                }
+                .into(),
+                duplicate_name: duplicate_in_column(1),
+                duplicate_size: duplicate_in_column(2),
+                duplicate_modified: duplicate_in_column(3),
+                duplicate_media_date: duplicate_in_column(4),
             });
         }
 
@@ -123,7 +246,9 @@ impl SlintApp {
         ])));
 
         for f in self.visible_files() {
-            let name = f.path.file_name()
+            let name = f
+                .path
+                .file_name()
                 .map(|os_str| os_str.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
             let display_name = if f.is_dir {
@@ -136,10 +261,19 @@ impl SlintApp {
             } else {
                 format_file_size(f.size)
             };
-            let modified = f.modified.map(format_time).unwrap_or_else(|| "-".to_string());
+            let modified = f
+                .modified
+                .map(format_time)
+                .unwrap_or_else(|| "-".to_string());
             let scan = self.scan_result_for(f);
-            let media_date = scan.as_ref().map(|value| value.media_date.as_str()).unwrap_or("…");
-            let metadata = scan.as_ref().map(|value| value.metadata_status.as_str()).unwrap_or("…");
+            let media_date = scan
+                .as_ref()
+                .map(|value| value.media_date.as_str())
+                .unwrap_or("…");
+            let metadata = scan
+                .as_ref()
+                .map(|value| value.metadata_status.as_str())
+                .unwrap_or("…");
 
             rows.push(ModelRc::new(VecModel::from(vec![
                 StandardListViewItem::from(display_name.as_str()),
@@ -154,7 +288,10 @@ impl SlintApp {
     }
 
     pub fn file_count(&self) -> usize {
-        self.visible_files().iter().filter(|entry| !entry.is_dir).count()
+        self.visible_files()
+            .iter()
+            .filter(|entry| !entry.is_dir)
+            .count()
     }
 
     pub fn visible_entry_count(&self) -> usize {
@@ -167,7 +304,9 @@ impl SlintApp {
             return Some(PathBuf::from(&self.current_path).parent()?.to_path_buf());
         }
 
-        self.visible_files().get(idx - 1).map(|entry| entry.path.clone())
+        self.visible_files()
+            .get(idx - 1)
+            .map(|entry| entry.path.clone())
     }
 
     pub fn ui_index_for_path(&self, path: &std::path::Path) -> Option<i32> {
@@ -180,90 +319,35 @@ impl SlintApp {
     pub fn ui_details_for_index(&self, index: i32) -> Option<(String, String, String, bool)> {
         let idx = usize::try_from(index).ok()?;
         if idx == 0 {
-            return Some((
-                "[..]".to_string(),
-                "-".to_string(),
-                "-".to_string(),
-                true,
-            ));
+            return Some(("[..]".to_string(), "-".to_string(), "-".to_string(), true));
         }
 
         let visible = self.visible_files();
         let entry = visible.get(idx - 1)?;
-        let name = entry.path.file_name()
+        let name = entry
+            .path
+            .file_name()
             .map(|os_str| os_str.to_string_lossy().to_string())
             .unwrap_or_else(|| "Unknown".to_string());
-        let modified = entry.modified.map(format_time).unwrap_or_else(|| "-".to_string());
-        let created = entry.created.map(format_time).unwrap_or_else(|| "-".to_string());
+        let modified = entry
+            .modified
+            .map(format_time)
+            .unwrap_or_else(|| "-".to_string());
+        let created = entry
+            .created
+            .map(format_time)
+            .unwrap_or_else(|| "-".to_string());
 
         Some((name, created, modified, entry.is_dir))
     }
 
-    pub fn media_details_for_index(&self, index: i32) -> (String, String, String, String) {
-        let Some(idx) = usize::try_from(index).ok() else {
-            return empty_media_details();
-        };
-        if idx == 0 {
-            return (
-                "folder".to_string(),
-                "Folder".to_string(),
-                "-".to_string(),
-                "-".to_string(),
-            );
-        }
-
-        let visible = self.visible_files();
-        let Some(entry) = visible.get(idx - 1) else {
-            return empty_media_details();
-        };
-        if entry.is_dir {
-            return (
-                "folder".to_string(),
-                "Folder".to_string(),
-                "-".to_string(),
-                "-".to_string(),
-            );
-        }
-
-        if let Some(scan) = self.scan_result_for(entry) {
-            return (
-                scan.media_kind,
-                scan.media_type,
-                scan.media_date,
-                media_metadata_label(&scan.metadata_status).to_string(),
-            );
-        }
-
-        if is_mp4_file(&entry.path) {
-            return (
-                "mp4".to_string(),
-                "Scanning...".to_string(),
-                "Scanning...".to_string(),
-                "Scanning...".to_string(),
-            );
-        }
-        if is_jpeg_file(&entry.path) {
-            return (
-                "jpeg".to_string(),
-                "JPEG image".to_string(),
-                "Scanning...".to_string(),
-                "Scanning...".to_string(),
-            );
-        }
-        if is_png_file(&entry.path) {
-            return (
-                "png".to_string(),
-                "PNG image".to_string(),
-                "Scanning...".to_string(),
-                "Scanning...".to_string(),
-            );
-        }
-
-        empty_media_details()
-    }
-
     pub fn select_ui_index(&mut self, index: i32, ctrl: bool, shift: bool) {
-        if index < 0 || usize::try_from(index).map_or(true, |idx| idx >= self.visible_files().len() + 1) {
+        if index < 0
+            // A visible row can never exceed the complete directory entry
+            // count. Avoid rebuilding and sorting the visible list merely to
+            // validate an index that came from that same UI model.
+            || usize::try_from(index).map_or(true, |idx| idx > self.files.len())
+        {
             self.selected_indices.clear();
             self.selection_anchor = None;
             return;
@@ -275,10 +359,13 @@ impl SlintApp {
             let end = anchor.max(index);
             self.selected_indices = (start..=end).collect();
         } else if ctrl {
-            if let Some(position) = self.selected_indices.iter().position(|selected| *selected == index) {
-                self.selected_indices.remove(position);
-            } else {
-                self.selected_indices.push(index);
+            match self.selected_indices.binary_search(&index) {
+                Ok(position) => {
+                    self.selected_indices.remove(position);
+                }
+                Err(position) => {
+                    self.selected_indices.insert(position, index);
+                }
             }
             self.selection_anchor = Some(index);
         } else {
@@ -287,38 +374,97 @@ impl SlintApp {
             self.selection_anchor = Some(index);
         }
 
-        self.selected_indices.sort_unstable();
-        self.selected_indices.dedup();
+        // Shift produces an ordered range, Ctrl inserts at the binary-search
+        // position, and a plain click contains one item. No full re-sort is
+        // needed for every Ctrl click.
     }
 
     pub fn selected_indices(&self) -> &[i32] {
         &self.selected_indices
     }
 
-    pub fn selected_counts(&self) -> (usize, usize, bool) {
+    /// Takes one stable snapshot of every selected row. This deliberately
+    /// performs filtering/sorting and locks the media cache only once; the
+    /// Details panel used to repeat both operations for every displayed tag.
+    pub fn selected_entry_details(&self) -> Vec<SelectedEntryDetails> {
         let visible = self.visible_files();
-        let mut file_count = 0;
-        let mut recyclable_count = 0;
-        let mut has_dir = false;
-        for index in &self.selected_indices {
-            let Ok(index) = usize::try_from(*index) else {
-                continue;
-            };
-            if index == 0 {
-                has_dir = true;
-                continue;
-            }
-            let Some(entry) = visible.get(index - 1) else {
-                continue;
-            };
-            recyclable_count += 1;
-            if entry.is_dir {
-                has_dir = true;
-            } else {
-                file_count += 1;
-            }
-        }
-        (file_count, recyclable_count, has_dir)
+        let cache = self
+            .scan_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        self.selected_indices
+            .iter()
+            .filter_map(|selected| {
+                let index = usize::try_from(*selected).ok()?;
+                if index == 0 {
+                    return Some(SelectedEntryDetails {
+                        path: PathBuf::from(&self.current_path).parent().map(PathBuf::from),
+                        name: "[..]".to_string(),
+                        exact_size: "-".to_string(),
+                        created: "-".to_string(),
+                        modified: "-".to_string(),
+                        is_dir: true,
+                        media_kind: "folder".to_string(),
+                        media_type: "Folder".to_string(),
+                        media_date: "-".to_string(),
+                        metadata_status: "-".to_string(),
+                        time_interpretation: String::new(),
+                        exif_metadata: None,
+                    });
+                }
+
+                let entry = *visible.get(index - 1)?;
+                let name = entry
+                    .path
+                    .file_name()
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let scan = scan_result_from_cache(&cache, entry);
+                let (media_kind, media_type, media_date, metadata_status, time_interpretation, exif_metadata) = if entry.is_dir {
+                    ("folder".to_string(), "Folder".to_string(), "-".to_string(), "-".to_string(), String::new(), None)
+                } else if let Some(scan) = scan {
+                    (
+                        scan.media_kind,
+                        scan.media_type,
+                        scan.media_date,
+                        media_metadata_label(&scan.metadata_status).to_string(),
+                        scan.time_interpretation,
+                        scan.exif_metadata,
+                    )
+                } else if is_jpeg_file(&entry.path) {
+                    ("jpeg".to_string(), "JPEG image".to_string(), "Scanning...".to_string(), "Scanning...".to_string(), String::new(), None)
+                } else if is_png_file(&entry.path) {
+                    ("png".to_string(), "PNG image".to_string(), "Scanning...".to_string(), "Scanning...".to_string(), String::new(), None)
+                } else if is_mp4_file(&entry.path) {
+                    let media_type = fallback_video_media_type(&entry.path);
+                    ("mp4".to_string(), media_type.to_string(), "Scanning...".to_string(), "Scanning...".to_string(), String::new(), None)
+                } else if is_mpeg_ts_file(&entry.path) {
+                    ("mts".to_string(), "AVCHD transport stream".to_string(), "Scanning...".to_string(), "Scanning...".to_string(), String::new(), None)
+                } else {
+                    (String::new(), String::new(), String::new(), String::new(), String::new(), None)
+                };
+
+                Some(SelectedEntryDetails {
+                    path: Some(entry.path.clone()),
+                    name,
+                    exact_size: if entry.is_dir {
+                        "-".to_string()
+                    } else {
+                        format!("{} Byte", format_number_with_commas(entry.size))
+                    },
+                    created: entry.created.map(format_time).unwrap_or_else(|| "-".to_string()),
+                    modified: entry.modified.map(format_time).unwrap_or_else(|| "-".to_string()),
+                    is_dir: entry.is_dir,
+                    media_kind,
+                    media_type,
+                    media_date,
+                    metadata_status,
+                    time_interpretation,
+                    exif_metadata,
+                })
+            })
+            .collect()
     }
 
     pub fn select_all_visible_entries(&mut self) {
@@ -333,7 +479,11 @@ impl SlintApp {
             .visible_files()
             .into_iter()
             .enumerate()
-            .filter(|(_, entry)| !entry.is_dir && is_jpeg_file(&entry.path) && !file_has_exif(&entry.path, entry.is_dir))
+            .filter(|(_, entry)| {
+                !entry.is_dir
+                    && is_jpeg_file(&entry.path)
+                    && !file_has_exif(&entry.path, entry.is_dir)
+            })
             .filter_map(|(index, _)| i32::try_from(index + 1).ok())
             .collect();
         self.selection_anchor = self.selected_indices.first().copied();
@@ -341,12 +491,16 @@ impl SlintApp {
 
     pub fn prepare_scan_jobs(&self) -> (u64, Vec<MediaScanJob>) {
         let epoch = self.scan_epoch.load(Ordering::Relaxed);
-        let selected_paths: HashSet<_> = self.selected_indices
+        let selected_paths: HashSet<_> = self
+            .selected_indices
             .iter()
             .filter_map(|index| self.path_for_ui_index(*index))
             .collect();
         let visible_files = self.visible_files();
-        let cache = self.scan_results.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cache = self
+            .scan_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut jobs: Vec<_> = visible_files
             .into_iter()
             .filter(|entry| !entry.is_dir)
@@ -369,14 +523,71 @@ impl SlintApp {
         self.scan_epoch.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn set_dynamic_sort_ready(&mut self, ready: bool) {
+        if self.dynamic_sort_ready == ready {
+            return;
+        }
+        let selected_paths = self.selected_paths();
+        self.dynamic_sort_ready = ready;
+        self.restore_selected_paths(&selected_paths);
+    }
+
+    pub fn complete_dynamic_sort(&mut self) {
+        if self.dynamic_sort_ready {
+            return;
+        }
+        let selected_paths = self.selected_paths();
+        self.dynamic_sort_ready = true;
+        self.restore_selected_paths(&selected_paths);
+    }
+
+    pub fn cycle_sort(&mut self, column: i32) {
+        let selected_paths = self.selected_paths();
+        if self.sort_column != column || self.sort_direction == 0 {
+            self.sort_column = column;
+            self.sort_direction = 1;
+        } else if self.sort_direction == 1 {
+            self.sort_direction = 2;
+        } else {
+            self.sort_column = 0;
+            self.sort_direction = 0;
+        }
+        self.restore_selected_paths(&selected_paths);
+    }
+
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        self.selected_indices
+            .iter()
+            .filter(|index| **index > 0)
+            .filter_map(|index| self.path_for_ui_index(*index))
+            .collect()
+    }
+
+    fn restore_selected_paths(&mut self, paths: &[PathBuf]) {
+        self.selected_indices = paths
+            .iter()
+            .filter_map(|path| self.ui_index_for_path(path))
+            .collect();
+        self.selected_indices.sort_unstable();
+        self.selected_indices.dedup();
+        self.selection_anchor = self.selected_indices.first().copied();
+    }
+
     fn scan_result_for(&self, entry: &FileSystemEntry) -> Option<MediaScanResult> {
-        let cache = self.scan_results.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cache = self
+            .scan_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         scan_result_from_cache(&cache, entry)
     }
 
     fn visible_files(&self) -> Vec<&FileSystemEntry> {
-        let cache = self.scan_results.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.files
+        let cache = self
+            .scan_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut visible: Vec<_> = self
+            .files
             .iter()
             .filter(|entry| {
                 if entry.is_dir {
@@ -395,8 +606,193 @@ impl SlintApp {
                 let scan = scan_result_from_cache(&cache, entry);
                 media_date_is_missing(scan.as_ref())
             })
-            .collect()
+            .collect();
+
+        let dynamic_sort_allowed = self.dynamic_sort_ready || !matches!(self.sort_column, 4 | 5);
+        if self.sort_direction != 0 && dynamic_sort_allowed {
+            visible.sort_by(|left, right| {
+                compare_file_entries(left, right, self.sort_column, self.sort_direction, &cache)
+            });
+        }
+        visible
     }
+}
+
+fn compare_file_entries(
+    left: &FileSystemEntry,
+    right: &FileSystemEntry,
+    column: i32,
+    direction: i32,
+    cache: &HashMap<PathBuf, CachedMediaScan>,
+) -> CmpOrdering {
+    if left.is_dir != right.is_dir {
+        return right.is_dir.cmp(&left.is_dir);
+    }
+
+    let left_name = file_name_for_sort(left);
+    let right_name = file_name_for_sort(right);
+    if left.is_dir {
+        return natural_name_cmp(&left_name, &right_name);
+    }
+
+    let descending = direction == 2;
+    let primary = match column {
+        1 => directional_cmp(natural_name_cmp(&left_name, &right_name), descending),
+        2 => directional_cmp(left.size.cmp(&right.size), descending),
+        3 => option_cmp_missing_last(left.modified, right.modified, descending),
+        4 => {
+            let left_date = scan_result_from_cache(cache, left)
+                .and_then(|scan| usable_sort_value(&scan.media_date));
+            let right_date = scan_result_from_cache(cache, right)
+                .and_then(|scan| usable_sort_value(&scan.media_date));
+            option_cmp_missing_last(left_date, right_date, descending)
+        }
+        5 => {
+            let left_status = scan_result_from_cache(cache, left)
+                .map(|scan| metadata_sort_rank(&scan.metadata_status));
+            let right_status = scan_result_from_cache(cache, right)
+                .map(|scan| metadata_sort_rank(&scan.metadata_status));
+            option_cmp_missing_last(left_status, right_status, descending)
+        }
+        _ => CmpOrdering::Equal,
+    };
+    primary.then_with(|| natural_name_cmp(&left_name, &right_name))
+}
+
+fn active_sort_value(
+    entry: &FileSystemEntry,
+    column: i32,
+    cache: &HashMap<PathBuf, CachedMediaScan>,
+) -> Option<String> {
+    if entry.is_dir {
+        return None;
+    }
+    match column {
+        1 => Some(file_name_for_sort(entry).to_lowercase()),
+        2 => Some(entry.size.to_string()),
+        3 => entry.modified.map(format_time),
+        4 => scan_result_from_cache(cache, entry)
+            .map(|scan| scan.media_date)
+            .filter(|value| value != "-" && value != "…" && !value.trim().is_empty()),
+        _ => None,
+    }
+}
+
+fn format_number_with_commas(value: u64) -> String {
+    let digits = value.to_string();
+    let mut result = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(character);
+    }
+    result
+}
+
+fn file_name_for_sort(entry: &FileSystemEntry) -> String {
+    entry
+        .path
+        .file_name()
+        .unwrap_or(entry.path.as_os_str())
+        .to_string_lossy()
+        .to_string()
+}
+
+fn directional_cmp(ordering: CmpOrdering, descending: bool) -> CmpOrdering {
+    if descending {
+        ordering.reverse()
+    } else {
+        ordering
+    }
+}
+
+fn option_cmp_missing_last<T: Ord>(
+    left: Option<T>,
+    right: Option<T>,
+    descending: bool,
+) -> CmpOrdering {
+    match (left, right) {
+        (Some(left), Some(right)) => directional_cmp(left.cmp(&right), descending),
+        (Some(_), None) => CmpOrdering::Less,
+        (None, Some(_)) => CmpOrdering::Greater,
+        (None, None) => CmpOrdering::Equal,
+    }
+}
+
+fn usable_sort_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && !matches!(value, "-" | "N/A")).then(|| value.to_string())
+}
+
+fn metadata_sort_rank(value: &str) -> i32 {
+    match value.trim() {
+        "O" | "Available" => 0,
+        "X" | "Not Found" => 1,
+        "!" | "Error" => 2,
+        _ => 3,
+    }
+}
+
+fn natural_name_cmp(left: &str, right: &str) -> CmpOrdering {
+    let left_lower = left.to_lowercase();
+    let right_lower = right.to_lowercase();
+    let left_bytes = left_lower.as_bytes();
+    let right_bytes = right_lower.as_bytes();
+    let (mut left_index, mut right_index) = (0usize, 0usize);
+
+    while left_index < left_bytes.len() && right_index < right_bytes.len() {
+        if left_bytes[left_index].is_ascii_digit() && right_bytes[right_index].is_ascii_digit() {
+            let left_end = digit_run_end(left_bytes, left_index);
+            let right_end = digit_run_end(right_bytes, right_index);
+            let left_digits = &left_lower[left_index..left_end];
+            let right_digits = &right_lower[right_index..right_end];
+            let left_trimmed = left_digits.trim_start_matches('0');
+            let right_trimmed = right_digits.trim_start_matches('0');
+            let left_number = if left_trimmed.is_empty() {
+                "0"
+            } else {
+                left_trimmed
+            };
+            let right_number = if right_trimmed.is_empty() {
+                "0"
+            } else {
+                right_trimmed
+            };
+            let number_order = left_number
+                .len()
+                .cmp(&right_number.len())
+                .then_with(|| left_number.cmp(right_number))
+                .then_with(|| left_digits.len().cmp(&right_digits.len()));
+            if number_order != CmpOrdering::Equal {
+                return number_order;
+            }
+            left_index = left_end;
+            right_index = right_end;
+            continue;
+        }
+
+        let left_char = left_lower[left_index..].chars().next().unwrap();
+        let right_char = right_lower[right_index..].chars().next().unwrap();
+        let character_order = left_char.cmp(&right_char);
+        if character_order != CmpOrdering::Equal {
+            return character_order;
+        }
+        left_index += left_char.len_utf8();
+        right_index += right_char.len_utf8();
+    }
+
+    left_bytes
+        .len()
+        .cmp(&right_bytes.len())
+        .then_with(|| left.cmp(right))
+}
+
+fn digit_run_end(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    index
 }
 
 fn scan_result_from_cache(
@@ -438,13 +834,41 @@ fn matches_file_filter(filter: i32, path: &std::path::Path) -> bool {
 }
 
 fn is_video_file(path: &std::path::Path) -> bool {
-    is_mp4_file(path)
+    is_mp4_file(path) || is_mpeg_ts_file(path)
 }
 
 fn is_mp4_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mp4" | "mov" | "m4v" | "3gp" | "3g2" | "qt"
+            )
+        })
+}
+
+fn is_mpeg_ts_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(extension.to_ascii_lowercase().as_str(), "mts" | "m2ts")
+        })
+}
+
+fn fallback_video_media_type(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("mov" | "qt") => "QuickTime movie",
+        Some("m4v") => "MPEG-4 video",
+        Some("3gp") => "3GPP media",
+        Some("3g2") => "3GPP2 media",
+        _ => "MPEG-4 media",
+    }
 }
 
 fn file_has_exif(path: &std::path::Path, is_dir: bool) -> bool {
@@ -465,15 +889,96 @@ fn is_png_file(path: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_image_file, is_video_file, matches_file_filter, media_date_is_missing};
+    use super::{
+        format_number_with_commas, is_image_file, is_video_file, matches_file_filter,
+        media_date_is_missing, natural_name_cmp, CachedMediaScan, SlintApp,
+    };
+    use crate::fs::FileSystemEntry;
     use crate::media::MediaScanResult;
-    use std::path::Path;
+    use slint::Model;
+    use std::cmp::Ordering as CmpOrdering;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, Mutex};
+
+    fn sortable_app() -> SlintApp {
+        let entry = |name: &str| FileSystemEntry {
+            path: PathBuf::from(name),
+            size: 0,
+            modified: None,
+            created: None,
+            is_dir: false,
+        };
+        SlintApp {
+            current_path: ".".to_string(),
+            files: vec![entry("IMG_10.jpg"), entry("IMG_2.jpg")],
+            selected_indices: vec![1],
+            file_filter: 0,
+            show_only_missing_media_date: false,
+            sort_column: 0,
+            sort_direction: 0,
+            scan_results: Arc::new(Mutex::new(HashMap::new())),
+            scan_epoch: Arc::new(AtomicU64::new(0)),
+            selection_anchor: Some(1),
+            dynamic_sort_ready: true,
+        }
+    }
+
+    #[test]
+    fn filename_sort_is_natural_and_cycles_ascending_descending_off() {
+        assert_eq!(
+            natural_name_cmp("IMG_2.jpg", "img_10.jpg"),
+            CmpOrdering::Less
+        );
+
+        let mut app = sortable_app();
+        app.cycle_sort(1);
+        assert_eq!((app.sort_column, app.sort_direction), (1, 1));
+        assert_eq!(
+            app.path_for_ui_index(1).unwrap(),
+            PathBuf::from("IMG_2.jpg")
+        );
+        assert_eq!(app.selected_indices, vec![2]);
+
+        app.cycle_sort(1);
+        assert_eq!((app.sort_column, app.sort_direction), (1, 2));
+        assert_eq!(
+            app.path_for_ui_index(1).unwrap(),
+            PathBuf::from("IMG_10.jpg")
+        );
+        assert_eq!(app.selected_indices, vec![1]);
+
+        app.cycle_sort(1);
+        assert_eq!((app.sort_column, app.sort_direction), (0, 0));
+        assert_eq!(
+            app.path_for_ui_index(1).unwrap(),
+            PathBuf::from("IMG_10.jpg")
+        );
+    }
 
     #[test]
     fn supported_media_is_the_union_of_images_and_videos() {
-        for name in ["photo.jpg", "photo.JPEG", "image.png", "clip.mp4", "clip.MP4"] {
+        for name in [
+            "photo.jpg",
+            "photo.JPEG",
+            "image.png",
+            "clip.mp4",
+            "clip.MP4",
+            "clip.mov",
+            "clip.MOV",
+            "clip.m4v",
+            "clip.3gp",
+            "clip.3g2",
+            "clip.qt",
+            "clip.mts",
+            "clip.m2ts",
+        ] {
             let path = Path::new(name);
-            assert!(is_image_file(path) || is_video_file(path), "{name} should be supported");
+            assert!(
+                is_image_file(path) || is_video_file(path),
+                "{name} should be supported"
+            );
         }
         assert!(!is_image_file(Path::new("notes.txt")));
         assert!(!is_video_file(Path::new("notes.txt")));
@@ -499,15 +1004,60 @@ mod tests {
         assert!(matches_file_filter(5, Path::new("image.PNG")));
         assert!(!matches_file_filter(5, Path::new("photo.jpeg")));
     }
-}
 
-fn empty_media_details() -> (String, String, String, String) {
-    (
-        String::new(),
-        String::new(),
-        String::new(),
-        String::new(),
-    )
+    #[test]
+    fn exact_byte_counts_use_thousands_separators() {
+        assert_eq!(format_number_with_commas(5_234_415), "5,234,415");
+        assert_eq!(format_number_with_commas(999), "999");
+    }
+
+    #[test]
+    fn equal_values_in_the_active_sort_group_are_marked_per_column() {
+        let mut app = sortable_app();
+        app.files[0].size = 1_024;
+        app.files[1].size = 1_024;
+        app.cycle_sort(2);
+
+        let model = app.get_ui_model();
+        let first_file = model.row_data(1).unwrap();
+        let second_file = model.row_data(2).unwrap();
+        assert!(first_file.duplicate_size);
+        assert!(second_file.duplicate_size);
+        assert!(!first_file.duplicate_name);
+        assert!(!second_file.duplicate_name);
+    }
+
+    #[test]
+    fn deleting_rows_preserves_the_remaining_media_cache() {
+        let mut app = sortable_app();
+        let deleted = app.files[0].path.clone();
+        let retained = app.files[1].path.clone();
+        {
+            let mut cache = app.scan_results.lock().unwrap();
+            for path in [&deleted, &retained] {
+                cache.insert(
+                    path.clone(),
+                    CachedMediaScan {
+                        size: 0,
+                        modified: None,
+                        result: MediaScanResult {
+                            media_date: "2015-07-11 14:31:13".to_string(),
+                            ..MediaScanResult::default()
+                        },
+                    },
+                );
+            }
+        }
+
+        app.remove_deleted_paths(std::slice::from_ref(&deleted));
+
+        assert_eq!(app.files.len(), 1);
+        assert_eq!(app.files[0].path, retained);
+        let cache = app.scan_results.lock().unwrap();
+        assert!(!cache.contains_key(&deleted));
+        assert!(cache.contains_key(&retained));
+        assert!(app.selected_indices.is_empty());
+    }
 }
 
 fn media_metadata_label(status: &str) -> &'static str {

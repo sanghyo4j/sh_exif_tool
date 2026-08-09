@@ -4,11 +4,8 @@ use std::path::Path;
 use chrono::{NaiveDate, NaiveDateTime};
 
 use crate::exif::{
-    create_date_only_exif_tiff,
-    exif_backup_path,
-    read_exif_tiff_metadata,
-    remove_exif_tiff_date_time_original,
-    rewrite_exif_tiff_dates,
+    create_date_only_exif_tiff, exif_backup_path, read_exif_tiff_metadata,
+    remove_exif_tiff_date_time_original, rewrite_exif_tiff_dates,
 };
 
 use super::MediaScanResult;
@@ -59,12 +56,18 @@ pub(super) fn has_png_signature(bytes: &[u8]) -> bool {
 pub(super) fn scan(path: &Path) -> MediaScanResult {
     let sources = read_date_sources(path);
     let media_date = sources.effective_media_date();
-    let metadata_status = if sources.has_existing_date() { "O" } else { "X" };
+    let metadata_status = if sources.has_existing_date() {
+        "O"
+    } else {
+        "X"
+    };
     MediaScanResult {
         media_kind: "png".to_string(),
         media_type: "PNG image".to_string(),
         media_date,
         metadata_status: metadata_status.to_string(),
+        time_interpretation: String::new(),
+        exif_metadata: None,
     }
 }
 
@@ -175,10 +178,7 @@ pub(super) fn write_date_sources(
     Ok(())
 }
 
-pub(super) fn remove_date_metadata(
-    path: &Path,
-    backup_before_changes: bool,
-) -> Result<(), String> {
+pub(super) fn remove_date_metadata(path: &Path, backup_before_changes: bool) -> Result<(), String> {
     let bytes = fs::read(path).map_err(|err| err.to_string())?;
     if !has_png_signature(&bytes) {
         return Err("The selected file is not a valid PNG image.".to_string());
@@ -193,8 +193,7 @@ pub(super) fn remove_date_metadata(
         .is_some_and(|minimum| minimum <= bytes.len())
     {
         let length = read_be_u32(&bytes[offset..offset + 4])
-            .ok_or_else(|| "Invalid PNG chunk length.".to_string())?
-            as usize;
+            .ok_or_else(|| "Invalid PNG chunk length.".to_string())? as usize;
         let data_start = offset + 8;
         let data_end = data_start
             .checked_add(length)
@@ -236,7 +235,10 @@ pub(super) fn remove_date_metadata(
     if backup_before_changes {
         let backup_path = exif_backup_path(path);
         if backup_path.exists() {
-            return Err(format!("Backup file already exists: {}", backup_path.display()));
+            return Err(format!(
+                "Backup file already exists: {}",
+                backup_path.display()
+            ));
         }
         fs::copy(path, &backup_path).map_err(|err| err.to_string())?;
     }
@@ -323,8 +325,7 @@ fn remove_creation_time_chunks(bytes: &[u8]) -> Result<Vec<u8>, String> {
         .is_some_and(|minimum| minimum <= bytes.len())
     {
         let length = read_be_u32(&bytes[offset..offset + 4])
-            .ok_or_else(|| "Invalid PNG chunk length.".to_string())?
-            as usize;
+            .ok_or_else(|| "Invalid PNG chunk length.".to_string())? as usize;
         let data_start = offset + 8;
         let data_end = data_start
             .checked_add(length)
@@ -576,7 +577,9 @@ fn display_to_creation_time(display_value: &str) -> Result<String, String> {
                 .ok()
                 .and_then(|date| date.and_hms_opt(0, 0, 0))
         })
-        .ok_or_else(|| "PNG Media Date must be formatted as YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.".to_string())?;
+        .ok_or_else(|| {
+            "PNG Media Date must be formatted as YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.".to_string()
+        })?;
     Ok(datetime.format(WINDOWS_CREATION_TIME_FORMAT).to_string())
 }
 
@@ -648,8 +651,10 @@ mod tests {
 
     #[test]
     fn writes_and_reads_png_creation_time_media_date() {
-        let path =
-            std::env::temp_dir().join(format!("sh148_exif_file_tool_png_exif_{}.png", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "sh148_exif_file_tool_png_exif_{}.png",
+            std::process::id()
+        ));
         fs::write(&path, minimal_png()).unwrap();
 
         write_media_date(&path, "2012-08-15 02:30:00", true).unwrap();

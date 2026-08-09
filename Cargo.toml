@@ -1,5 +1,5 @@
 [package]
-name = "sh148-exif-file-tool"
+name = "sh148-photo-management-tool"
 version = "0.1.0"
 edition = "2021"
 

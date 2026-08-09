@@ -13,8 +13,8 @@ component IconCell inherits Rectangle {
 
     if is_dir: FolderIcon { y: 4px; }
     if !is_dir && (media_kind == "jpeg" || media_kind == "png"): ImageFileIcon { y: 4px; }
-    if !is_dir && media_kind == "mp4": VideoFileIcon { y: 4px; }
-    if !is_dir && media_kind != "jpeg" && media_kind != "png" && media_kind != "mp4": FileIcon { y: 4px; }
+    if !is_dir && (media_kind == "mp4" || media_kind == "mts"): VideoFileIcon { y: 4px; }
+    if !is_dir && media_kind != "jpeg" && media_kind != "png" && media_kind != "mp4" && media_kind != "mts": FileIcon { y: 4px; }
 }
 
 component MenuRow inherits Rectangle {
@@ -45,6 +45,38 @@ component MenuRow inherits Rectangle {
     }
 }
 
+component SortHeader inherits Rectangle {
+    in property <string> title;
+    in property <int> column;
+    in property <int> active_column;
+    in property <int> sort_direction;
+    in property <bool> centered: false;
+    callback clicked(int);
+
+    background: touch.has-hover ? NativeColors.hover : transparent;
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.title
+            + (root.active_column == root.column && root.sort_direction == 1 ? " ▲"
+            : root.active_column == root.column && root.sort_direction == 2 ? " ▼" : "");
+        color: NativeColors.text;
+        font-size: FontSettings.font_size_pt * 1pt;
+        font-weight: 600;
+        vertical-alignment: center;
+        horizontal-alignment: root.centered ? center : left;
+        overflow: elide;
+    }
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(root.column); }
+    }
+}
+
 export component CustomFileTable inherits Rectangle {
     in property <[FileEntry]> files;
     in-out property <int> selected_index;
@@ -52,6 +84,8 @@ export component CustomFileTable inherits Rectangle {
     in property <int> selected_recyclable_count: 0;
     in property <int> copied_file_count: 0;
     in property <bool> mark_file_date_mismatches: false;
+    in property <int> sort_column: 0;
+    in property <int> sort_direction: 0;
     in-out property <bool> context_menu_visible: false;
 
     callback row_selected(int, bool, bool);
@@ -68,6 +102,7 @@ export component CustomFileTable inherits Rectangle {
     callback apply_requested();
     callback revert_requested();
     callback exit_requested();
+    callback sort_requested(int);
 
     property <length> menu_x: 0px;
     property <length> menu_y: 0px;
@@ -78,13 +113,28 @@ export component CustomFileTable inherits Rectangle {
     background: NativeColors.surface;
     forward-focus: focus_scope;
 
-    end_scroll_timer := Timer {
-        interval: 1ms;
+    public function reveal_selected_row() {
+        if (root.selected_index < 0 || root.selected_index >= root.files.length) {
+            return;
+        }
+        if (list.viewport-y + root.selected_index * 30px < 0px) {
+            list.viewport-y += -(list.viewport-y + root.selected_index * 30px);
+        }
+        if (list.viewport-y + (root.selected_index + 1) * 30px > list.visible-height) {
+            list.viewport-y -= list.viewport-y
+                + (root.selected_index + 1) * 30px
+                - list.visible-height
+                + 2px;
+        }
+    }
+
+    selection_scroll_timer := Timer {
+        interval: 16ms;
         running: false;
 
         triggered => {
             self.running = false;
-            list.viewport-y = min(0px, list.visible-height - list.viewport-height - 2px);
+            root.reveal_selected_row();
         }
     }
 
@@ -115,11 +165,11 @@ export component CustomFileTable inherits Rectangle {
                 spacing: 0px;
 
                 Rectangle { width: 22px; }
-                Text { width: parent.width - 22px - media_date_header.width - size_header.width - modified_header.width - metadata_header.width - 20px; text: "Filename"; color: NativeColors.text; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; overflow: elide; }
-                size_header := Text { width: 78px; text: "Size"; color: NativeColors.text; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; }
-                modified_header := Text { width: 146px; text: "Modified"; color: NativeColors.text; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; }
-                media_date_header := Text { width: 150px; text: "Media Date"; color: NativeColors.text; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; overflow: elide; }
-                metadata_header := Text { width: 68px; text: "Metadata"; color: NativeColors.text; font-size: FontSettings.font_size_pt * 1pt; font-weight: 600; vertical-alignment: center; horizontal-alignment: center; }
+                SortHeader { width: parent.width - 22px - media_date_header.width - size_header.width - modified_header.width - metadata_header.width - 20px; title: "Filename"; column: 1; active_column: root.sort_column; sort_direction: root.sort_direction; clicked(column) => { root.sort_requested(column); } }
+                size_header := SortHeader { width: 78px; title: "Size"; column: 2; active_column: root.sort_column; sort_direction: root.sort_direction; clicked(column) => { root.sort_requested(column); } }
+                modified_header := SortHeader { width: 146px; title: "Modified"; column: 3; active_column: root.sort_column; sort_direction: root.sort_direction; clicked(column) => { root.sort_requested(column); } }
+                media_date_header := SortHeader { width: 150px; title: "Media Date"; column: 4; active_column: root.sort_column; sort_direction: root.sort_direction; clicked(column) => { root.sort_requested(column); } }
+                metadata_header := SortHeader { width: 68px; title: "Metadata"; column: 5; active_column: root.sort_column; sort_direction: root.sort_direction; centered: true; clicked(column) => { root.sort_requested(column); } }
             }
 
             HDivider { y: parent.height - 1px; }
@@ -128,7 +178,7 @@ export component CustomFileTable inherits Rectangle {
         list := ListView {
             width: 100%;
             vertical-stretch: 1;
-            vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
             horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
             for entry[i] in files: Rectangle {
@@ -145,8 +195,8 @@ export component CustomFileTable inherits Rectangle {
                     spacing: 0px;
 
                     IconCell { is_dir: entry.is_dir; media_kind: entry.media_kind; }
-                    Text { width: parent.width - 22px - media_date_cell.width - size_cell.width - modified_cell.width - metadata_cell.width - 20px; text: entry.is_dir && entry.name != "[..]" ? "[" + entry.name + "]" : entry.name; color: NativeColors.text; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
-                    size_cell := Text { width: 78px; text: entry.size; color: NativeColors.secondary_text; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                    Text { width: parent.width - 22px - media_date_cell.width - size_cell.width - modified_cell.width - metadata_cell.width - 20px; text: entry.is_dir && entry.name != "[..]" ? "[" + entry.name + "]" : entry.name; color: entry.duplicate_name ? NativeColors.duplicate : NativeColors.text; font-weight: entry.duplicate_name ? 600 : 400; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                    size_cell := Text { width: 78px; text: entry.size; color: entry.duplicate_size ? NativeColors.duplicate : NativeColors.secondary_text; font-weight: entry.duplicate_size ? 600 : 400; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
                     modified_cell := Rectangle {
                         width: 146px;
                         property <bool> has_date_mismatch: root.mark_file_date_mismatches && !entry.is_dir && entry.created != "-" && entry.modified != "-" && entry.created != entry.modified;
@@ -155,7 +205,8 @@ export component CustomFileTable inherits Rectangle {
                             width: modified_cell.has_date_mismatch ? parent.width - 28px : parent.width;
                             height: 100%;
                             text: entry.modified;
-                            color: NativeColors.secondary_text;
+                            color: entry.duplicate_modified ? NativeColors.duplicate : NativeColors.secondary_text;
+                            font-weight: entry.duplicate_modified ? 600 : 400;
                             font-size: FontSettings.font_size_pt * 1pt;
                             vertical-alignment: center;
                             overflow: elide;
@@ -172,7 +223,7 @@ export component CustomFileTable inherits Rectangle {
                             vertical-alignment: center;
                         }
                     }
-                    media_date_cell := Text { width: 150px; text: entry.media_date; color: NativeColors.secondary_text; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                    media_date_cell := Text { width: 150px; text: entry.media_date; color: entry.duplicate_media_date ? NativeColors.duplicate : NativeColors.secondary_text; font-weight: entry.duplicate_media_date ? 600 : 400; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
                     metadata_cell := Text { width: 68px; text: entry.metadata_status; color: entry.metadata_status == "!" ? NativeColors.danger : NativeColors.secondary_text; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; horizontal-alignment: center; overflow: elide; }
                 }
 
@@ -204,6 +255,54 @@ export component CustomFileTable inherits Rectangle {
 
                 HDivider { y: parent.height - 1px; background: NativeColors.divider; }
             }
+        }
+    }
+
+    if list.viewport-height > list.visible-height: Rectangle {
+        x: parent.width - 12px;
+        y: 30px;
+        width: 12px;
+        height: parent.height - 30px;
+        background: #eef2f5;
+
+        scroll_area := TouchArea {
+            width: 100%;
+            height: 100%;
+
+            pointer-event(event) => {
+                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                    list.viewport-y = -max(
+                        0px,
+                        min(
+                            list.viewport-height - list.visible-height,
+                            self.mouse-y * list.viewport-height / parent.height - list.visible-height / 2
+                        )
+                    );
+                }
+            }
+
+            moved => {
+                if (self.pressed) {
+                    list.viewport-y = -max(
+                        0px,
+                        min(
+                            list.viewport-height - list.visible-height,
+                            self.mouse-y * list.viewport-height / parent.height - list.visible-height / 2
+                        )
+                    );
+                }
+            }
+        }
+
+        Rectangle {
+            x: 2px;
+            y: 4px + (-list.viewport-y)
+                * (parent.height - 8px - self.height)
+                / (list.viewport-height - list.visible-height);
+            width: 8px;
+            height: max(28px, (parent.height - 8px) * list.visible-height / list.viewport-height);
+            border-radius: 4px;
+            background: scroll_area.has-hover ? #7f8f9a : #9aa8b2;
         }
     }
 
@@ -285,27 +384,27 @@ export component CustomFileTable inherits Rectangle {
                 return accept;
             }
             if (event.text == Key.UpArrow) {
-                if (root.selected_index > 0) { root.selected_index -= 1; root.row_selected(root.selected_index, false, false); }
+                if (root.selected_index > 0) { root.selected_index -= 1; root.row_selected(root.selected_index, false, false); root.reveal_selected_row(); selection_scroll_timer.restart(); }
                 return accept;
             }
             if (event.text == Key.DownArrow) {
-                if (root.selected_index < root.files.length - 1) { root.selected_index += 1; root.row_selected(root.selected_index, false, false); }
+                if (root.selected_index < root.files.length - 1) { root.selected_index += 1; root.row_selected(root.selected_index, false, false); root.reveal_selected_row(); selection_scroll_timer.restart(); }
                 return accept;
             }
             if (event.text == Key.Home) {
-                if (root.files.length > 0) { root.selected_index = 0; root.row_selected(root.selected_index, false, false); list.viewport-y = 0px; }
+                if (root.files.length > 0) { root.selected_index = 0; root.row_selected(root.selected_index, false, false); root.reveal_selected_row(); selection_scroll_timer.restart(); }
                 return accept;
             }
             if (event.text == Key.End) {
-                if (root.files.length > 0) { root.selected_index = root.files.length - 1; root.row_selected(root.selected_index, false, false); end_scroll_timer.restart(); }
+                if (root.files.length > 0) { root.selected_index = root.files.length - 1; root.row_selected(root.selected_index, false, false); root.reveal_selected_row(); selection_scroll_timer.restart(); }
                 return accept;
             }
             if (event.text == Key.PageUp) {
-                if (root.files.length > 0) { root.selected_index = max(0, root.selected_index - max(1, floor(list.visible-height / 30px) - 1)); root.row_selected(root.selected_index, false, false); list.viewport-y = max(list.visible-height - list.viewport-height, min(0px, -root.selected_index * 30px)); }
+                if (root.files.length > 0) { root.selected_index = max(0, root.selected_index - max(1, floor(list.visible-height / 30px) - 1)); root.row_selected(root.selected_index, false, false); root.reveal_selected_row(); selection_scroll_timer.restart(); }
                 return accept;
             }
             if (event.text == Key.PageDown) {
-                if (root.files.length > 0) { root.selected_index = min(root.files.length - 1, root.selected_index + max(1, floor(list.visible-height / 30px) - 1)); root.row_selected(root.selected_index, false, false); list.viewport-y = max(list.visible-height - list.viewport-height, -(root.selected_index + 1) * 30px + list.visible-height); }
+                if (root.files.length > 0) { root.selected_index = min(root.files.length - 1, root.selected_index + max(1, floor(list.visible-height / 30px) - 1)); root.row_selected(root.selected_index, false, false); root.reveal_selected_row(); selection_scroll_timer.restart(); }
                 return accept;
             }
             if (event.text == Key.Return) { if (root.selected_index >= 0 && root.selected_index < root.files.length) { root.row_activated(root.selected_index); } return accept; }

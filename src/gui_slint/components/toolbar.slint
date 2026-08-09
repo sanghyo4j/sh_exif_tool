@@ -1,0 +1,112 @@
+import { HDivider } from "dividers.slint";
+import { NativeColors } from "../theme.slint";
+
+component ToolbarButton inherits Rectangle {
+    in property <bool> enabled: true;
+    in property <image> icon_source;
+    out property <bool> hovered: area.has-hover && root.enabled;
+    callback clicked();
+
+    width: 28px;
+    height: 26px;
+    background: area.pressed && root.enabled ? #c7e0f4 : (root.hovered ? NativeColors.hover : #00000000);
+    border-width: root.hovered ? 1px : 0px;
+    border-color: NativeColors.border;
+    border-radius: 3px;
+    opacity: root.enabled ? 1 : 0.38;
+
+    Image {
+        x: 6px;
+        y: 5px;
+        width: 16px;
+        height: 16px;
+        source: root.icon_source;
+        image-fit: contain;
+    }
+
+    area := TouchArea {
+        enabled: root.enabled;
+        width: 100%;
+        height: 100%;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component Toolbar inherits Rectangle {
+    in property <bool> save_enabled: false;
+    callback save();
+    callback revert();
+    callback open_folder();
+    callback reload();
+
+    height: 30px;
+    background: NativeColors.subtle_surface;
+
+    property <string> hover_text: open_button.hovered
+        ? "Open Folder (Ctrl+Shift+O)"
+        : (refresh_button.hovered
+            ? "Refresh Folder (F5)"
+            : (save_button.hovered
+                ? "Apply Changes (Ctrl+S)"
+                : (revert_button.hovered ? "Revert Changes (Ctrl+R)" : "")));
+    property <length> hover_x: open_button.hovered ? 4px : (refresh_button.hovered ? 34px : (save_button.hovered ? 72px : 102px));
+
+    open_button := ToolbarButton {
+        x: 4px;
+        y: 2px;
+        icon_source: @image-url("../assets/toolbar-folder.svg");
+        clicked => { root.open_folder(); }
+    }
+
+    refresh_button := ToolbarButton {
+        x: 34px;
+        y: 2px;
+        icon_source: @image-url("../assets/toolbar-folder-refresh.svg");
+        clicked => { root.reload(); }
+    }
+
+    Rectangle {
+        x: 67px;
+        y: 5px;
+        width: 1px;
+        height: 20px;
+        background: NativeColors.divider;
+    }
+
+    save_button := ToolbarButton {
+        x: 72px;
+        y: 2px;
+        icon_source: @image-url("../assets/toolbar-save.svg");
+        enabled: root.save_enabled;
+        clicked => { root.save(); }
+    }
+
+    revert_button := ToolbarButton {
+        x: 102px;
+        y: 2px;
+        icon_source: @image-url("../assets/toolbar-revert.svg");
+        enabled: root.save_enabled;
+        clicked => { root.revert(); }
+    }
+
+    if root.hover_text != "": Rectangle {
+        x: root.hover_x;
+        y: 31px;
+        width: 176px;
+        height: 24px;
+        background: #202020e0;
+        border-radius: 3px;
+
+        Text {
+            width: 100%;
+            height: 100%;
+            text: root.hover_text;
+            color: white;
+            font-size: 8pt;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    HDivider { y: parent.height - self.height; }
+}

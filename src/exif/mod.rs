@@ -1,7 +1,7 @@
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use std::fs;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 const DISPLAY_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const EXIF_DATETIME_FORMAT: &str = "%Y:%m:%d %H:%M:%S";
@@ -111,10 +111,10 @@ pub fn read_exif_metadata(path: &Path) -> ExifMetadata {
 
 pub fn extract_embedded_thumbnail(path: &Path) -> Result<PathBuf, String> {
     let bytes = fs::read(path).map_err(|err| err.to_string())?;
-    let (_, exif_end) = find_exif_app1_range(&bytes)
-        .ok_or_else(|| "JPEG EXIF data was not found.".to_string())?;
-    let tiff_start = find_exif_tiff_start(&bytes)
-        .ok_or_else(|| "JPEG EXIF data was not found.".to_string())?;
+    let (_, exif_end) =
+        find_exif_app1_range(&bytes).ok_or_else(|| "JPEG EXIF data was not found.".to_string())?;
+    let tiff_start =
+        find_exif_tiff_start(&bytes).ok_or_else(|| "JPEG EXIF data was not found.".to_string())?;
     let tiff_end = exif_end;
     let tiff = bytes
         .get(tiff_start..tiff_end)
@@ -163,10 +163,10 @@ pub fn extract_embedded_thumbnail(path: &Path) -> Result<PathBuf, String> {
 
 pub fn read_embedded_thumbnail(path: &Path) -> Result<Vec<u8>, String> {
     let bytes = fs::read(path).map_err(|err| err.to_string())?;
-    let (_, exif_end) = find_exif_app1_range(&bytes)
-        .ok_or_else(|| "JPEG EXIF data was not found.".to_string())?;
-    let tiff_start = find_exif_tiff_start(&bytes)
-        .ok_or_else(|| "JPEG EXIF data was not found.".to_string())?;
+    let (_, exif_end) =
+        find_exif_app1_range(&bytes).ok_or_else(|| "JPEG EXIF data was not found.".to_string())?;
+    let tiff_start =
+        find_exif_tiff_start(&bytes).ok_or_else(|| "JPEG EXIF data was not found.".to_string())?;
     let tiff = bytes
         .get(tiff_start..exif_end)
         .ok_or_else(|| "The EXIF TIFF data is truncated.".to_string())?;
@@ -185,14 +185,15 @@ fn thumbnail_extracted_software_value(existing: &str) -> String {
 }
 
 fn embedded_jpeg_thumbnail(tiff: &[u8]) -> Result<&[u8], String> {
-    let endian = read_tiff_endian(tiff)
-        .ok_or_else(|| "The EXIF TIFF byte order is invalid.".to_string())?;
+    let endian =
+        read_tiff_endian(tiff).ok_or_else(|| "The EXIF TIFF byte order is invalid.".to_string())?;
     if read_u16(tiff, 2, endian) != Some(42) {
         return Err("The EXIF TIFF header is invalid.".to_string());
     }
 
     let ifd0_offset = read_u32(tiff, 4, endian)
-        .ok_or_else(|| "The EXIF IFD0 offset is missing.".to_string())? as usize;
+        .ok_or_else(|| "The EXIF IFD0 offset is missing.".to_string())?
+        as usize;
     let ifd0_count = read_u16(tiff, ifd0_offset, endian)
         .ok_or_else(|| "The EXIF IFD0 is truncated.".to_string())? as usize;
     let next_ifd_position = ifd0_offset
@@ -201,20 +202,23 @@ fn embedded_jpeg_thumbnail(tiff: &[u8]) -> Result<&[u8], String> {
         .ok_or_else(|| "The EXIF IFD0 is too large.".to_string())?;
     let ifd1_offset = read_u32(tiff, next_ifd_position, endian)
         .filter(|offset| *offset != 0)
-        .ok_or_else(|| "No embedded EXIF thumbnail was found.".to_string())? as usize;
+        .ok_or_else(|| "No embedded EXIF thumbnail was found.".to_string())?
+        as usize;
     let entries = read_ifd_entries(tiff, ifd1_offset, endian)
         .ok_or_else(|| "The EXIF thumbnail directory is invalid.".to_string())?;
     let thumbnail_offset = entries
         .iter()
         .find(|entry| entry.tag == 0x0201)
         .and_then(Entry::as_long)
-        .ok_or_else(|| "The EXIF thumbnail offset was not found.".to_string())? as usize;
+        .ok_or_else(|| "The EXIF thumbnail offset was not found.".to_string())?
+        as usize;
     let thumbnail_length = entries
         .iter()
         .find(|entry| entry.tag == 0x0202)
         .and_then(Entry::as_long)
         .filter(|length| *length > 0)
-        .ok_or_else(|| "The EXIF thumbnail length was not found.".to_string())? as usize;
+        .ok_or_else(|| "The EXIF thumbnail length was not found.".to_string())?
+        as usize;
     let thumbnail_end = thumbnail_offset
         .checked_add(thumbnail_length)
         .ok_or_else(|| "The EXIF thumbnail range is too large.".to_string())?;
@@ -289,12 +293,14 @@ where
 {
     let matching_file_time = matching_created_modified_time(path);
     let mut bytes = fs::read(path).map_err(|err| err.to_string())?;
-    let tiff_start = find_exif_tiff_start(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
+    let tiff_start =
+        find_exif_tiff_start(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
     let tiff = bytes
         .get(tiff_start..)
         .ok_or_else(|| "Invalid EXIF data offset.".to_string())?;
     let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid TIFF header.".to_string())?;
-    let ifd0_offset = read_u32(tiff, 4, endian).ok_or_else(|| "Invalid IFD0 offset.".to_string())? as usize;
+    let ifd0_offset =
+        read_u32(tiff, 4, endian).ok_or_else(|| "Invalid IFD0 offset.".to_string())? as usize;
 
     let mut writes = Vec::new();
     let ifd0_entries = read_ifd_entries(tiff, ifd0_offset, endian)
@@ -376,8 +382,14 @@ fn restore_matching_file_time(
 fn writable_entry_range(entry: &Entry<'_>, value_len: usize) -> Option<(usize, usize)> {
     match entry.field_type {
         2 => writable_ascii_range(entry, value_len),
-        3 if entry.count == 1 && value_len <= 2 => entry.data.get(entry.value_field..entry.value_field + 2).map(|_| (entry.value_field, 2)),
-        4 if entry.count == 1 && value_len <= 4 => entry.data.get(entry.value_field..entry.value_field + 4).map(|_| (entry.value_field, 4)),
+        3 if entry.count == 1 && value_len <= 2 => entry
+            .data
+            .get(entry.value_field..entry.value_field + 2)
+            .map(|_| (entry.value_field, 2)),
+        4 if entry.count == 1 && value_len <= 4 => entry
+            .data
+            .get(entry.value_field..entry.value_field + 4)
+            .map(|_| (entry.value_field, 4)),
         5 if value_len <= entry.count as usize * 8 => {
             let offset = read_u32(entry.data, entry.value_field, entry.endian)? as usize;
             let len = entry.count as usize * 8;
@@ -407,7 +419,12 @@ fn write_exif_short_tag(path: &Path, tags: &[u16], value: u16) -> Result<(), Str
     })
 }
 
-fn write_exif_rational_tag(path: &Path, tags: &[u16], numerator: u32, denominator: u32) -> Result<(), String> {
+fn write_exif_rational_tag(
+    path: &Path,
+    tags: &[u16],
+    numerator: u32,
+    denominator: u32,
+) -> Result<(), String> {
     write_exif_tag_values(path, tags, |entry| {
         if entry.field_type == 5 && entry.count == 1 {
             let mut bytes = Vec::with_capacity(8);
@@ -433,18 +450,76 @@ pub fn write_taken_date(path: &Path, display_value: &str) -> Result<(), String> 
     write_exif_ascii_tags(path, &[0x0132, 0x9003, 0x9004], &exif_value)
 }
 
+pub fn write_taken_date_preserving_exif(
+    path: &Path,
+    display_value: &str,
+    backup_before_changes: bool,
+) -> Result<(), String> {
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let tiff = find_exif_tiff(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
+    let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid TIFF header.".to_string())?;
+    let ifd0_offset = read_u32(tiff, 4, endian)
+        .map(|value| value as usize)
+        .ok_or_else(|| "Invalid IFD0 offset.".to_string())?;
+    let ifd0_entries = read_ifd_entries(tiff, ifd0_offset, endian)
+        .ok_or_else(|| "Unable to read IFD0 entries.".to_string())?;
+    let image_date_present = ifd0_entries
+        .iter()
+        .any(|entry| entry.tag == 0x0132 && writable_entry_range(entry, 20).is_some());
+    let exif_entries = ifd0_entries
+        .iter()
+        .find(|entry| entry.tag == 0x8769)
+        .and_then(Entry::as_long)
+        .and_then(|offset| read_ifd_entries(tiff, offset as usize, endian))
+        .unwrap_or_default();
+    let original_present = exif_entries
+        .iter()
+        .any(|entry| entry.tag == 0x9003 && writable_entry_range(entry, 20).is_some());
+    let digitized_present = exif_entries
+        .iter()
+        .any(|entry| entry.tag == 0x9004 && writable_entry_range(entry, 20).is_some());
+
+    if image_date_present && original_present && digitized_present {
+        return write_taken_date(path, display_value);
+    }
+
+    let original_file_metadata = fs::metadata(path).map_err(|err| err.to_string())?;
+    let original_created = original_file_metadata.created().ok();
+    let original_modified = original_file_metadata.modified().ok();
+    let updated_tiff = rewrite_exif_tiff_taken_dates(tiff, display_value)?;
+    let segment = build_exif_app1_from_tiff(&updated_tiff)?;
+    let updated = replace_or_insert_exif_app1(&bytes, &segment)?;
+
+    if backup_before_changes {
+        let backup_path = exif_backup_path(path);
+        if !backup_path.exists() {
+            fs::copy(path, &backup_path).map_err(|err| err.to_string())?;
+        }
+    }
+
+    fs::write(path, &updated).map_err(|err| err.to_string())?;
+    if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
+        let _ = fs::write(path, &bytes);
+        let _ = crate::fs::set_file_times(path, original_created, original_modified);
+        return Err(err);
+    }
+    Ok(())
+}
+
 fn write_gps_tag_value<F>(path: &Path, tag: u16, make_bytes: F) -> Result<(), String>
 where
     F: FnOnce(&Entry<'_>) -> Option<Vec<u8>>,
 {
     let matching_file_time = matching_created_modified_time(path);
     let mut bytes = fs::read(path).map_err(|err| err.to_string())?;
-    let tiff_start = find_exif_tiff_start(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
+    let tiff_start =
+        find_exif_tiff_start(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
     let tiff = bytes
         .get(tiff_start..)
         .ok_or_else(|| "Invalid EXIF data offset.".to_string())?;
     let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid TIFF header.".to_string())?;
-    let ifd0_offset = read_u32(tiff, 4, endian).ok_or_else(|| "Invalid IFD0 offset.".to_string())? as usize;
+    let ifd0_offset =
+        read_u32(tiff, 4, endian).ok_or_else(|| "Invalid IFD0 offset.".to_string())? as usize;
     let ifd0_entries = read_ifd_entries(tiff, ifd0_offset, endian)
         .ok_or_else(|| "Unable to read IFD0 entries.".to_string())?;
     let gps_offset = ifd0_entries
@@ -514,11 +589,7 @@ pub fn write_gps_time_stamp(path: &Path, display_value: &str) -> Result<(), Stri
     })
 }
 
-pub fn write_gps_date_time(
-    path: &Path,
-    date_value: &str,
-    time_value: &str,
-) -> Result<(), String> {
+pub fn write_gps_date_time(path: &Path, date_value: &str, time_value: &str) -> Result<(), String> {
     let original = fs::read(path).map_err(|err| err.to_string())?;
     let file_metadata = fs::metadata(path).map_err(|err| err.to_string())?;
     let original_created = file_metadata.created().ok();
@@ -528,8 +599,9 @@ pub fn write_gps_date_time(
     if let Err(err) = write_gps_time_stamp(path, time_value) {
         fs::write(path, original)
             .map_err(|rollback_err| format!("{err} Rollback failed: {rollback_err}"))?;
-        crate::fs::set_file_times(path, original_created, original_modified)
-            .map_err(|rollback_err| format!("{err} Rollback timestamp restore failed: {rollback_err}"))?;
+        crate::fs::set_file_times(path, original_created, original_modified).map_err(
+            |rollback_err| format!("{err} Rollback timestamp restore failed: {rollback_err}"),
+        )?;
         return Err(err);
     }
     Ok(())
@@ -598,14 +670,16 @@ pub fn write_color_space(path: &Path, value: &str) -> Result<(), String> {
 pub fn remove_gps_information(path: &Path) -> Result<(), String> {
     let matching_file_time = matching_created_modified_time(path);
     let mut bytes = fs::read(path).map_err(|err| err.to_string())?;
-    let tiff_start = find_exif_tiff_start(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
+    let tiff_start =
+        find_exif_tiff_start(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
 
     let ranges = {
         let tiff = bytes
             .get(tiff_start..)
             .ok_or_else(|| "Invalid EXIF data offset.".to_string())?;
         let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid TIFF header.".to_string())?;
-        let ifd0_offset = read_u32(tiff, 4, endian).ok_or_else(|| "Invalid IFD0 offset.".to_string())? as usize;
+        let ifd0_offset =
+            read_u32(tiff, 4, endian).ok_or_else(|| "Invalid IFD0 offset.".to_string())? as usize;
         let ifd0_entries = read_ifd_entries(tiff, ifd0_offset, endian)
             .ok_or_else(|| "Unable to read IFD0 entries.".to_string())?;
 
@@ -613,7 +687,11 @@ pub fn remove_gps_information(path: &Path) -> Result<(), String> {
             return Ok(());
         };
 
-        let Some(gps_offset) = gps_entry.as_long().map(|value| value as usize).filter(|value| *value > 0) else {
+        let Some(gps_offset) = gps_entry
+            .as_long()
+            .map(|value| value as usize)
+            .filter(|value| *value > 0)
+        else {
             return Ok(());
         };
 
@@ -693,7 +771,10 @@ pub fn remove_exif_metadata(path: &Path, backup_before_changes: bool) -> Result<
 
     let backup_path = exif_backup_path(path);
     if backup_path.exists() {
-        return Err(format!("Backup file already exists: {}", backup_path.display()));
+        return Err(format!(
+            "Backup file already exists: {}",
+            backup_path.display()
+        ));
     }
     fs::rename(path, &backup_path).map_err(|err| err.to_string())?;
     if let Err(err) = fs::write(path, updated) {
@@ -736,7 +817,10 @@ pub fn rewrite_basic_exif_metadata(
 
     let backup_path = exif_backup_path(path);
     if backup_path.exists() {
-        return Err(format!("Backup file already exists: {}", backup_path.display()));
+        return Err(format!(
+            "Backup file already exists: {}",
+            backup_path.display()
+        ));
     }
 
     fs::rename(path, &backup_path).map_err(|err| err.to_string())?;
@@ -747,10 +831,15 @@ pub fn rewrite_basic_exif_metadata(
     Ok(path.to_path_buf())
 }
 
-pub fn rewrite_generated_basic_exif_metadata(path: &Path, metadata: &ExifMetadata) -> Result<(), String> {
+pub fn rewrite_generated_basic_exif_metadata(
+    path: &Path,
+    metadata: &ExifMetadata,
+) -> Result<(), String> {
     let matching_file_time = matching_created_modified_time(path);
     if !is_generated_new_exif_path(path) {
-        return Err("Refusing to rewrite EXIF in place unless this is a generated EXIF file.".to_string());
+        return Err(
+            "Refusing to rewrite EXIF in place unless this is a generated EXIF file.".to_string(),
+        );
     }
 
     let bytes = fs::read(path).map_err(|err| err.to_string())?;
@@ -894,9 +983,14 @@ fn is_basic_generated_tiff(tiff: &[u8]) -> bool {
     }
 
     const BASIC_IFD0_TAGS: &[u16] = &[0x010f, 0x0110, 0x0112, 0x0131, 0x0132, 0x013b, 0x8769];
-    const BASIC_EXIF_TAGS: &[u16] = &[0x829a, 0x829d, 0x8827, 0x9003, 0x9004, 0x9207, 0x9209, 0x920a, 0xa001, 0xa434];
+    const BASIC_EXIF_TAGS: &[u16] = &[
+        0x829a, 0x829d, 0x8827, 0x9003, 0x9004, 0x9207, 0x9209, 0x920a, 0xa001, 0xa434,
+    ];
 
-    if ifd0_entries.iter().any(|entry| !BASIC_IFD0_TAGS.contains(&entry.tag)) {
+    if ifd0_entries
+        .iter()
+        .any(|entry| !BASIC_IFD0_TAGS.contains(&entry.tag))
+    {
         return false;
     }
 
@@ -909,7 +1003,10 @@ fn is_basic_generated_tiff(tiff: &[u8]) -> bool {
         let Some(exif_entries) = read_ifd_entries(tiff, exif_ifd_offset, endian) else {
             return false;
         };
-        if exif_entries.iter().any(|entry| !BASIC_EXIF_TAGS.contains(&entry.tag)) {
+        if exif_entries
+            .iter()
+            .any(|entry| !BASIC_EXIF_TAGS.contains(&entry.tag))
+        {
             return false;
         }
     }
@@ -935,8 +1032,14 @@ fn parse_exif_rational_value(value: &str) -> Result<(u32, u32), String> {
     let value = value.trim();
     let value = value.strip_suffix('s').unwrap_or(value).trim();
     if let Some((num_str, den_str)) = value.split_once('/') {
-        let num = num_str.trim().parse::<u32>().map_err(|_| "Expected rational value like 1/125 or 3/2.".to_string())?;
-        let den = den_str.trim().parse::<u32>().map_err(|_| "Expected rational value like 1/125 or 3/2.".to_string())?;
+        let num = num_str
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| "Expected rational value like 1/125 or 3/2.".to_string())?;
+        let den = den_str
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| "Expected rational value like 1/125 or 3/2.".to_string())?;
         return Ok((num, den));
     }
 
@@ -1184,7 +1287,11 @@ fn find_exif_app1_range(bytes: &[u8]) -> Option<(usize, usize)> {
 
         let segment_start = pos + 4;
         let segment_end = pos + 2 + len;
-        if marker == 0xe1 && bytes.get(segment_start..segment_end)?.starts_with(b"Exif\0\0") {
+        if marker == 0xe1
+            && bytes
+                .get(segment_start..segment_end)?
+                .starts_with(b"Exif\0\0")
+        {
             return Some((pos, segment_end));
         }
 
@@ -1254,7 +1361,9 @@ struct TiffIfdBuilder {
 
 impl TiffIfdBuilder {
     fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     fn add_writable_ascii(&mut self, tag: u16, value: &str, min_len: usize) {
@@ -1506,15 +1615,28 @@ pub(crate) fn create_date_only_exif_tiff(display_value: &str) -> Result<Vec<u8>,
     rewrite_exif_tiff_dates(&tiff, display_value)
 }
 
-pub(crate) fn rewrite_exif_tiff_dates(
+pub(crate) fn rewrite_exif_tiff_dates(tiff: &[u8], display_value: &str) -> Result<Vec<u8>, String> {
+    rewrite_exif_tiff_date_tags(tiff, display_value, false)
+}
+
+fn rewrite_exif_tiff_taken_dates(
     tiff: &[u8],
     display_value: &str,
+) -> Result<Vec<u8>, String> {
+    rewrite_exif_tiff_date_tags(tiff, display_value, true)
+}
+
+fn rewrite_exif_tiff_date_tags(
+    tiff: &[u8],
+    display_value: &str,
+    include_all_taken_date_tags: bool,
 ) -> Result<Vec<u8>, String> {
     let exif_value = display_datetime_to_exif(display_value)?;
     let mut date_bytes = exif_value.into_bytes();
     date_bytes.push(0);
 
-    let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid PNG eXIf TIFF header.".to_string())?;
+    let endian =
+        read_tiff_endian(tiff).ok_or_else(|| "Invalid PNG eXIf TIFF header.".to_string())?;
     if read_u16(tiff, 2, endian) != Some(42) {
         return Err("Invalid PNG eXIf TIFF marker.".to_string());
     }
@@ -1523,14 +1645,13 @@ pub(crate) fn rewrite_exif_tiff_dates(
         .ok_or_else(|| "Invalid PNG eXIf IFD0 offset.".to_string())?;
     let old_ifd0 = raw_ifd_entries(tiff, old_ifd0_offset, endian)?;
     let old_next_ifd = raw_ifd_next_offset(tiff, old_ifd0_offset, old_ifd0.len(), endian)?;
-    let old_exif_offset = read_ifd_entries(tiff, old_ifd0_offset, endian)
-        .and_then(|entries| {
-            entries
-                .into_iter()
-                .find(|entry| entry.tag == 0x8769)
-                .and_then(|entry| entry.as_long())
-                .map(|value| value as usize)
-        });
+    let old_exif_offset = read_ifd_entries(tiff, old_ifd0_offset, endian).and_then(|entries| {
+        entries
+            .into_iter()
+            .find(|entry| entry.tag == 0x8769)
+            .and_then(|entry| entry.as_long())
+            .map(|value| value as usize)
+    });
     let old_exif = match old_exif_offset {
         Some(offset) => raw_ifd_entries(tiff, offset, endian)?,
         None => Vec::new(),
@@ -1542,11 +1663,15 @@ pub(crate) fn rewrite_exif_tiff_dates(
 
     let mut ifd0_entries: Vec<(u16, [u8; 12])> = old_ifd0
         .into_iter()
-        .filter(|(tag, _)| *tag != 0x8769)
+        .filter(|(tag, _)| {
+            *tag != 0x8769 && (!include_all_taken_date_tags || *tag != 0x0132)
+        })
         .collect();
     let mut exif_entries: Vec<(u16, [u8; 12])> = old_exif
         .into_iter()
-        .filter(|(tag, _)| *tag != 0x9003)
+        .filter(|(tag, _)| {
+            *tag != 0x9003 && (!include_all_taken_date_tags || *tag != 0x9004)
+        })
         .collect();
 
     let mut output = tiff.to_vec();
@@ -1556,10 +1681,14 @@ pub(crate) fn rewrite_exif_tiff_dates(
     let new_ifd0_offset = output.len();
     let ifd0_count = ifd0_entries
         .len()
-        .checked_add(1)
+        .checked_add(if include_all_taken_date_tags { 2 } else { 1 })
         .ok_or_else(|| "PNG eXIf contains too many IFD0 entries.".to_string())?;
     let ifd0_table_len = 2usize
-        .checked_add(ifd0_count.checked_mul(12).ok_or_else(|| "PNG eXIf IFD0 is too large.".to_string())?)
+        .checked_add(
+            ifd0_count
+                .checked_mul(12)
+                .ok_or_else(|| "PNG eXIf IFD0 is too large.".to_string())?,
+        )
         .and_then(|value| value.checked_add(4))
         .ok_or_else(|| "PNG eXIf IFD0 is too large.".to_string())?;
     let new_exif_offset = new_ifd0_offset
@@ -1571,37 +1700,82 @@ pub(crate) fn rewrite_exif_tiff_dates(
         0x8769,
         make_tiff_entry(0x8769, 4, 1, new_exif_offset as u32, endian),
     ));
-    ifd0_entries.sort_by_key(|(tag, _)| *tag);
-    append_raw_ifd(&mut output, new_ifd0_offset, &ifd0_entries, old_next_ifd, endian)?;
-    while output.len() < new_exif_offset {
-        output.push(0);
-    }
 
     let exif_count = exif_entries
         .len()
-        .checked_add(1)
+        .checked_add(if include_all_taken_date_tags { 2 } else { 1 })
         .ok_or_else(|| "PNG eXIf contains too many Exif IFD entries.".to_string())?;
     let exif_table_len = 2usize
-        .checked_add(exif_count.checked_mul(12).ok_or_else(|| "PNG eXIf Exif IFD is too large.".to_string())?)
+        .checked_add(
+            exif_count
+                .checked_mul(12)
+                .ok_or_else(|| "PNG eXIf Exif IFD is too large.".to_string())?,
+        )
         .and_then(|value| value.checked_add(4))
         .ok_or_else(|| "PNG eXIf Exif IFD is too large.".to_string())?;
     let date_offset = new_exif_offset
         .checked_add(exif_table_len)
         .ok_or_else(|| "PNG eXIf is too large.".to_string())?;
+    if include_all_taken_date_tags {
+        ifd0_entries.push((
+            0x0132,
+            make_tiff_entry(
+                0x0132,
+                2,
+                date_bytes.len() as u32,
+                date_offset as u32,
+                endian,
+            ),
+        ));
+    }
+    ifd0_entries.sort_by_key(|(tag, _)| *tag);
+    append_raw_ifd(
+        &mut output,
+        new_ifd0_offset,
+        &ifd0_entries,
+        old_next_ifd,
+        endian,
+    )?;
+    while output.len() < new_exif_offset {
+        output.push(0);
+    }
     exif_entries.push((
         0x9003,
-        make_tiff_entry(0x9003, 2, date_bytes.len() as u32, date_offset as u32, endian),
+        make_tiff_entry(
+            0x9003,
+            2,
+            date_bytes.len() as u32,
+            date_offset as u32,
+            endian,
+        ),
     ));
+    if include_all_taken_date_tags {
+        exif_entries.push((
+            0x9004,
+            make_tiff_entry(
+                0x9004,
+                2,
+                date_bytes.len() as u32,
+                date_offset as u32,
+                endian,
+            ),
+        ));
+    }
     exif_entries.sort_by_key(|(tag, _)| *tag);
-    append_raw_ifd(&mut output, new_exif_offset, &exif_entries, old_exif_next, endian)?;
+    append_raw_ifd(
+        &mut output,
+        new_exif_offset,
+        &exif_entries,
+        old_exif_next,
+        endian,
+    )?;
     output.extend_from_slice(&date_bytes);
     write_u32_at(&mut output, 4, new_ifd0_offset as u32, endian)?;
     Ok(output)
 }
 
 fn rewrite_exif_tiff_software(tiff: &[u8], value: &str) -> Result<Vec<u8>, String> {
-    let endian = read_tiff_endian(tiff)
-        .ok_or_else(|| "Invalid EXIF TIFF header.".to_string())?;
+    let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid EXIF TIFF header.".to_string())?;
     if read_u16(tiff, 2, endian) != Some(42) {
         return Err("Invalid EXIF TIFF marker.".to_string());
     }
@@ -1648,25 +1822,17 @@ fn rewrite_exif_tiff_software(tiff: &[u8], value: &str) -> Result<Vec<u8>, Strin
             2,
             u32::try_from(software_bytes.len())
                 .map_err(|_| "Software metadata is too large.".to_string())?,
-            u32::try_from(software_offset)
-                .map_err(|_| "EXIF data is too large.".to_string())?,
+            u32::try_from(software_offset).map_err(|_| "EXIF data is too large.".to_string())?,
             endian,
         ),
     ));
     entries.sort_by_key(|(tag, _)| *tag);
-    append_raw_ifd(
-        &mut output,
-        new_ifd0_offset,
-        &entries,
-        old_next_ifd,
-        endian,
-    )?;
+    append_raw_ifd(&mut output, new_ifd0_offset, &entries, old_next_ifd, endian)?;
     output.extend_from_slice(&software_bytes);
     write_u32_at(
         &mut output,
         4,
-        u32::try_from(new_ifd0_offset)
-            .map_err(|_| "EXIF data is too large.".to_string())?,
+        u32::try_from(new_ifd0_offset).map_err(|_| "EXIF data is too large.".to_string())?,
         endian,
     )?;
     Ok(output)
@@ -1715,7 +1881,12 @@ fn rewrite_exif_tiff_removing_tags(
             .into_iter()
             .filter(|(tag, _)| !exif_tags.contains(tag))
             .collect();
-        let next = raw_ifd_next_offset(tiff, offset, raw_ifd_entries(tiff, offset, endian)?.len(), endian)?;
+        let next = raw_ifd_next_offset(
+            tiff,
+            offset,
+            raw_ifd_entries(tiff, offset, endian)?.len(),
+            endian,
+        )?;
         let new_offset = output.len();
         append_raw_ifd(&mut output, new_offset, &entries, next, endian)?;
         Some(new_offset)
@@ -1745,11 +1916,7 @@ fn rewrite_exif_tiff_removing_tags(
     }
     let mut new_ifd0: Vec<_> = old_ifd0
         .into_iter()
-        .filter(|(tag, _)| {
-            !ifd0_tags.contains(tag)
-                && *tag != 0x8769
-                && *tag != 0x8825
-        })
+        .filter(|(tag, _)| !ifd0_tags.contains(tag) && *tag != 0x8769 && *tag != 0x8825)
         .collect();
     if let Some(offset) = new_exif_offset {
         let offset = u32::try_from(offset).map_err(|_| "EXIF data is too large.".to_string())?;
@@ -1761,7 +1928,13 @@ fn rewrite_exif_tiff_removing_tags(
     }
     new_ifd0.sort_by_key(|(tag, _)| *tag);
     let new_ifd0_offset = output.len();
-    append_raw_ifd(&mut output, new_ifd0_offset, &new_ifd0, old_ifd0_next, endian)?;
+    append_raw_ifd(
+        &mut output,
+        new_ifd0_offset,
+        &new_ifd0,
+        old_ifd0_next,
+        endian,
+    )?;
     write_u32_at(
         &mut output,
         4,
@@ -1822,16 +1995,11 @@ fn raw_ifd_next_offset(
         .checked_add(2)
         .and_then(|value| value.checked_add(count.checked_mul(12)?))
         .ok_or_else(|| "Invalid PNG eXIf next IFD offset.".to_string())?;
-    read_u32(tiff, position, endian).ok_or_else(|| "PNG eXIf next IFD offset is truncated.".to_string())
+    read_u32(tiff, position, endian)
+        .ok_or_else(|| "PNG eXIf next IFD offset is truncated.".to_string())
 }
 
-fn make_tiff_entry(
-    tag: u16,
-    field_type: u16,
-    count: u32,
-    value: u32,
-    endian: Endian,
-) -> [u8; 12] {
+fn make_tiff_entry(tag: u16, field_type: u16, count: u32, value: u32, endian: Endian) -> [u8; 12] {
     let mut entry = [0u8; 12];
     write_u16_bytes(&mut entry[0..2], tag, endian);
     write_u16_bytes(&mut entry[2..4], field_type, endian);
@@ -1941,7 +2109,12 @@ fn parse_tiff(data: &[u8]) -> Option<ExifMetadata> {
             0x010e => meta.image_description = entry.as_ascii().unwrap_or_else(empty_value),
             0x010f => meta.camera_make = entry.as_ascii().unwrap_or_else(empty_value),
             0x0110 => meta.camera_model = entry.as_ascii().unwrap_or_else(empty_value),
-            0x0112 => meta.orientation = entry.as_short().map(format_orientation).unwrap_or_else(empty_value),
+            0x0112 => {
+                meta.orientation = entry
+                    .as_short()
+                    .map(format_orientation)
+                    .unwrap_or_else(empty_value)
+            }
             0x0131 => meta.software = entry.as_ascii().unwrap_or_else(empty_value),
             0x0132 => {
                 meta.image_date_time = entry
@@ -2003,9 +2176,24 @@ fn parse_exif_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMet
                     .map(format_exposure_program)
                     .unwrap_or_else(empty_value)
             }
-            0x829a => meta.shutter_speed = entry.as_rational().map(format_shutter).unwrap_or_else(empty_value),
-            0x829d => meta.aperture = entry.as_rational().map(format_aperture).unwrap_or_else(empty_value),
-            0x8827 => meta.iso_speed = entry.as_short().map(|v| v.to_string()).unwrap_or_else(empty_value),
+            0x829a => {
+                meta.shutter_speed = entry
+                    .as_rational()
+                    .map(format_shutter)
+                    .unwrap_or_else(empty_value)
+            }
+            0x829d => {
+                meta.aperture = entry
+                    .as_rational()
+                    .map(format_aperture)
+                    .unwrap_or_else(empty_value)
+            }
+            0x8827 => {
+                meta.iso_speed = entry
+                    .as_short()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(empty_value)
+            }
             0x9003 => {
                 meta.date_time_original = entry
                     .as_ascii()
@@ -2019,12 +2207,42 @@ fn parse_exif_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMet
                     .unwrap_or_else(empty_value);
             }
             0x9000 => meta.exif_version = entry.as_version_string().unwrap_or_else(empty_value),
-            0x9207 => meta.metering_mode = entry.as_short().map(format_metering).unwrap_or_else(empty_value),
-            0x9209 => meta.flash_fired = entry.as_short().map(format_flash).unwrap_or_else(empty_value),
-            0x920a => meta.focal_length = entry.as_rational().map(format_focal_length).unwrap_or_else(empty_value),
-            0xa001 => meta.color_space = entry.as_short().map(format_color_space).unwrap_or_else(empty_value),
-            0xa002 => meta.image_width = entry.as_number().map(|v| v.to_string()).unwrap_or_else(empty_value),
-            0xa003 => meta.image_height = entry.as_number().map(|v| v.to_string()).unwrap_or_else(empty_value),
+            0x9207 => {
+                meta.metering_mode = entry
+                    .as_short()
+                    .map(format_metering)
+                    .unwrap_or_else(empty_value)
+            }
+            0x9209 => {
+                meta.flash_fired = entry
+                    .as_short()
+                    .map(format_flash)
+                    .unwrap_or_else(empty_value)
+            }
+            0x920a => {
+                meta.focal_length = entry
+                    .as_rational()
+                    .map(format_focal_length)
+                    .unwrap_or_else(empty_value)
+            }
+            0xa001 => {
+                meta.color_space = entry
+                    .as_short()
+                    .map(format_color_space)
+                    .unwrap_or_else(empty_value)
+            }
+            0xa002 => {
+                meta.image_width = entry
+                    .as_number()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(empty_value)
+            }
+            0xa003 => {
+                meta.image_height = entry
+                    .as_number()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(empty_value)
+            }
             0xa403 => {
                 meta.white_balance = entry
                     .as_short()
@@ -2096,7 +2314,14 @@ fn parse_gps_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMeta
 }
 
 fn find_exif_tiff(bytes: &[u8]) -> Option<&[u8]> {
-    bytes.get(find_exif_tiff_start(bytes)?..)
+    let start = find_exif_tiff_start(bytes)?;
+    let length_position = start.checked_sub(8)?;
+    let segment_length = u16::from_be_bytes([
+        *bytes.get(length_position)?,
+        *bytes.get(length_position + 1)?,
+    ]) as usize;
+    let end = length_position.checked_add(segment_length)?;
+    bytes.get(start..end)
 }
 
 fn find_exif_tiff_start(bytes: &[u8]) -> Option<usize> {
@@ -2241,9 +2466,18 @@ impl<'a> Entry<'a> {
         }
         let bytes = self.value_bytes()?;
         Some([
-            (read_u32(bytes, 0, self.endian)?, read_u32(bytes, 4, self.endian)?),
-            (read_u32(bytes, 8, self.endian)?, read_u32(bytes, 12, self.endian)?),
-            (read_u32(bytes, 16, self.endian)?, read_u32(bytes, 20, self.endian)?),
+            (
+                read_u32(bytes, 0, self.endian)?,
+                read_u32(bytes, 4, self.endian)?,
+            ),
+            (
+                read_u32(bytes, 8, self.endian)?,
+                read_u32(bytes, 12, self.endian)?,
+            ),
+            (
+                read_u32(bytes, 16, self.endian)?,
+                read_u32(bytes, 20, self.endian)?,
+            ),
         ])
     }
 }
@@ -2506,7 +2740,10 @@ mod tests {
         let output_tiff = find_exif_tiff(&output).unwrap();
         let metadata = parse_tiff(output_tiff).unwrap();
         assert_eq!(metadata.software, THUMBNAIL_EXTRACTED_SOFTWARE);
-        assert_eq!(embedded_jpeg_thumbnail(output_tiff).unwrap(), &[0xff, 0xd8, 0xff, 0xd9]);
+        assert_eq!(
+            embedded_jpeg_thumbnail(output_tiff).unwrap(),
+            &[0xff, 0xd8, 0xff, 0xd9]
+        );
         let endian = read_tiff_endian(output_tiff).unwrap();
         let ifd0_offset = read_u32(output_tiff, 4, endian).unwrap() as usize;
         let unknown = read_ifd_entries(output_tiff, ifd0_offset, endian)
@@ -2879,8 +3116,11 @@ mod tests {
             "sh148_exif_file_tool_taken_date_test_{}.jpg",
             std::process::id()
         ));
-        std::fs::write(&path, minimal_jpeg_with_datetime_original("2012:08:27 00:29:55"))
-            .unwrap();
+        std::fs::write(
+            &path,
+            minimal_jpeg_with_datetime_original("2012:08:27 00:29:55"),
+        )
+        .unwrap();
 
         write_taken_date(&path, "2026-05-09 12:34:56").unwrap();
 
@@ -2897,8 +3137,11 @@ mod tests {
             "sh148_exif_file_tool_matching_times_test_{}.jpg",
             std::process::id()
         ));
-        std::fs::write(&path, minimal_jpeg_with_datetime_original("2012:08:27 00:29:55"))
-            .unwrap();
+        std::fs::write(
+            &path,
+            minimal_jpeg_with_datetime_original("2012:08:27 00:29:55"),
+        )
+        .unwrap();
         let matching_time =
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
         crate::fs::set_file_times(&path, Some(matching_time), Some(matching_time)).unwrap();
@@ -2918,8 +3161,7 @@ mod tests {
             "sh148_exif_file_tool_camera_make_test_{}.jpg",
             std::process::id()
         ));
-        std::fs::write(&path, minimal_jpeg_with_camera_make("Canon"))
-            .unwrap();
+        std::fs::write(&path, minimal_jpeg_with_camera_make("Canon")).unwrap();
 
         write_camera_make(&path, "Sony").unwrap();
 
@@ -2935,8 +3177,7 @@ mod tests {
             "sh148_exif_file_tool_camera_model_test_{}.jpg",
             std::process::id()
         ));
-        std::fs::write(&path, minimal_jpeg_with_camera_model("Canon"))
-            .unwrap();
+        std::fs::write(&path, minimal_jpeg_with_camera_model("Canon")).unwrap();
 
         write_camera_model(&path, "Sony").unwrap();
 
@@ -2957,7 +3198,8 @@ mod tests {
         let _ = std::fs::remove_file(&backup_path);
         std::fs::write(&path, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
 
-        let output_path = rewrite_basic_exif_metadata(&path, &ExifMetadata::default(), true).unwrap();
+        let output_path =
+            rewrite_basic_exif_metadata(&path, &ExifMetadata::default(), true).unwrap();
         write_camera_model(&output_path, "HTC-X315E").unwrap();
 
         let metadata = read_exif_metadata(&output_path);
@@ -2973,8 +3215,7 @@ mod tests {
             "sh148_exif_file_tool_lens_model_test_{}.jpg",
             std::process::id()
         ));
-        std::fs::write(&path, minimal_jpeg_with_lens_model("EF24-70mm"))
-            .unwrap();
+        std::fs::write(&path, minimal_jpeg_with_lens_model("EF24-70mm")).unwrap();
 
         write_lens_model(&path, "RF24-70mm").unwrap();
 
@@ -3138,6 +3379,29 @@ mod tests {
     }
 
     #[test]
+    fn adds_missing_taken_date_tags_without_losing_existing_exif() {
+        let path = std::env::temp_dir().join(format!(
+            "sh148_add_missing_taken_dates_{}.jpg",
+            std::process::id()
+        ));
+        let backup_path = exif_backup_path(&path);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&backup_path);
+        std::fs::write(&path, minimal_jpeg_with_camera_make("Canon")).unwrap();
+
+        write_taken_date_preserving_exif(&path, "2015-07-11 14:31:13", false).unwrap();
+
+        let written = read_exif_metadata(&path);
+        assert_eq!(written.camera_make, "Canon");
+        assert_eq!(written.date_time_original, "2015-07-11 14:31:13");
+        assert_eq!(written.date_time_digitized, "2015-07-11 14:31:13");
+        assert_eq!(written.image_date_time, "2015-07-11 14:31:13");
+        assert!(!backup_path.exists());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn individual_tag_removal_preserves_other_raw_exif_entries() {
         let path = std::env::temp_dir().join(format!(
             "sh148_exif_file_tool_remove_one_tag_test_{}.jpg",
@@ -3152,10 +3416,7 @@ mod tests {
         std::fs::write(&path, jpeg).unwrap();
 
         remove_exif_tag(&path, "camera_model", false).unwrap();
-        assert_eq!(
-            read_exif_metadata(&path).image_description,
-            "Preserve me"
-        );
+        assert_eq!(read_exif_metadata(&path).image_description, "Preserve me");
 
         remove_exif_tag(&path, "image_description", false).unwrap();
         assert_eq!(read_exif_metadata(&path).image_description, "");
@@ -3172,8 +3433,11 @@ mod tests {
         let backup_path = exif_backup_path(&path);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&backup_path);
-        std::fs::write(&path, minimal_jpeg_with_datetime_original("2012:09:02 14:39:12"))
-            .unwrap();
+        std::fs::write(
+            &path,
+            minimal_jpeg_with_datetime_original("2012:09:02 14:39:12"),
+        )
+        .unwrap();
 
         let mut metadata = read_exif_metadata(&path);
         metadata.camera_model = "HTC-X315E".to_string();
@@ -3198,8 +3462,11 @@ mod tests {
         let backup_path = exif_backup_path(&path);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&backup_path);
-        std::fs::write(&path, minimal_jpeg_with_datetime_original("2012:09:02 14:39:12"))
-            .unwrap();
+        std::fs::write(
+            &path,
+            minimal_jpeg_with_datetime_original("2012:09:02 14:39:12"),
+        )
+        .unwrap();
 
         let mut metadata = read_exif_metadata(&path);
         metadata.camera_model = "HTC-X315E".to_string();

@@ -1,1 +1,1 @@
-# SH148 EXIF-File Tool
+# SH148 Photo Management Tool

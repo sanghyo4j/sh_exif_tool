@@ -10,15 +10,18 @@ pub(super) fn has_jpeg_signature(bytes: &[u8]) -> bool {
 
 pub(super) fn scan(path: &Path) -> MediaScanResult {
     let metadata = read_exif_metadata_for_scan(path);
+    let media_date = if metadata.taken_date.trim().is_empty() {
+        "-".to_string()
+    } else {
+        metadata.taken_date.clone()
+    };
     MediaScanResult {
         media_kind: "jpeg".to_string(),
         media_type: "JPEG image".to_string(),
-        media_date: if metadata.taken_date.trim().is_empty() {
-            "-".to_string()
-        } else {
-            metadata.taken_date
-        },
+        media_date,
         metadata_status: if metadata.has_exif { "O" } else { "X" }.to_string(),
+        time_interpretation: String::new(),
+        exif_metadata: Some(metadata),
     }
 }
 

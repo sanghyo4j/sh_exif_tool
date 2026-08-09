@@ -1,76 +1,41 @@
 pub mod app;
 
-use chrono::{Duration as ChronoDuration, FixedOffset, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
-use slint::{language::ColorScheme, ComponentHandle};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::Read;
-use std::rc::Rc;
-use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime};
-use self::app::{CachedMediaScan, SlintApp};
+use self::app::{CachedMediaScan, SelectedEntryDetails, SlintApp};
 use crate::exif::{
-    extract_embedded_thumbnail,
-    extract_datetime_from_filename,
-    exif_backup_path,
-    is_generated_new_exif_path,
-    read_exif_metadata,
-    read_embedded_thumbnail,
-    remove_exif_metadata,
-    remove_exif_tag,
-    remove_gps_information,
-    rewrite_basic_exif_metadata,
-    rewrite_generated_basic_exif_metadata,
-    rewrite_repairable_exif_metadata,
-    write_aperture,
-    write_artist,
-    write_camera_make,
-    write_camera_model,
-    write_color_space,
-    write_flash_fired,
-    write_focal_length,
-    write_gps_date_stamp,
-    write_gps_date_time,
-    write_gps_time_stamp,
-    write_iso_speed,
-    write_lens_model,
-    write_metering_mode,
-    write_orientation,
-    write_shutter_speed,
-    write_software,
-    write_taken_date,
-    ExifMetadata,
+    exif_backup_path, extract_datetime_from_filename, extract_embedded_thumbnail,
+    is_generated_new_exif_path, read_embedded_thumbnail, read_exif_metadata, remove_exif_metadata,
+    remove_exif_tag, remove_gps_information, rewrite_basic_exif_metadata,
+    rewrite_generated_basic_exif_metadata, rewrite_repairable_exif_metadata, write_aperture,
+    write_artist, write_camera_make, write_camera_model, write_color_space, write_flash_fired,
+    write_focal_length, write_gps_date_stamp, write_gps_date_time, write_gps_time_stamp,
+    write_iso_speed, write_lens_model, write_metering_mode, write_orientation, write_shutter_speed,
+    write_software, write_taken_date_preserving_exif, ExifMetadata,
 };
 use crate::fs::{
-    analyze_img_vid_prefix_removal,
-    analyze_front_or_rear_number_removal,
-    copy_file_times,
-    copy_file_to_folder,
-    move_file_to_recycle_bin,
-    move_trailing_numbers_to_front,
-    remove_front_or_rear_numbers,
-    remove_img_vid_prefixes,
-    reveal_in_file_manager,
-    rename_entry,
-    save_file_copy,
-    set_file_times,
-    trailing_number_rename_candidate_count,
+    analyze_front_or_rear_number_removal, analyze_img_vid_prefix_removal, copy_file_times,
+    choose_folder, copy_file_to_folder, move_file_to_recycle_bin, move_trailing_numbers_to_front,
+    remove_front_or_rear_numbers, remove_img_vid_prefixes, rename_entry, reveal_in_file_manager,
+    save_file_copy, set_file_times, trailing_number_rename_candidate_count,
     FilenameCollisionResolver,
 };
 use crate::media::{
-    read_png_date_sources,
-    remove_png_date_source,
-    remove_png_date_metadata,
-    scan_media_file,
-    write_png_date_sources,
-    write_mp4_media_date,
-    write_png_media_date,
-    MediaScanJob,
+    read_png_date_sources, remove_png_date_metadata, remove_png_date_source, scan_media_file,
+    write_mp4_media_date, write_png_date_sources, write_png_media_date, MediaScanJob,
     PngDateSources,
 };
 use crate::GuiRunner;
+use chrono::{
+    Duration as ChronoDuration, FixedOffset, Local, NaiveDate, NaiveDateTime, TimeZone, Utc,
+};
+use slint::{language::ColorScheme, ComponentHandle, Model};
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Read;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 slint::include_modules!();
 
@@ -162,9 +127,9 @@ struct PreviewCacheKey {
 
 #[derive(Clone)]
 struct PreviewResult {
-    width: u32,
-    height: u32,
-    pixels: Arc<Vec<u8>>,
+    pixel_width: u32,
+    pixel_height: u32,
+    pixels: slint::SharedPixelBuffer<slint::Rgba8Pixel>,
     status: String,
 }
 
@@ -187,16 +152,22 @@ impl PreviewCache {
         const MAX_PREVIEW_CACHE_BYTES: usize = 48 * 1024 * 1024;
         const MAX_PREVIEW_CACHE_ITEMS: usize = 8;
         if let Some(previous) = self.entries.remove(&key) {
-            self.bytes = self.bytes.saturating_sub(previous.pixels.len());
+            self.bytes = self
+                .bytes
+                .saturating_sub(previous.pixels.as_bytes().len());
             self.order.retain(|existing| existing != &key);
         }
-        self.bytes = self.bytes.saturating_add(value.pixels.len());
+        self.bytes = self.bytes.saturating_add(value.pixels.as_bytes().len());
         self.entries.insert(key.clone(), value);
         self.order.push_back(key);
         while self.bytes > MAX_PREVIEW_CACHE_BYTES || self.order.len() > MAX_PREVIEW_CACHE_ITEMS {
-            let Some(oldest) = self.order.pop_front() else { break; };
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
             if let Some(removed) = self.entries.remove(&oldest) {
-                self.bytes = self.bytes.saturating_sub(removed.pixels.len());
+                self.bytes = self
+                    .bytes
+                    .saturating_sub(removed.pixels.as_bytes().len());
             }
         }
     }
@@ -213,6 +184,7 @@ struct PreviewController {
     generation: Arc<AtomicU64>,
     current: Rc<RefCell<Option<PreviewCacheKey>>>,
     cache: Arc<Mutex<PreviewCache>>,
+    load_timer: Rc<slint::Timer>,
 }
 
 impl PreviewController {
@@ -221,21 +193,34 @@ impl PreviewController {
             generation: Arc::new(AtomicU64::new(0)),
             current: Rc::new(RefCell::new(None)),
             cache: Arc::new(Mutex::new(PreviewCache::default())),
+            load_timer: Rc::new(slint::Timer::default()),
         }
     }
 
     fn update(&self, ui: &MainWindow, app: &SlintApp) {
         let started_at = Instant::now();
         let selected = selected_file_paths(app);
-        let Some(path) = selected.into_iter().next().filter(|_| app.selected_indices().len() == 1) else {
+        let Some(path) = selected
+            .into_iter()
+            .next()
+            .filter(|_| app.selected_indices().len() == 1)
+        else {
             self.clear(ui);
             return;
         };
-        let Some(kind) = preview_media_kind(&path) else {
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "mp4" | "mov" | "m4v" | "3gp" | "3g2" | "qt" | "mts" | "m2ts"
+                )
+            })
+        {
             self.clear(ui);
             return;
-        };
-        let initial_dimensions = preview_dimensions(&path);
+        }
         let Ok(metadata) = path.metadata() else {
             self.clear(ui);
             return;
@@ -255,82 +240,92 @@ impl PreviewController {
             return;
         }
 
+        self.load_timer.stop();
         *self.current.borrow_mut() = Some(key.clone());
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        ui.set_preview_available(true);
-        ui.set_preview_ready(false);
-        ui.set_preview_image(slint::Image::default());
-        ui.set_preview_status("".into());
-        if let Some((width, height)) = initial_dimensions {
-            ui.set_preview_pixel_width(width as i32);
-            ui.set_preview_pixel_height(height as i32);
-        } else {
-            ui.set_preview_pixel_width(0);
-            ui.set_preview_pixel_height(0);
-        }
-
         if let Some(cached) = self
             .cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&key)
         {
+            ui.set_preview_available(true);
             apply_preview_result(ui, &cached);
-            ui.set_activity_text(
-                format!("Image loaded in {} ms.", started_at.elapsed().as_millis()).into(),
-            );
+            ui.set_preview_info(preview_info_text(&cached, started_at.elapsed()).into());
             return;
         }
 
-        ui.set_activity_text("Loading image...".into());
+        ui.set_preview_available(true);
+        ui.set_preview_ready(false);
+        ui.set_preview_image(slint::Image::default());
+        ui.set_preview_status("".into());
+        ui.set_preview_info("Loading image...".into());
+        ui.set_preview_pixel_width(0);
+        ui.set_preview_pixel_height(0);
 
         let ui_handle = ui.as_weak();
         let generation_handle = self.generation.clone();
         let cache = self.cache.clone();
-        std::thread::spawn(move || {
-            let result = decode_preview(&path, kind);
-            if generation_handle.load(Ordering::Acquire) != generation {
-                return;
-            }
-            if let Some(value) = result.as_ref() {
-                cache
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(key, value.clone());
-            }
-            let _ = slint::invoke_from_event_loop(move || {
+        self.load_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(80),
+            move || {
                 if generation_handle.load(Ordering::Acquire) != generation {
                     return;
                 }
-                let Some(ui) = ui_handle.upgrade() else { return; };
-                match result {
-                    Some(value) => {
-                        apply_preview_result(&ui, &value);
-                        ui.set_activity_text(
-                            format!(
-                                "Image loaded in {} ms.",
-                                started_at.elapsed().as_millis()
-                            )
-                            .into(),
-                        );
+                let ui_handle = ui_handle.clone();
+                let generation_handle = generation_handle.clone();
+                let cache = cache.clone();
+                let path = path.clone();
+                let key = key.clone();
+                std::thread::spawn(move || {
+                    let started_at = Instant::now();
+                    let kind = preview_media_kind(&path);
+                    let initial_dimensions = preview_dimensions(&path);
+                    let result = kind.and_then(|kind| decode_preview(&path, kind, initial_dimensions));
+                    if generation_handle.load(Ordering::Acquire) != generation {
+                        return;
                     }
-                    None => {
-                        ui.set_preview_ready(false);
-                        ui.set_preview_status("Image could not be decoded".into());
-                        ui.set_activity_text(
-                            format!(
-                                "Image loading failed after {} ms.",
-                                started_at.elapsed().as_millis()
-                            )
-                            .into(),
-                        );
+                    if let Some(value) = result.as_ref() {
+                        cache
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .insert(key, value.clone());
                     }
-                }
-            });
-        });
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if generation_handle.load(Ordering::Acquire) != generation {
+                            return;
+                        }
+                        let Some(ui) = ui_handle.upgrade() else {
+                            return;
+                        };
+                        match result {
+                            Some(value) => {
+                                apply_preview_result(&ui, &value);
+                                ui.set_preview_info(
+                                    preview_info_text(&value, started_at.elapsed()).into(),
+                                );
+                            }
+                            None => {
+                                ui.set_preview_ready(false);
+                                ui.set_preview_status("Image could not be decoded".into());
+                                ui.set_preview_info(
+                                    format!(
+                                        "Preview unavailable (failed in {} ms)",
+                                        started_at.elapsed().as_millis()
+                                    )
+                                    .into(),
+                                );
+                            }
+                        }
+                    });
+                });
+            },
+        );
     }
 
     fn clear(&self, ui: &MainWindow) {
+        self.load_timer.stop();
         if self.current.borrow_mut().take().is_some() || ui.get_preview_available() {
             self.generation.fetch_add(1, Ordering::AcqRel);
         }
@@ -338,6 +333,7 @@ impl PreviewController {
         ui.set_preview_ready(false);
         ui.set_preview_image(slint::Image::default());
         ui.set_preview_status("".into());
+        ui.set_preview_info("".into());
         ui.set_preview_pixel_width(0);
         ui.set_preview_pixel_height(0);
     }
@@ -359,7 +355,10 @@ fn preview_media_kind(path: &std::path::Path) -> Option<PreviewMediaKind> {
 fn preview_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
     use image::ImageDecoder;
 
-    let reader = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?;
+    let reader = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
     let mut decoder = reader.into_decoder().ok()?;
     let (width, height) = decoder.dimensions();
     let orientation = decoder
@@ -374,9 +373,17 @@ fn preview_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
     }
 }
 
-fn decode_preview(path: &std::path::Path, kind: PreviewMediaKind) -> Option<PreviewResult> {
+fn decode_preview(
+    path: &std::path::Path,
+    kind: PreviewMediaKind,
+    source_dimensions: Option<(u32, u32)>,
+) -> Option<PreviewResult> {
     match decode_preview_image(path) {
-        Ok(image) => Some(preview_result_from_image(image, String::new())),
+        Ok(image) => Some(preview_result_from_image(
+            image,
+            String::new(),
+            source_dimensions,
+        )),
         Err(_) if kind == PreviewMediaKind::Jpeg => {
             let thumbnail = read_embedded_thumbnail(path).ok()?;
             let mut image = image::load_from_memory(&thumbnail).ok()?;
@@ -386,6 +393,7 @@ fn decode_preview(path: &std::path::Path, kind: PreviewMediaKind) -> Option<Prev
             Some(preview_result_from_image(
                 image,
                 "EXIF Thumbnail — full image could not be decoded".to_string(),
+                source_dimensions,
             ))
         }
         Err(_) => None,
@@ -420,35 +428,52 @@ fn jpeg_orientation(path: &std::path::Path) -> Option<image::metadata::Orientati
         "Mirrored horizontal" | "2" => Some(image::metadata::Orientation::FlipHorizontal),
         "Rotated 180" | "3" => Some(image::metadata::Orientation::Rotate180),
         "Mirrored vertical" | "4" => Some(image::metadata::Orientation::FlipVertical),
-        "Mirrored horizontal rotated 270" | "5" => Some(image::metadata::Orientation::Rotate90FlipH),
+        "Mirrored horizontal rotated 270" | "5" => {
+            Some(image::metadata::Orientation::Rotate90FlipH)
+        }
         "Rotated 90" | "6" => Some(image::metadata::Orientation::Rotate90),
-        "Mirrored horizontal rotated 90" | "7" => Some(image::metadata::Orientation::Rotate270FlipH),
+        "Mirrored horizontal rotated 90" | "7" => {
+            Some(image::metadata::Orientation::Rotate270FlipH)
+        }
         "Rotated 270" | "8" => Some(image::metadata::Orientation::Rotate270),
         _ => None,
     }
 }
 
-fn preview_result_from_image(image: image::DynamicImage, status: String) -> PreviewResult {
+fn preview_result_from_image(
+    image: image::DynamicImage,
+    status: String,
+    source_dimensions: Option<(u32, u32)>,
+) -> PreviewResult {
+    let (pixel_width, pixel_height) = source_dimensions.unwrap_or((image.width(), image.height()));
     let resized = image.thumbnail(1200, 900).to_rgba8();
+    let width = resized.width();
+    let height = resized.height();
+    let mut pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(width, height);
+    pixels.make_mut_bytes().copy_from_slice(resized.as_raw());
     PreviewResult {
-        width: resized.width(),
-        height: resized.height(),
-        pixels: Arc::new(resized.into_raw()),
+        pixel_width,
+        pixel_height,
+        pixels,
         status,
     }
 }
 
 fn apply_preview_result(ui: &MainWindow, result: &PreviewResult) {
-    let mut buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(
-        result.width,
-        result.height,
-    );
-    buffer.make_mut_bytes().copy_from_slice(result.pixels.as_slice());
-    ui.set_preview_image(slint::Image::from_rgba8(buffer));
-    ui.set_preview_pixel_width(result.width as i32);
-    ui.set_preview_pixel_height(result.height as i32);
+    ui.set_preview_image(slint::Image::from_rgba8(result.pixels.clone()));
+    ui.set_preview_pixel_width(result.pixel_width as i32);
+    ui.set_preview_pixel_height(result.pixel_height as i32);
     ui.set_preview_ready(true);
     ui.set_preview_status(result.status.as_str().into());
+}
+
+fn preview_info_text(result: &PreviewResult, elapsed: Duration) -> String {
+    format!(
+        "{} x {} (loaded in {} ms)",
+        result.pixel_width,
+        result.pixel_height,
+        elapsed.as_millis()
+    )
 }
 
 fn selection_index_after_deletion(selection_index: i32, remaining_count: usize) -> Option<i32> {
@@ -462,8 +487,7 @@ impl GuiRunner for SlintRunner {
         let app = Rc::new(RefCell::new(SlintApp::new()));
         let preview_controller = PreviewController::new();
         let copied_files = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
-        let pending_filename_renames =
-            Rc::new(RefCell::new(HashMap::<PathBuf, String>::new()));
+        let pending_filename_renames = Rc::new(RefCell::new(HashMap::<PathBuf, String>::new()));
         let pending_filename_taken_dates = Rc::new(RefCell::new(HashMap::<PathBuf, String>::new()));
         let pending_gps_date_times =
             Rc::new(RefCell::new(HashMap::<PathBuf, (String, String)>::new()));
@@ -512,12 +536,17 @@ impl GuiRunner for SlintRunner {
                     if scan_results_dirty.swap(false, Ordering::AcqRel) {
                         if let Some(ui) = ui_handle.upgrade() {
                             let mut app = app_handle.borrow_mut();
+                            if !scan_active.load(Ordering::Acquire) {
+                                app.complete_dynamic_sort();
+                            }
                             if app.show_only_missing_media_date {
                                 // Rows can disappear as their Media Date is discovered. Numeric
                                 // selections would otherwise point at a different file.
                                 app.select_ui_index(-1, false, false);
                             }
                             ui.set_item_count(app.file_count() as i32);
+                            ui.set_sort_column(app.sort_column);
+                            ui.set_sort_direction(app.sort_direction);
                             ui.set_files(app.get_ui_model());
                             set_selected_files(&ui, &app);
                             preview.update(&ui, &app);
@@ -539,9 +568,10 @@ impl GuiRunner for SlintRunner {
             let scan_active = scan_active.clone();
             let scan_refresh_timer = scan_refresh_timer.clone();
             move || {
-                let app = app_handle.borrow();
+                let mut app = app_handle.borrow_mut();
                 app.restart_scan();
                 let (epoch, jobs) = app.prepare_scan_jobs();
+                app.set_dynamic_sort_ready(jobs.is_empty());
                 drop(app);
                 scan_active.store(!jobs.is_empty(), Ordering::Release);
                 let _ = scan_batch_sender.send(MediaScanBatch { epoch, jobs });
@@ -570,6 +600,8 @@ impl GuiRunner for SlintRunner {
                     ui.set_current_path(app.current_path.as_str().into());
                     ui.set_activity_text("".into());
                     ui.set_item_count(app.file_count() as i32);
+                    ui.set_sort_column(app.sort_column);
+                    ui.set_sort_direction(app.sort_direction);
                     ui.set_files(app.get_ui_model());
                     set_selected_files(&ui, &app);
                     preview.update(&ui, &app);
@@ -594,6 +626,22 @@ impl GuiRunner for SlintRunner {
         });
 
         let app_handle = app.clone();
+        let ui_handle = ui.as_weak();
+        let preview = preview_controller.clone();
+        ui.on_sort_file_list(move |column| {
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
+            let mut app = app_handle.borrow_mut();
+            app.cycle_sort(column);
+            ui.set_sort_column(app.sort_column);
+            ui.set_sort_direction(app.sort_direction);
+            ui.set_files(app.get_ui_model());
+            set_selected_files(&ui, &app);
+            preview.update(&ui, &app);
+        });
+
+        let app_handle = app.clone();
         let refresh = refresh_ui.clone();
         ui.on_set_show_only_missing_media_date(move |enabled| {
             {
@@ -609,12 +657,19 @@ impl GuiRunner for SlintRunner {
         let context_target = exif_context_target.clone();
         let ui_handle = ui.as_weak();
         ui.on_exif_tag_right_clicked(move |key, value| {
-            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
             if key.is_empty() {
                 ui.set_exif_context_menu_visible(false);
                 return;
             }
-            let Some(_path) = app_handle.borrow().path_for_ui_index(ui.get_selected_index()) else { return; };
+            let Some(_path) = app_handle
+                .borrow()
+                .path_for_ui_index(ui.get_selected_index())
+            else {
+                return;
+            };
             let key = key.to_string();
             let value = value.to_string();
             let paste_enabled = is_writable_metadata_key(&ui, &key)
@@ -667,15 +722,26 @@ impl GuiRunner for SlintRunner {
         let context_target = exif_context_target.clone();
         let ui_handle = ui.as_weak();
         ui.on_exif_context_copy(move || {
-            let Some(ui) = ui_handle.upgrade() else { return; };
-            let Some(target) = context_target.borrow().clone() else { return; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
+            let Some(target) = context_target.borrow().clone() else {
+                return;
+            };
             match target {
                 ExifContextTarget::Tag { key, value } => {
                     *clipboard.borrow_mut() = Some(ExifClipboard::Tag {
                         value: value.clone(),
                     });
-                    let display_value = if value.is_empty() { "(empty)" } else { value.as_str() };
-                    show_toast(&ui, &format!("Copied: '{}: {}'", exif_key_label(&key), display_value));
+                    let display_value = if value.is_empty() {
+                        "(empty)"
+                    } else {
+                        value.as_str()
+                    };
+                    show_toast(
+                        &ui,
+                        &format!("Copied: '{}: {}'", exif_key_label(&key), display_value),
+                    );
                 }
                 ExifContextTarget::Section { section, values } => {
                     let count = values.len();
@@ -683,7 +749,14 @@ impl GuiRunner for SlintRunner {
                         section: section.clone(),
                         values,
                     });
-                    show_toast(&ui, &format!("Copied: '{} section ({} tags)'", exif_section_label(&section), count));
+                    show_toast(
+                        &ui,
+                        &format!(
+                            "Copied: '{} section ({} tags)'",
+                            exif_section_label(&section),
+                            count
+                        ),
+                    );
                 }
             }
         });
@@ -693,15 +766,28 @@ impl GuiRunner for SlintRunner {
         let pending_paste = pending_exif_paste.clone();
         let ui_handle = ui.as_weak();
         ui.on_exif_context_paste(move || {
-            let Some(ui) = ui_handle.upgrade() else { return; };
-            let Some(target) = context_target.borrow().clone() else { return; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
+            let Some(target) = context_target.borrow().clone() else {
+                return;
+            };
             let values = match (target, clipboard.borrow().clone()) {
                 (ExifContextTarget::Tag { key, .. }, Some(ExifClipboard::Tag { value, .. }))
-                    if is_writable_metadata_key(&ui, &key) => Some(vec![(key, value)]),
+                    if is_writable_metadata_key(&ui, &key) =>
+                {
+                    Some(vec![(key, value)])
+                }
                 (
                     ExifContextTarget::Section { section, .. },
-                    Some(ExifClipboard::Section { section: source_section, values, .. }),
-                ) if section == source_section && is_writable_exif_section(&section) => Some(values),
+                    Some(ExifClipboard::Section {
+                        section: source_section,
+                        values,
+                        ..
+                    }),
+                ) if section == source_section && is_writable_exif_section(&section) => {
+                    Some(values)
+                }
                 _ => None,
             };
             if let Some(values) = values {
@@ -714,7 +800,9 @@ impl GuiRunner for SlintRunner {
         let pending_tag_removals = pending_exif_tag_removals.clone();
         let ui_handle = ui.as_weak();
         ui.on_exif_context_remove(move || {
-            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
             let Some(ExifContextTarget::Tag { key, .. }) = context_target.borrow().clone() else {
                 return;
             };
@@ -725,7 +813,10 @@ impl GuiRunner for SlintRunner {
             if !removable {
                 return;
             }
-            let Some(path) = app_handle.borrow().path_for_ui_index(ui.get_selected_index()) else {
+            let Some(path) = app_handle
+                .borrow()
+                .path_for_ui_index(ui.get_selected_index())
+            else {
                 return;
             };
             pending_tag_removals
@@ -745,7 +836,9 @@ impl GuiRunner for SlintRunner {
         let pending_paste = pending_exif_paste.clone();
         let ui_handle = ui.as_weak();
         ui.on_confirm_metadata_paste(move |confirmed| {
-            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
             let pending = pending_paste.borrow_mut().take();
             if confirmed {
                 if let Some(pending) = pending {
@@ -764,7 +857,7 @@ impl GuiRunner for SlintRunner {
             if let Some(ui) = ui_handle.upgrade() {
                 let mut app = app_handle.borrow_mut();
                 app.select_files_without_exif();
-                ui.set_files(app.get_ui_model());
+                sync_file_selection_model(&ui, &app);
                 set_selected_files(&ui, &app);
                 preview.update(&ui, &app);
             }
@@ -802,6 +895,52 @@ impl GuiRunner for SlintRunner {
         });
 
         // [추가] 2.5. 경로 직접 입력 핸들러 (엔터 입력 시)
+        let ui_handle = ui.as_weak();
+        ui.on_choose_folder(move || {
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
+            ui.set_activity_text("Opening folder picker...".into());
+            let ui_handle = ui.as_weak();
+            std::thread::spawn(move || {
+                let (path, error) = match choose_folder() {
+                    Ok(Some(path)) => (path.to_string_lossy().to_string(), String::new()),
+                    Ok(None) => (String::new(), String::new()),
+                    Err(error) => (String::new(), error),
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_handle.upgrade() {
+                        ui.invoke_folder_choice_completed(path.into(), error.into());
+                    }
+                });
+            });
+        });
+
+        let app_handle = app.clone();
+        let ui_handle = ui.as_weak();
+        let refresh = refresh_ui.clone();
+        ui.on_folder_choice_completed(move |path, error| {
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
+            ui.set_activity_text("".into());
+            if !error.is_empty() {
+                show_message(&ui, "Open Folder Failed", error.as_str());
+                return;
+            }
+            if path.is_empty() {
+                ui.invoke_focus_file_list();
+                return;
+            }
+            {
+                let mut app = app_handle.borrow_mut();
+                app.current_path = path.to_string();
+                app.load_folder();
+            }
+            refresh(None);
+            ui.invoke_focus_file_list();
+        });
+
         let app_handle = app.clone();
         let refresh = refresh_ui.clone();
         let ui_handle = ui.as_weak();
@@ -814,7 +953,11 @@ impl GuiRunner for SlintRunner {
                         app.current_path.clone()
                     };
                     ui.set_current_path(current_path.into());
-                    show_message(&ui, "Invalid Path", "The entered path is not a valid folder.");
+                    show_message(
+                        &ui,
+                        "Invalid Path",
+                        "The entered path is not a valid folder.",
+                    );
                     return;
                 }
 
@@ -835,14 +978,16 @@ impl GuiRunner for SlintRunner {
             {
                 let mut app = app_handle.borrow_mut();
                 let idx = index as usize;
-                
-                if idx == 0 { // [..] 클릭
+
+                if idx == 0 {
+                    // [..] 클릭
                     if let Some(parent) = PathBuf::from(&app.current_path).parent() {
                         app.current_path = parent.to_string_lossy().to_string();
                         app.load_folder();
                         changed = true;
                     }
-                } else if let Some(path) = app.path_for_ui_index(index) { // 폴더 클릭
+                } else if let Some(path) = app.path_for_ui_index(index) {
+                    // 폴더 클릭
                     if path.is_dir() {
                         app.current_path = path.to_string_lossy().to_string();
                         app.load_folder();
@@ -866,7 +1011,8 @@ impl GuiRunner for SlintRunner {
                 let mut last = last_table_click_handle.borrow_mut();
                 let is_double = last
                     .map(|(last_index, last_time)| {
-                        last_index == index && now.duration_since(last_time) <= Duration::from_millis(500)
+                        last_index == index
+                            && now.duration_since(last_time) <= Duration::from_millis(500)
                     })
                     .unwrap_or(false);
                 *last = Some((index, now));
@@ -960,7 +1106,10 @@ impl GuiRunner for SlintRunner {
                             continue;
                         }
                     };
-                    if path.file_name().is_some_and(|value| value == new_name.as_str()) {
+                    if path
+                        .file_name()
+                        .is_some_and(|value| value == new_name.as_str())
+                    {
                         skipped_count += 1;
                         continue;
                     }
@@ -990,9 +1139,7 @@ impl GuiRunner for SlintRunner {
                 } else {
                     show_toast(
                         &ui,
-                        &format!(
-                            "Staged {staged_count}; skipped {skipped_count}. Ctrl+S to save."
-                        ),
+                        &format!("Staged {staged_count}; skipped {skipped_count}. Ctrl+S to save."),
                     );
                 }
             }
@@ -1007,7 +1154,6 @@ impl GuiRunner for SlintRunner {
         let pending_exif_removals_handle = pending_exif_removals.clone();
         let pending_exif_tag_removals_handle = pending_exif_tag_removals.clone();
         let ui_handle = ui.as_weak();
-        let schedule_scan = schedule_media_scan.clone();
         let preview = preview_controller.clone();
         ui.on_table_row_selected(move |index, ctrl, shift| {
             if let Some(ui) = ui_handle.upgrade() {
@@ -1020,13 +1166,28 @@ impl GuiRunner for SlintRunner {
                 pending_exif_tag_removals_handle.borrow_mut().clear();
                 ui.set_activity_text("".into());
                 let mut app = app_handle.borrow_mut();
+                let previous_selection = if ctrl {
+                    Vec::new()
+                } else {
+                    app.selected_indices().to_vec()
+                };
                 app.select_ui_index(index, ctrl, shift);
                 ui.set_selected_index(index);
-                ui.set_files(app.get_ui_model());
+                if ctrl {
+                    sync_file_selection_row(
+                        &ui,
+                        index,
+                        app.selected_indices().binary_search(&index).is_ok(),
+                    );
+                } else {
+                    sync_changed_file_selection_model(
+                        &ui,
+                        &previous_selection,
+                        app.selected_indices(),
+                    );
+                }
                 set_selected_files(&ui, &app);
                 preview.update(&ui, &app);
-                drop(app);
-                schedule_scan();
             }
         });
 
@@ -1041,8 +1202,11 @@ impl GuiRunner for SlintRunner {
         let ui_handle = ui.as_weak();
         let schedule_scan = schedule_media_scan.clone();
         let preview = preview_controller.clone();
+        let scan_active_handle = scan_active.clone();
         ui.on_select_all_table_rows(move || {
-            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
             pending_renames.borrow_mut().clear();
             pending_taken_dates.borrow_mut().clear();
             pending_gps_date_times_handle.borrow_mut().clear();
@@ -1053,11 +1217,13 @@ impl GuiRunner for SlintRunner {
             ui.set_activity_text("".into());
             let mut app = app_handle.borrow_mut();
             app.select_all_visible_entries();
-            ui.set_files(app.get_ui_model());
+            sync_file_selection_model(&ui, &app);
             set_selected_files(&ui, &app);
             preview.update(&ui, &app);
             drop(app);
-            schedule_scan();
+            if scan_active_handle.load(Ordering::Acquire) {
+                schedule_scan();
+            }
         });
 
         let app_handle = app.clone();
@@ -1077,7 +1243,9 @@ impl GuiRunner for SlintRunner {
         let pending_exif_removals_handle = pending_exif_removals.clone();
         let ui_handle = ui.as_weak();
         ui.on_remove_exif_tags(move || {
-            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
             let selected_paths = {
                 let app = app_handle.borrow();
                 selected_file_paths(&app)
@@ -1216,7 +1384,11 @@ impl GuiRunner for SlintRunner {
                     selected_file_paths(&app)
                 };
                 if selected_paths.is_empty() {
-                    show_message(&ui, "Unable to Shift Media Date", "Select one or more media files first.");
+                    show_message(
+                        &ui,
+                        "Unable to Shift Media Date",
+                        "Select one or more media files first.",
+                    );
                     return;
                 }
                 ui.set_shift_media_date_subtract(false);
@@ -1227,7 +1399,11 @@ impl GuiRunner for SlintRunner {
                 let preview = build_shift_media_date_preview(
                     &selected_paths,
                     &pending_taken_dates.borrow(),
-                    "0", "0", "0", "0", false,
+                    "0",
+                    "0",
+                    "0",
+                    "0",
+                    false,
                 );
                 ui.set_shift_media_date_preview(preview.into());
                 ui.set_shift_media_date_visible(true);
@@ -1255,7 +1431,11 @@ impl GuiRunner for SlintRunner {
                     selected_file_paths(&app)
                 };
                 if selected_paths.is_empty() {
-                    show_message(&ui, "Unable to Shift GPS Date/Time", "Select one or more JPEG files first.");
+                    show_message(
+                        &ui,
+                        "Unable to Shift GPS Date/Time",
+                        "Select one or more JPEG files first.",
+                    );
                     return;
                 }
                 ui.set_shift_gps_date_time_mode(true);
@@ -1267,7 +1447,11 @@ impl GuiRunner for SlintRunner {
                 let preview = build_shift_gps_date_time_preview(
                     &selected_paths,
                     &pending_gps_date_times_handle.borrow(),
-                    "0", "0", "0", "0", false,
+                    "0",
+                    "0",
+                    "0",
+                    "0",
+                    false,
                 );
                 ui.set_shift_media_date_preview(preview.into());
                 ui.set_shift_media_date_visible(true);
@@ -1279,7 +1463,9 @@ impl GuiRunner for SlintRunner {
         let pending_gps_date_times_handle = pending_gps_date_times.clone();
         let ui_handle = ui.as_weak();
         ui.on_update_shift_media_date_preview(move |days, hours, minutes, seconds, subtract| {
-            let Some(ui) = ui_handle.upgrade() else { return String::new().into(); };
+            let Some(ui) = ui_handle.upgrade() else {
+                return String::new().into();
+            };
             let selected_paths = {
                 let app = app_handle.borrow();
                 selected_file_paths(&app)
@@ -1288,14 +1474,24 @@ impl GuiRunner for SlintRunner {
                 build_shift_gps_date_time_preview(
                     &selected_paths,
                     &pending_gps_date_times_handle.borrow(),
-                    days.as_str(), hours.as_str(), minutes.as_str(), seconds.as_str(), subtract,
-                ).into()
+                    days.as_str(),
+                    hours.as_str(),
+                    minutes.as_str(),
+                    seconds.as_str(),
+                    subtract,
+                )
+                .into()
             } else {
                 build_shift_media_date_preview(
                     &selected_paths,
                     &pending_taken_dates.borrow(),
-                    days.as_str(), hours.as_str(), minutes.as_str(), seconds.as_str(), subtract,
-                ).into()
+                    days.as_str(),
+                    hours.as_str(),
+                    minutes.as_str(),
+                    seconds.as_str(),
+                    subtract,
+                )
+                .into()
             }
         });
 
@@ -1304,8 +1500,15 @@ impl GuiRunner for SlintRunner {
         let pending_gps_date_times_handle = pending_gps_date_times.clone();
         let ui_handle = ui.as_weak();
         ui.on_apply_shift_media_date(move |days, hours, minutes, seconds, subtract| {
-            let Some(ui) = ui_handle.upgrade() else { return false; };
-            let duration = match parse_media_date_shift(days.as_str(), hours.as_str(), minutes.as_str(), seconds.as_str()) {
+            let Some(ui) = ui_handle.upgrade() else {
+                return false;
+            };
+            let duration = match parse_media_date_shift(
+                days.as_str(),
+                hours.as_str(),
+                minutes.as_str(),
+                seconds.as_str(),
+            ) {
                 Ok(duration) if duration != ChronoDuration::zero() => duration,
                 Ok(_) => {
                     ui.set_shift_media_date_preview("Enter a non-zero time shift.".into());
@@ -1330,7 +1533,8 @@ impl GuiRunner for SlintRunner {
                         skipped_count += 1;
                         continue;
                     };
-                    let Some(new_value) = shift_display_datetime(&current, duration, subtract) else {
+                    let Some(new_value) = shift_display_datetime(&current, duration, subtract)
+                    else {
                         skipped_count += 1;
                         continue;
                     };
@@ -1351,10 +1555,10 @@ impl GuiRunner for SlintRunner {
 
                 *pending_gps_date_times_handle.borrow_mut() = staged;
                 if shifted.len() == 1 {
-                    ui.set_gps_date_stamp(shifted[0].1.0.clone().into());
-                    ui.set_gps_time_stamp(shifted[0].1.1.clone().into());
+                    ui.set_gps_date_stamp(shifted[0].1 .0.clone().into());
+                    ui.set_gps_time_stamp(shifted[0].1 .1.clone().into());
                     ui.set_gps_date_time(
-                        combined_gps_date_time(&shifted[0].1.0, &shifted[0].1.1).into(),
+                        combined_gps_date_time(&shifted[0].1 .0, &shifted[0].1 .1).into(),
                     );
                     ui.set_gps_date_stamp_status("Modified".into());
                     ui.set_gps_time_stamp_status("Modified".into());
@@ -1372,7 +1576,10 @@ impl GuiRunner for SlintRunner {
                 }
                 ui.set_metadata_dirty(true);
                 let message = if skipped_count == 0 {
-                    format!("Shifted GPS date/time for {} file(s). Ctrl+S to save.", shifted.len())
+                    format!(
+                        "Shifted GPS date/time for {} file(s). Ctrl+S to save.",
+                        shifted.len()
+                    )
                 } else {
                     format!(
                         "Shifted GPS date/time for {} file(s); skipped {}. Ctrl+S to save.",
@@ -1419,7 +1626,11 @@ impl GuiRunner for SlintRunner {
             let message = if skipped_count == 0 {
                 format!("Shifted {} date(s). Ctrl+S to save.", shifted.len())
             } else {
-                format!("Shifted {} date(s); skipped {}. Ctrl+S to save.", shifted.len(), skipped_count)
+                format!(
+                    "Shifted {} date(s); skipped {}. Ctrl+S to save.",
+                    shifted.len(),
+                    skipped_count
+                )
             };
             show_toast(&ui, &message);
             true
@@ -1430,7 +1641,9 @@ impl GuiRunner for SlintRunner {
         let pending_gps_date_times_handle = pending_gps_date_times.clone();
         let ui_handle = ui.as_weak();
         ui.on_fill_taken_date_from_gps(move || {
-            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
             let selected_paths = {
                 let app = app_handle.borrow();
                 selected_file_paths(&app)
@@ -1453,9 +1666,7 @@ impl GuiRunner for SlintRunner {
                     skipped_count += 1;
                     continue;
                 }
-                let (date, time) = if selected_paths.len() == 1
-                    && ui.get_gps_date_time_dirty()
-                {
+                let (date, time) = if selected_paths.len() == 1 && ui.get_gps_date_time_dirty() {
                     match parse_combined_gps_date_time(ui.get_gps_date_time().as_str()) {
                         Ok((Some(date), Some(time))) => (date, time),
                         _ => {
@@ -1740,11 +1951,19 @@ impl GuiRunner for SlintRunner {
         ui.on_set_modified_date_from_created_date(move || {
             if let Some(ui) = ui_handle.upgrade() {
                 if ui.get_selected_file_count() == 0 {
-                    show_message(&ui, "Unable to Set Modified Date", "Select files before setting Modified Date.");
+                    show_message(
+                        &ui,
+                        "Unable to Set Modified Date",
+                        "Select files before setting Modified Date.",
+                    );
                     return;
                 }
                 if ui.get_selected_recyclable_count() != ui.get_selected_file_count() {
-                    show_message(&ui, "Unable to Set Modified Date", "Please select files only.");
+                    show_message(
+                        &ui,
+                        "Unable to Set Modified Date",
+                        "Please select files only.",
+                    );
                     return;
                 }
 
@@ -1753,14 +1972,22 @@ impl GuiRunner for SlintRunner {
                     selected_file_paths(&app)
                 };
                 if selected_paths.is_empty() {
-                    show_message(&ui, "Unable to Set Modified Date", "Selected files could not be resolved.");
+                    show_message(
+                        &ui,
+                        "Unable to Set Modified Date",
+                        "Selected files could not be resolved.",
+                    );
                     return;
                 }
 
                 if selected_paths.len() == 1 {
                     let created = ui.get_selected_created().to_string();
                     if parse_timestamp(&created).is_err() {
-                        show_message(&ui, "Unable to Set Modified Date", "Selected file created date could not be resolved.");
+                        show_message(
+                            &ui,
+                            "Unable to Set Modified Date",
+                            "Selected file created date could not be resolved.",
+                        );
                         return;
                     }
                     pending_modified_dates_handle.borrow_mut().clear();
@@ -1779,7 +2006,11 @@ impl GuiRunner for SlintRunner {
                 }
 
                 if pending.is_empty() {
-                    show_message(&ui, "Unable to Set Modified Date", "Selected file created dates could not be resolved.");
+                    show_message(
+                        &ui,
+                        "Unable to Set Modified Date",
+                        "Selected file created dates could not be resolved.",
+                    );
                     return;
                 }
 
@@ -1792,9 +2023,15 @@ impl GuiRunner for SlintRunner {
                 ui.set_metadata_dirty(true);
 
                 if skipped_count == 0 {
-                    show_toast(&ui, &format!("Staged {staged_count} modified date(s). Ctrl+S to save."));
+                    show_toast(
+                        &ui,
+                        &format!("Staged {staged_count} modified date(s). Ctrl+S to save."),
+                    );
                 } else {
-                    show_toast(&ui, &format!("Staged {staged_count}; skipped {skipped_count}. Ctrl+S to save."));
+                    show_toast(
+                        &ui,
+                        &format!("Staged {staged_count}; skipped {skipped_count}. Ctrl+S to save."),
+                    );
                 }
             }
         });
@@ -1914,10 +2151,18 @@ impl GuiRunner for SlintRunner {
                     let app = app_handle.borrow();
                     let index = ui.get_selected_index();
 
-                    if let Some((name, created, modified, is_dir)) = app.ui_details_for_index(index) {
+                    if let Some((name, created, modified, is_dir)) = app.ui_details_for_index(index)
+                    {
                         let display_name = app
                             .path_for_ui_index(index)
-                            .map(|path| display_file_name(&path, &name, is_dir, ui.get_show_extension_in_file_name()))
+                            .map(|path| {
+                                display_file_name(
+                                    &path,
+                                    &name,
+                                    is_dir,
+                                    ui.get_show_extension_in_file_name(),
+                                )
+                            })
                             .unwrap_or(name);
                         ui.set_selected_name(display_name.into());
                         ui.set_selected_created(created.into());
@@ -1960,7 +2205,11 @@ impl GuiRunner for SlintRunner {
         ui.on_save_copy(move || {
             if let Some(ui) = ui_handle.upgrade() {
                 if ui.get_selected_index() < 0 || ui.get_selected_is_dir() {
-                    show_message(&ui, "Save Copy Failed", "Select a file before saving a copy.");
+                    show_message(
+                        &ui,
+                        "Save Copy Failed",
+                        "Select a file before saving a copy.",
+                    );
                     return;
                 }
 
@@ -1972,7 +2221,11 @@ impl GuiRunner for SlintRunner {
                 let result = {
                     let mut app = app_handle.borrow_mut();
                     let Some(path) = app.path_for_ui_index(ui.get_selected_index()) else {
-                        show_message(&ui, "Save Copy Failed", "Selected file could not be resolved.");
+                        show_message(
+                            &ui,
+                            "Save Copy Failed",
+                            "Selected file could not be resolved.",
+                        );
                         return;
                     };
 
@@ -2067,7 +2320,11 @@ impl GuiRunner for SlintRunner {
         ui.on_delete_file(move || {
             if let Some(ui) = ui_handle.upgrade() {
                 if ui.get_selected_recyclable_count() == 0 {
-                    show_message(&ui, "Delete Failed", "Select a file or folder before deleting.");
+                    show_message(
+                        &ui,
+                        "Delete Failed",
+                        "Select a file or folder before deleting.",
+                    );
                     return;
                 }
 
@@ -2086,21 +2343,22 @@ impl GuiRunner for SlintRunner {
                         return Ok::<Option<PathBuf>, String>(None);
                     }
 
-                    for path in paths {
-                        move_file_to_recycle_bin(&path)?;
+                    for path in &paths {
+                        move_file_to_recycle_bin(path)?;
                     }
 
-                    app.load_folder();
-                    let next_path = selection_index_after_deletion(
-                        selection_index,
-                        app.visible_entry_count(),
-                    )
-                    .and_then(|next_index| app.path_for_ui_index(next_index));
+                    app.remove_deleted_paths(&paths);
+                    let next_path =
+                        selection_index_after_deletion(selection_index, app.visible_entry_count())
+                            .and_then(|next_index| app.path_for_ui_index(next_index));
                     Ok::<Option<PathBuf>, String>(next_path)
                 })();
 
                 match result {
-                    Ok(next_path) => refresh(next_path),
+                    Ok(next_path) => {
+                        refresh(next_path);
+                        ui.invoke_focus_file_list();
+                    }
                     Err(err) => show_message(&ui, "Delete Failed", &err),
                 }
             }
@@ -2142,7 +2400,9 @@ impl GuiRunner for SlintRunner {
         let refresh = refresh_ui.clone();
         let ui_handle = ui.as_weak();
         ui.on_confirm_move_trailing_numbers(move || {
-            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
             let result = {
                 let mut app = app_handle.borrow_mut();
                 let paths = selected_file_paths(&app);
@@ -2267,7 +2527,9 @@ impl GuiRunner for SlintRunner {
         let refresh = refresh_ui.clone();
         let ui_handle = ui.as_weak();
         ui.on_confirm_remove_img_vid_prefixes(move || {
-            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
             let result = {
                 let mut app = app_handle.borrow_mut();
                 let paths = selected_file_paths(&app);
@@ -2297,10 +2559,16 @@ impl GuiRunner for SlintRunner {
         let refresh = refresh_ui.clone();
         let ui_handle = ui.as_weak();
         ui.on_extract_embedded_thumbnails(move || {
-            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
             let paths = selected_file_paths(&app_handle.borrow());
             if paths.is_empty() {
-                show_message(&ui, "No Files Selected", "Select one or more JPEG files first.");
+                show_message(
+                    &ui,
+                    "No Files Selected",
+                    "Select one or more JPEG files first.",
+                );
                 return;
             }
 
@@ -2334,13 +2602,20 @@ impl GuiRunner for SlintRunner {
                 show_message(
                     &ui,
                     "Thumbnail Extraction Complete",
-                    &format!("Extracted {} thumbnail file(s) with the original EXIF metadata.", extracted.len()),
+                    &format!(
+                        "Extracted {} thumbnail file(s) with the original EXIF metadata.",
+                        extracted.len()
+                    ),
                 );
             } else {
                 let first_failure = failures.first().cloned().unwrap_or_default();
                 show_message(
                     &ui,
-                    if extracted.is_empty() { "Thumbnail Extraction Failed" } else { "Thumbnail Extraction Complete" },
+                    if extracted.is_empty() {
+                        "Thumbnail Extraction Failed"
+                    } else {
+                        "Thumbnail Extraction Complete"
+                    },
                     &format!(
                         "Extracted {}; skipped {}.\n{}",
                         extracted.len(),
@@ -2371,14 +2646,20 @@ impl GuiRunner for SlintRunner {
         let app_handle = app.clone();
         let ui_handle = ui.as_weak();
         ui.on_reveal_in_explorer(move |index| {
-            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
             let path = {
                 let app = app_handle.borrow();
                 app.path_for_ui_index(index)
             };
 
             let Some(path) = path else {
-                show_message(&ui, "Open in Explorer Failed", "The selected item could not be resolved.");
+                show_message(
+                    &ui,
+                    "Open in Explorer Failed",
+                    "The selected item could not be resolved.",
+                );
                 return;
             };
 
@@ -2390,7 +2671,9 @@ impl GuiRunner for SlintRunner {
         let overwrite_confirmed = date_overwrite_confirmed.clone();
         let ui_handle = ui.as_weak();
         ui.on_confirm_date_overwrite(move |confirmed| {
-            let Some(ui) = ui_handle.upgrade() else { return; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return;
+            };
             ui.set_message_title("Operation Failed".into());
             ui.set_message_text("".into());
             if confirmed {
@@ -2438,11 +2721,17 @@ impl GuiRunner for SlintRunner {
 
                     let result = {
                         let mut app = app_handle.borrow_mut();
-                        let Some(current_path) = app.path_for_ui_index(ui.get_selected_index()) else {
-                            show_message(&ui, "Rename Failed", "Selected file could not be resolved.");
+                        let Some(current_path) = app.path_for_ui_index(ui.get_selected_index())
+                        else {
+                            show_message(
+                                &ui,
+                                "Rename Failed",
+                                "Selected file could not be resolved.",
+                            );
                             return;
                         };
-                        let new_name = rename_name_preserving_extension(&current_path, &requested_name);
+                        let new_name =
+                            rename_name_preserving_extension(&current_path, &requested_name);
 
                         rename_entry(&current_path, &new_name).map(|new_path| {
                             app.load_folder();
@@ -2535,7 +2824,8 @@ impl GuiRunner for SlintRunner {
                         pending_gps_date_times_handle.borrow().clone();
                     let pending_created_dates_snapshot =
                         pending_created_dates_handle.borrow().clone();
-                    let pending_modified_dates_snapshot = pending_modified_dates_handle.borrow().clone();
+                    let pending_modified_dates_snapshot =
+                        pending_modified_dates_handle.borrow().clone();
                     let pending_taken_dates_arg = if pending_taken_dates_snapshot.is_empty() {
                         None
                     } else {
@@ -2553,10 +2843,9 @@ impl GuiRunner for SlintRunner {
                     };
                     for path in &selected_paths {
                         if pending_exif_removals_snapshot.contains(path) {
-                            if let Err(err) = remove_supported_metadata(
-                                path,
-                                ui.get_backup_before_changes(),
-                            ) {
+                            if let Err(err) =
+                                remove_supported_metadata(path, ui.get_backup_before_changes())
+                            {
                                 show_message(&ui, "Remove Metadata Failed", &err);
                                 return;
                             }
@@ -2667,7 +2956,11 @@ impl GuiRunner for SlintRunner {
                         return;
                     };
                     if !is_mp4_path(path) {
-                        show_message(&ui, "Apply Failed", "Selected file is not an MP4 video.");
+                        show_message(
+                            &ui,
+                            "Apply Failed",
+                            "Selected file is not a supported ISO media video.",
+                        );
                         return;
                     }
                     if let Err(err) = write_mp4_media_date(path, ui.get_taken_date().as_str()) {
@@ -2731,9 +3024,14 @@ impl GuiRunner for SlintRunner {
 
                     let current_metadata = read_exif_metadata(path);
                     if !current_metadata.has_exif {
-                        let metadata = collect_dirty_exif_metadata(&ui, current_metadata, None, false);
+                        let metadata =
+                            collect_dirty_exif_metadata(&ui, current_metadata, None, false);
                         let backup_before_changes = ui.get_backup_before_changes();
-                        let new_path = match rewrite_basic_exif_metadata(path, &metadata, backup_before_changes) {
+                        let new_path = match rewrite_basic_exif_metadata(
+                            path,
+                            &metadata,
+                            backup_before_changes,
+                        ) {
                             Ok(path) => path,
                             Err(err) => {
                                 show_message(&ui, "Apply Failed", &err);
@@ -2773,7 +3071,8 @@ impl GuiRunner for SlintRunner {
                                 None
                             };
 
-                            if let Err(err) = set_file_times(&new_path, created_time, modified_time) {
+                            if let Err(err) = set_file_times(&new_path, created_time, modified_time)
+                            {
                                 show_message(&ui, "Apply Failed", &err);
                                 return;
                             }
@@ -2795,7 +3094,8 @@ impl GuiRunner for SlintRunner {
                     }
 
                     if is_generated_new_exif_path(path) {
-                        let metadata = collect_dirty_exif_metadata(&ui, current_metadata, None, false);
+                        let metadata =
+                            collect_dirty_exif_metadata(&ui, current_metadata, None, false);
                         if let Err(err) = rewrite_generated_basic_exif_metadata(path, &metadata) {
                             show_message(&ui, "Apply Failed", &err);
                             return;
@@ -2888,7 +3188,9 @@ impl GuiRunner for SlintRunner {
         let previous_input = previous_taken_date_input.clone();
         let ui_handle = ui.as_weak();
         ui.on_taken_date_input_edited(move || {
-            let Some(ui) = ui_handle.upgrade() else { return -1; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return -1;
+            };
             let current = ui.get_taken_date().to_string();
             let formatted = auto_format_date_edit(&previous_input.borrow(), &current);
             *previous_input.borrow_mut() = formatted.clone();
@@ -2905,7 +3207,9 @@ impl GuiRunner for SlintRunner {
         let mirrored_previous_input = previous_png_exif_original_input.clone();
         let ui_handle = ui.as_weak();
         ui.on_png_creation_time_input_edited(move || {
-            let Some(ui) = ui_handle.upgrade() else { return -1; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return -1;
+            };
             let current = ui.get_png_creation_time().to_string();
             let previous = previous_input.borrow().clone();
             let formatted = auto_format_date_edit(&previous, &current);
@@ -2935,7 +3239,9 @@ impl GuiRunner for SlintRunner {
         let mirrored_previous_input = previous_png_creation_time_input.clone();
         let ui_handle = ui.as_weak();
         ui.on_png_exif_date_time_original_input_edited(move || {
-            let Some(ui) = ui_handle.upgrade() else { return -1; };
+            let Some(ui) = ui_handle.upgrade() else {
+                return -1;
+            };
             let current = ui.get_date_time_original().to_string();
             let previous = previous_input.borrow().clone();
             let formatted = auto_format_date_edit(&previous, &current);
@@ -2967,43 +3273,114 @@ impl GuiRunner for SlintRunner {
 }
 
 fn set_selected_file(ui: &MainWindow, app: &SlintApp, index: i32) {
-    let Some((name, created, modified, is_dir)) = app.ui_details_for_index(index) else {
+    let Some(entry) = app.selected_entry_details().into_iter().next() else {
         clear_selected_file(ui);
         return;
     };
-    let display_name = app
-        .path_for_ui_index(index)
-        .map(|path| display_file_name(&path, &name, is_dir, ui.get_show_extension_in_file_name()))
-        .unwrap_or(name);
+    let display_name = entry
+        .path
+        .as_ref()
+        .map(|path| {
+            display_file_name(
+                path,
+                &entry.name,
+                entry.is_dir,
+                ui.get_show_extension_in_file_name(),
+            )
+        })
+        .unwrap_or_else(|| entry.name.clone());
 
     ui.set_selected_index(index);
     ui.set_selected_name(display_name.clone().into());
-    ui.set_selected_created(created.clone().into());
-    ui.set_selected_modified(modified.clone().into());
+    ui.set_selected_size(entry.exact_size.into());
+    ui.set_selected_created(entry.created.clone().into());
+    ui.set_selected_modified(entry.modified.clone().into());
     ui.set_original_selected_name(display_name.into());
-    ui.set_original_selected_created(created.into());
-    ui.set_original_selected_modified(modified.into());
-    ui.set_selected_is_dir(is_dir);
-    ui.set_selected_file_count(if is_dir { 0 } else { 1 });
+    ui.set_original_selected_created(entry.created.into());
+    ui.set_original_selected_modified(entry.modified.into());
+    ui.set_selected_is_dir(entry.is_dir);
+    ui.set_selected_file_count(if entry.is_dir { 0 } else { 1 });
     ui.set_selected_recyclable_count(if index > 0 { 1 } else { 0 });
-    ui.set_selected_delete_message(delete_confirmation_message(ui.get_selected_recyclable_count()).into());
+    ui.set_selected_delete_message(
+        delete_confirmation_message(ui.get_selected_recyclable_count()).into(),
+    );
     ui.set_selected_name_status(status_for_value(ui.get_selected_name().as_str()).into());
     ui.set_selected_created_status(status_for_value(ui.get_selected_created().as_str()).into());
     ui.set_selected_modified_status(status_for_value(ui.get_selected_modified().as_str()).into());
-    set_selected_media_details(ui, app);
+    ui.set_selected_time_interpretation(entry.time_interpretation.into());
+    set_media_details(
+        ui,
+        &entry.media_kind,
+        &entry.media_type,
+        &entry.media_date,
+        &entry.metadata_status,
+    );
 
-    let metadata = app
-        .path_for_ui_index(index)
-        .filter(|path| path.is_file() && is_jpeg_path(path))
-        .map(|path| read_exif_metadata(&path))
-        .unwrap_or_default();
-    set_loaded_exif_metadata(ui, metadata);
-    if let Some(path) = app.path_for_ui_index(index).filter(|path| path.is_file() && is_mp4_path(path)) {
-        set_loaded_media_date(ui, scan_media_file(&path).media_date);
+    let mut metadata = entry.exif_metadata.unwrap_or_default();
+    if entry.media_kind == "jpeg" && entry.metadata_status == "Scanning..." {
+        // Keep the JPEG Details layout stable while the background scanner
+        // catches up; do not synchronously reopen the file during navigation.
+        metadata.has_exif = true;
     }
-    if let Some(path) = app.path_for_ui_index(index).filter(|path| path.is_file() && is_png_path(path)) {
-        set_loaded_media_date(ui, scan_media_file(&path).media_date);
-        set_loaded_png_date_sources(ui, &path);
+    set_loaded_exif_metadata(ui, metadata);
+    if entry.media_kind == "mp4" {
+        set_loaded_media_date(ui, entry.media_date.clone());
+    }
+    if entry.media_kind == "png" {
+        set_loaded_media_date(ui, entry.media_date);
+        if let Some(path) = entry.path.as_deref() {
+            set_loaded_png_date_sources(ui, path);
+        }
+    }
+}
+
+fn sync_file_selection_model(ui: &MainWindow, app: &SlintApp) {
+    let model = ui.get_files();
+    for row_index in 0..model.row_count() {
+        let Some(mut row) = model.row_data(row_index) else {
+            continue;
+        };
+        let selected = i32::try_from(row_index)
+            .ok()
+            .is_some_and(|index| app.selected_indices().contains(&index));
+        if row.selected != selected {
+            row.selected = selected;
+            model.set_row_data(row_index, row);
+        }
+    }
+}
+
+fn sync_changed_file_selection_model(
+    ui: &MainWindow,
+    previous: &[i32],
+    current: &[i32],
+) {
+    let model = ui.get_files();
+    let previous: HashSet<i32> = previous.iter().copied().collect();
+    let current: HashSet<i32> = current.iter().copied().collect();
+    for index in previous.symmetric_difference(&current) {
+        let Ok(row_index) = usize::try_from(*index) else {
+            continue;
+        };
+        let Some(mut row) = model.row_data(row_index) else {
+            continue;
+        };
+        row.selected = current.contains(index);
+        model.set_row_data(row_index, row);
+    }
+}
+
+fn sync_file_selection_row(ui: &MainWindow, index: i32, selected: bool) {
+    let Ok(row_index) = usize::try_from(index) else {
+        return;
+    };
+    let model = ui.get_files();
+    let Some(mut row) = model.row_data(row_index) else {
+        return;
+    };
+    if row.selected != selected {
+        row.selected = selected;
+        model.set_row_data(row_index, row);
     }
 }
 
@@ -3020,10 +3397,11 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
     }
 
     if indices.len() > 5 {
-        let (file_count, recyclable_count, has_dir) = app.selected_counts();
+        let (file_count, recyclable_count, has_dir) = set_large_selection_media_details(ui, indices);
         let summary = format!("{} items selected", indices.len());
         ui.set_selected_index(*indices.last().unwrap_or(&-1));
         ui.set_selected_name(summary.clone().into());
+        ui.set_selected_size("<Multiple values>".into());
         ui.set_selected_created(String::new().into());
         ui.set_selected_modified(String::new().into());
         ui.set_selected_name_status(String::new().into());
@@ -3039,7 +3417,6 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
         // Determining the selected media kind only uses the already-loaded file
         // entries/extensions, so large selections can keep their tools available
         // without performing EXIF aggregation.
-        set_selected_media_details(ui, app);
         let mut metadata = ExifMetadata::default();
         metadata.has_exif = large_selection_exif_available(
             ui.get_selected_media_kind().as_str(),
@@ -3052,45 +3429,57 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
         return;
     }
 
+    let selected_entries = app.selected_entry_details();
+    let file_count = selected_entries.iter().filter(|entry| !entry.is_dir).count();
+    let recyclable_count = selected_entries
+        .iter()
+        .filter(|entry| entry.path.is_some())
+        .count();
+    let has_dir = selected_entries.iter().any(|entry| entry.is_dir);
+
     let mut names = Vec::new();
+    let mut sizes = Vec::new();
     let mut created_values = Vec::new();
     let mut modified_values = Vec::new();
-    let mut has_dir = false;
     let mut metadata_values = Vec::new();
     let mut png_date_sources = Vec::new();
 
-    for index in indices {
-        if let Some((name, created, modified, is_dir)) = app.ui_details_for_index(*index) {
-            let display_name = app
-                .path_for_ui_index(*index)
-                .map(|path| display_file_name(&path, &name, is_dir, ui.get_show_extension_in_file_name()))
-                .unwrap_or(name);
-            names.push(display_name);
-            created_values.push(created);
-            modified_values.push(modified);
-            has_dir |= is_dir;
-        }
+    for entry in &selected_entries {
+        let display_name = entry
+            .path
+            .as_ref()
+            .map(|path| {
+                display_file_name(
+                    path,
+                    &entry.name,
+                    entry.is_dir,
+                    ui.get_show_extension_in_file_name(),
+                )
+            })
+            .unwrap_or_else(|| entry.name.clone());
+        names.push(display_name);
+        sizes.push(entry.exact_size.clone());
+        created_values.push(entry.created.clone());
+        modified_values.push(entry.modified.clone());
 
-        let metadata = app
-            .path_for_ui_index(*index)
-            .filter(|path| path.is_file() && is_jpeg_path(path))
-            .map(|path| read_exif_metadata(&path))
-            .unwrap_or_default();
-        metadata_values.push(metadata);
+        metadata_values.push(entry.exif_metadata.clone().unwrap_or_default());
 
-        if let Some(path) = app
-            .path_for_ui_index(*index)
-            .filter(|path| path.is_file() && is_png_path(path))
-        {
-            png_date_sources.push(read_png_date_sources(&path));
+        if let Some(path) = entry.path.as_deref().filter(|path| is_png_path(path)) {
+            png_date_sources.push(read_png_date_sources(path));
         }
     }
 
     ui.set_selected_index(*indices.last().unwrap_or(&-1));
     let name_display = selection_display(names);
+    let size_display = selection_display(sizes);
     let created_display = selection_display(created_values);
     let modified_display = selection_display(modified_values);
     ui.set_selected_name(name_display.value.into());
+    ui.set_selected_size(if size_display.status == "Mixed" {
+        "<Multiple values>".into()
+    } else {
+        size_display.value.into()
+    });
     ui.set_selected_created(created_display.value.into());
     ui.set_selected_modified(modified_display.value.into());
     ui.set_selected_name_status(name_display.status.into());
@@ -3100,10 +3489,12 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
     ui.set_original_selected_created(ui.get_selected_created());
     ui.set_original_selected_modified(ui.get_selected_modified());
     ui.set_selected_is_dir(has_dir);
-    ui.set_selected_file_count(selected_file_paths(app).len() as i32);
-    ui.set_selected_recyclable_count(selected_recyclable_paths(app).len() as i32);
-    ui.set_selected_delete_message(delete_confirmation_message(ui.get_selected_recyclable_count()).into());
-    set_selected_media_details(ui, app);
+    ui.set_selected_file_count(file_count as i32);
+    ui.set_selected_recyclable_count(recyclable_count as i32);
+    ui.set_selected_delete_message(
+        delete_confirmation_message(ui.get_selected_recyclable_count()).into(),
+    );
+    set_selected_media_details_from_entries(ui, &selected_entries);
 
     set_loaded_exif_metadata(ui, join_metadata(&metadata_values));
     set_joined_metadata_statuses(ui, &metadata_values);
@@ -3115,6 +3506,7 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
 fn clear_selected_file(ui: &MainWindow) {
     ui.set_selected_index(-1);
     ui.set_selected_name("N/A".into());
+    ui.set_selected_size("N/A".into());
     ui.set_selected_created("N/A".into());
     ui.set_selected_modified("N/A".into());
     ui.set_original_selected_name("N/A".into());
@@ -3127,54 +3519,102 @@ fn clear_selected_file(ui: &MainWindow) {
     ui.set_selected_file_count(0);
     ui.set_selected_recyclable_count(0);
     ui.set_selected_delete_message(String::new().into());
+    ui.set_selected_time_interpretation("".into());
     set_media_details(ui, "", "", "", "");
     ui.set_metadata_dirty(false);
     reset_metadata_dirty_flags(ui);
     set_loaded_exif_metadata(ui, ExifMetadata::default());
 }
 
-fn set_selected_media_details(ui: &MainWindow, app: &SlintApp) {
-    let indices = app.selected_indices();
-    if indices.is_empty() {
-        set_media_details(ui, "", "", "", "");
-        return;
-    }
-
-    if indices.len() == 1 {
-        let (kind, media_type, media_date, metadata_status) = app.media_details_for_index(indices[0]);
-        set_media_details(ui, &kind, &media_type, &media_date, &metadata_status);
-        return;
-    }
-
-    let mut kinds: Vec<String> = indices
+fn set_selected_media_details_from_entries(
+    ui: &MainWindow,
+    entries: &[SelectedEntryDetails],
+) {
+    ui.set_selected_time_interpretation("Mixed".into());
+    let mut kinds: Vec<&str> = entries
         .iter()
-        .filter_map(|index| {
-            let (kind, _, _, _) = app.media_details_for_index(*index);
-            if kind == "folder" || kind.is_empty() {
-                None
-            } else {
-                Some(kind)
-            }
+        .filter_map(|entry| match entry.media_kind.as_str() {
+            "" | "folder" => None,
+            kind => Some(kind),
         })
         .collect();
-    kinds.sort();
+    kinds.sort_unstable();
     kinds.dedup();
 
-    if kinds.len() == 1 && kinds[0] == "jpeg" {
-        let metadata_status = selection_summary(
-            indices
-                .iter()
-                .map(|index| app.media_details_for_index(*index).3)
-                .collect(),
-        );
-        set_media_details(ui, "jpeg", "", "", &metadata_status);
-    } else if kinds.len() == 1 && kinds[0] == "mp4" {
-        set_media_details(ui, "mp4", "Multiple videos", "Mixed", "Mixed");
-    } else if kinds.len() == 1 && kinds[0] == "png" {
-        set_media_details(ui, "png", "Multiple PNG images", "Mixed", "Mixed");
-    } else {
-        set_media_details(ui, "mixed", "", "", "");
+    match kinds.as_slice() {
+        ["jpeg"] => {
+            let metadata_status = selection_summary(
+                entries
+                    .iter()
+                    .filter(|entry| entry.media_kind == "jpeg")
+                    .map(|entry| entry.metadata_status.clone())
+                    .collect(),
+            );
+            set_media_details(ui, "jpeg", "", "", &metadata_status);
+        }
+        ["mp4"] => set_media_details(ui, "mp4", "Multiple videos", "Mixed", "Mixed"),
+        ["mts"] => set_media_details(ui, "mts", "Multiple AVCHD videos", "-", "Not Found"),
+        ["png"] => set_media_details(ui, "png", "Multiple PNG images", "Mixed", "Mixed"),
+        _ => set_media_details(ui, "mixed", "", "", ""),
     }
+}
+
+fn set_large_selection_media_details(
+    ui: &MainWindow,
+    indices: &[i32],
+) -> (usize, usize, bool) {
+    let model = ui.get_files();
+    let mut file_count = 0usize;
+    let mut recyclable_count = 0usize;
+    let mut has_dir = false;
+    let mut kinds = Vec::new();
+    let mut jpeg_statuses = Vec::new();
+
+    for index in indices {
+        let Ok(row_index) = usize::try_from(*index) else {
+            continue;
+        };
+        let Some(row) = model.row_data(row_index) else {
+            continue;
+        };
+        if *index > 0 {
+            recyclable_count += 1;
+        }
+        if row.is_dir {
+            has_dir = true;
+            continue;
+        }
+        file_count += 1;
+        let kind = row.media_kind.to_string();
+        if !kind.is_empty() && kind != "pending" {
+            if kind == "jpeg" {
+                jpeg_statuses.push(row.metadata_status.to_string());
+            }
+            kinds.push(kind);
+        }
+    }
+
+    kinds.sort_unstable();
+    kinds.dedup();
+    ui.set_selected_time_interpretation("Mixed".into());
+    match kinds.as_slice() {
+        [kind] if kind == "jpeg" => {
+            let status = selection_summary(jpeg_statuses);
+            set_media_details(ui, "jpeg", "", "", &status);
+        }
+        [kind] if kind == "mp4" => {
+            set_media_details(ui, "mp4", "Multiple videos", "Mixed", "Mixed")
+        }
+        [kind] if kind == "mts" => {
+            set_media_details(ui, "mts", "Multiple AVCHD videos", "-", "Not Found")
+        }
+        [kind] if kind == "png" => {
+            set_media_details(ui, "png", "Multiple PNG images", "Mixed", "Mixed")
+        }
+        _ => set_media_details(ui, "mixed", "", "", ""),
+    }
+
+    (file_count, recyclable_count, has_dir)
 }
 
 fn set_media_details(
@@ -3191,7 +3631,11 @@ fn set_media_details(
 }
 
 fn set_loaded_media_date(ui: &MainWindow, media_date: String) {
-    let value = if media_date == "-" { String::new() } else { media_date };
+    let value = if media_date == "-" {
+        String::new()
+    } else {
+        media_date
+    };
     ui.set_taken_date(value.clone().into());
     ui.set_original_taken_date(value.clone().into());
     ui.set_taken_date_status(status_for_value(&value).into());
@@ -3280,15 +3724,12 @@ fn update_png_date_source_conflict(ui: &MainWindow) {
     let creation = ui.get_png_creation_time();
     let original = ui.get_date_time_original();
     ui.set_png_date_sources_conflict(
-        !creation.trim().is_empty()
-            && !original.trim().is_empty()
-            && creation != original,
+        !creation.trim().is_empty() && !original.trim().is_empty() && creation != original,
     );
 }
 
 fn set_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
-    let gps_date_time =
-        combined_gps_date_time(&metadata.gps_date_stamp, &metadata.gps_time_stamp);
+    let gps_date_time = combined_gps_date_time(&metadata.gps_date_stamp, &metadata.gps_time_stamp);
     let date_sources: Vec<&str> = [
         metadata.date_time_original.as_str(),
         metadata.date_time_digitized.as_str(),
@@ -3343,8 +3784,7 @@ fn set_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
 }
 
 fn set_loaded_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
-    let gps_date_time =
-        combined_gps_date_time(&metadata.gps_date_stamp, &metadata.gps_time_stamp);
+    let gps_date_time = combined_gps_date_time(&metadata.gps_date_stamp, &metadata.gps_time_stamp);
     set_exif_metadata(ui, metadata.clone());
     set_metadata_statuses(ui, &metadata);
     ui.set_original_taken_date(metadata.taken_date.into());
@@ -3405,28 +3845,228 @@ fn set_metadata_statuses(ui: &MainWindow, metadata: &ExifMetadata) {
 }
 
 fn set_joined_metadata_statuses(ui: &MainWindow, values: &[ExifMetadata]) {
-    ui.set_taken_date_status(selection_display(values.iter().map(|metadata| metadata.taken_date.clone()).collect()).status.into());
-    ui.set_camera_make_status(selection_display(values.iter().map(|metadata| metadata.camera_make.clone()).collect()).status.into());
-    ui.set_camera_model_status(selection_display(values.iter().map(|metadata| metadata.camera_model.clone()).collect()).status.into());
-    ui.set_lens_model_status(selection_display(values.iter().map(|metadata| metadata.lens_model.clone()).collect()).status.into());
-    ui.set_software_status(selection_display(values.iter().map(|metadata| metadata.software.clone()).collect()).status.into());
-    ui.set_artist_status(selection_display(values.iter().map(|metadata| metadata.artist.clone()).collect()).status.into());
-    ui.set_shutter_speed_status(selection_display(values.iter().map(|metadata| metadata.shutter_speed.clone()).collect()).status.into());
-    ui.set_aperture_status(selection_display(values.iter().map(|metadata| metadata.aperture.clone()).collect()).status.into());
-    ui.set_iso_speed_status(selection_display(values.iter().map(|metadata| metadata.iso_speed.clone()).collect()).status.into());
-    ui.set_focal_length_status(selection_display(values.iter().map(|metadata| metadata.focal_length.clone()).collect()).status.into());
-    ui.set_flash_fired_status(selection_display(values.iter().map(|metadata| metadata.flash_fired.clone()).collect()).status.into());
-    ui.set_metering_mode_status(selection_display(values.iter().map(|metadata| metadata.metering_mode.clone()).collect()).status.into());
-    ui.set_image_width_status(selection_display(values.iter().map(|metadata| metadata.image_width.clone()).collect()).status.into());
-    ui.set_image_height_status(selection_display(values.iter().map(|metadata| metadata.image_height.clone()).collect()).status.into());
-    ui.set_orientation_status(selection_display(values.iter().map(|metadata| metadata.orientation.clone()).collect()).status.into());
-    ui.set_color_space_status(selection_display(values.iter().map(|metadata| metadata.color_space.clone()).collect()).status.into());
-    ui.set_gps_latitude_status(selection_display(values.iter().map(|metadata| metadata.gps_latitude.clone()).collect()).status.into());
-    ui.set_gps_longitude_status(selection_display(values.iter().map(|metadata| metadata.gps_longitude.clone()).collect()).status.into());
-    ui.set_gps_altitude_status(selection_display(values.iter().map(|metadata| metadata.gps_altitude.clone()).collect()).status.into());
-    ui.set_gps_date_stamp_status(selection_display(values.iter().map(|metadata| metadata.gps_date_stamp.clone()).collect()).status.into());
-    ui.set_gps_time_stamp_status(selection_display(values.iter().map(|metadata| metadata.gps_time_stamp.clone()).collect()).status.into());
-    ui.set_gps_date_time_status(selection_display(values.iter().map(|metadata| combined_gps_date_time(&metadata.gps_date_stamp, &metadata.gps_time_stamp)).collect()).status.into());
+    ui.set_taken_date_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.taken_date.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_camera_make_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.camera_make.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_camera_model_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.camera_model.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_lens_model_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.lens_model.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_software_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.software.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_artist_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.artist.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_shutter_speed_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.shutter_speed.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_aperture_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.aperture.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_iso_speed_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.iso_speed.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_focal_length_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.focal_length.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_flash_fired_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.flash_fired.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_metering_mode_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.metering_mode.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_image_width_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.image_width.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_image_height_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.image_height.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_orientation_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.orientation.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_color_space_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.color_space.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_gps_latitude_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.gps_latitude.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_gps_longitude_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.gps_longitude.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_gps_altitude_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.gps_altitude.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_gps_date_stamp_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.gps_date_stamp.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_gps_time_stamp_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| metadata.gps_time_stamp.clone())
+                .collect(),
+        )
+        .status
+        .into(),
+    );
+    ui.set_gps_date_time_status(
+        selection_display(
+            values
+                .iter()
+                .map(|metadata| {
+                    combined_gps_date_time(&metadata.gps_date_stamp, &metadata.gps_time_stamp)
+                })
+                .collect(),
+        )
+        .status
+        .into(),
+    );
 }
 
 fn set_large_selection_metadata_statuses(ui: &MainWindow) {
@@ -3500,7 +4140,10 @@ fn selection_display(values: Vec<String>) -> SelectionDisplay {
         }
     } else {
         let status = status_for_value(&first);
-        SelectionDisplay { value: first, status }
+        SelectionDisplay {
+            value: first,
+            status,
+        }
     }
 }
 
@@ -3512,36 +4155,186 @@ fn status_for_value(value: &str) -> String {
 fn join_metadata(values: &[ExifMetadata]) -> ExifMetadata {
     ExifMetadata {
         has_exif: values.iter().any(|metadata| metadata.has_exif),
-        taken_date: joined_selection_value(values.iter().map(|metadata| metadata.taken_date.clone()).collect()),
-        date_time_original: joined_selection_value(values.iter().map(|metadata| metadata.date_time_original.clone()).collect()),
-        date_time_digitized: joined_selection_value(values.iter().map(|metadata| metadata.date_time_digitized.clone()).collect()),
-        image_date_time: joined_selection_value(values.iter().map(|metadata| metadata.image_date_time.clone()).collect()),
-        camera_make: joined_selection_value(values.iter().map(|metadata| metadata.camera_make.clone()).collect()),
-        camera_model: joined_selection_value(values.iter().map(|metadata| metadata.camera_model.clone()).collect()),
-        lens_model: joined_selection_value(values.iter().map(|metadata| metadata.lens_model.clone()).collect()),
-        software: joined_selection_value(values.iter().map(|metadata| metadata.software.clone()).collect()),
-        artist: joined_selection_value(values.iter().map(|metadata| metadata.artist.clone()).collect()),
-        image_description: joined_selection_value(values.iter().map(|metadata| metadata.image_description.clone()).collect()),
-        copyright: joined_selection_value(values.iter().map(|metadata| metadata.copyright.clone()).collect()),
-        exif_version: joined_selection_value(values.iter().map(|metadata| metadata.exif_version.clone()).collect()),
-        exposure_program: joined_selection_value(values.iter().map(|metadata| metadata.exposure_program.clone()).collect()),
-        white_balance: joined_selection_value(values.iter().map(|metadata| metadata.white_balance.clone()).collect()),
-        focal_length_35mm: joined_selection_value(values.iter().map(|metadata| metadata.focal_length_35mm.clone()).collect()),
-        shutter_speed: joined_selection_value(values.iter().map(|metadata| metadata.shutter_speed.clone()).collect()),
-        aperture: joined_selection_value(values.iter().map(|metadata| metadata.aperture.clone()).collect()),
-        iso_speed: joined_selection_value(values.iter().map(|metadata| metadata.iso_speed.clone()).collect()),
-        focal_length: joined_selection_value(values.iter().map(|metadata| metadata.focal_length.clone()).collect()),
-        flash_fired: joined_selection_value(values.iter().map(|metadata| metadata.flash_fired.clone()).collect()),
-        metering_mode: joined_selection_value(values.iter().map(|metadata| metadata.metering_mode.clone()).collect()),
-        image_width: joined_selection_value(values.iter().map(|metadata| metadata.image_width.clone()).collect()),
-        image_height: joined_selection_value(values.iter().map(|metadata| metadata.image_height.clone()).collect()),
-        orientation: joined_selection_value(values.iter().map(|metadata| metadata.orientation.clone()).collect()),
-        color_space: joined_selection_value(values.iter().map(|metadata| metadata.color_space.clone()).collect()),
-        gps_latitude: joined_selection_value(values.iter().map(|metadata| metadata.gps_latitude.clone()).collect()),
-        gps_longitude: joined_selection_value(values.iter().map(|metadata| metadata.gps_longitude.clone()).collect()),
-        gps_altitude: joined_selection_value(values.iter().map(|metadata| metadata.gps_altitude.clone()).collect()),
-        gps_date_stamp: joined_selection_value(values.iter().map(|metadata| metadata.gps_date_stamp.clone()).collect()),
-        gps_time_stamp: joined_selection_value(values.iter().map(|metadata| metadata.gps_time_stamp.clone()).collect()),
+        taken_date: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.taken_date.clone())
+                .collect(),
+        ),
+        date_time_original: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.date_time_original.clone())
+                .collect(),
+        ),
+        date_time_digitized: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.date_time_digitized.clone())
+                .collect(),
+        ),
+        image_date_time: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.image_date_time.clone())
+                .collect(),
+        ),
+        camera_make: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.camera_make.clone())
+                .collect(),
+        ),
+        camera_model: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.camera_model.clone())
+                .collect(),
+        ),
+        lens_model: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.lens_model.clone())
+                .collect(),
+        ),
+        software: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.software.clone())
+                .collect(),
+        ),
+        artist: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.artist.clone())
+                .collect(),
+        ),
+        image_description: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.image_description.clone())
+                .collect(),
+        ),
+        copyright: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.copyright.clone())
+                .collect(),
+        ),
+        exif_version: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.exif_version.clone())
+                .collect(),
+        ),
+        exposure_program: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.exposure_program.clone())
+                .collect(),
+        ),
+        white_balance: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.white_balance.clone())
+                .collect(),
+        ),
+        focal_length_35mm: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.focal_length_35mm.clone())
+                .collect(),
+        ),
+        shutter_speed: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.shutter_speed.clone())
+                .collect(),
+        ),
+        aperture: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.aperture.clone())
+                .collect(),
+        ),
+        iso_speed: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.iso_speed.clone())
+                .collect(),
+        ),
+        focal_length: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.focal_length.clone())
+                .collect(),
+        ),
+        flash_fired: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.flash_fired.clone())
+                .collect(),
+        ),
+        metering_mode: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.metering_mode.clone())
+                .collect(),
+        ),
+        image_width: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.image_width.clone())
+                .collect(),
+        ),
+        image_height: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.image_height.clone())
+                .collect(),
+        ),
+        orientation: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.orientation.clone())
+                .collect(),
+        ),
+        color_space: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.color_space.clone())
+                .collect(),
+        ),
+        gps_latitude: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.gps_latitude.clone())
+                .collect(),
+        ),
+        gps_longitude: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.gps_longitude.clone())
+                .collect(),
+        ),
+        gps_altitude: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.gps_altitude.clone())
+                .collect(),
+        ),
+        gps_date_stamp: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.gps_date_stamp.clone())
+                .collect(),
+        ),
+        gps_time_stamp: joined_selection_value(
+            values
+                .iter()
+                .map(|metadata| metadata.gps_time_stamp.clone())
+                .collect(),
+        ),
     }
 }
 
@@ -3551,7 +4344,12 @@ fn show_message(ui: &MainWindow, title: &str, message: &str) {
     ui.set_message_visible(true);
 }
 
-fn display_file_name(path: &std::path::Path, fallback: &str, is_dir: bool, show_extension: bool) -> String {
+fn display_file_name(
+    path: &std::path::Path,
+    fallback: &str,
+    is_dir: bool,
+    show_extension: bool,
+) -> String {
     if is_dir || show_extension {
         return fallback.to_string();
     }
@@ -3562,7 +4360,10 @@ fn display_file_name(path: &std::path::Path, fallback: &str, is_dir: bool, show_
         .unwrap_or_else(|| fallback.to_string())
 }
 
-fn rename_name_preserving_extension(current_path: &std::path::Path, requested_name: &str) -> String {
+fn rename_name_preserving_extension(
+    current_path: &std::path::Path,
+    requested_name: &str,
+) -> String {
     if !current_path.is_file() {
         return requested_name.to_string();
     }
@@ -3631,9 +4432,7 @@ fn filename_from_media_date_with_reserved(
     Ok(if show_extension { full_name } else { stem })
 }
 
-fn apply_filename_rename_plan(
-    plan: &HashMap<PathBuf, String>,
-) -> Result<Vec<PathBuf>, String> {
+fn apply_filename_rename_plan(plan: &HashMap<PathBuf, String>) -> Result<Vec<PathBuf>, String> {
     let mut entries: Vec<_> = plan.iter().collect();
     entries.sort_by(|left, right| left.0.cmp(right.0));
     let mut committed = Vec::with_capacity(entries.len());
@@ -3650,10 +4449,7 @@ fn apply_filename_rename_plan(
         }
     }
 
-    Ok(committed
-        .into_iter()
-        .map(|(_, target)| target)
-        .collect())
+    Ok(committed.into_iter().map(|(_, target)| target).collect())
 }
 
 fn selected_file_paths(app: &SlintApp) -> Vec<PathBuf> {
@@ -3679,7 +4475,20 @@ fn is_png_path(path: &std::path::Path) -> bool {
 fn is_mp4_path(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mp4" | "mov" | "m4v" | "3gp" | "3g2" | "qt"
+            )
+        })
+}
+
+fn is_mpeg_ts_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(extension.to_ascii_lowercase().as_str(), "mts" | "m2ts")
+        })
 }
 
 fn remove_supported_metadata(
@@ -3707,7 +4516,9 @@ fn selected_recyclable_paths(app: &SlintApp) -> Vec<PathBuf> {
 fn delete_confirmation_message(count: i32) -> String {
     match count {
         1 => "1 file/folder is selected. Send it to the Recycle Bin?".to_string(),
-        count if count > 1 => format!("{count} files/folders are selected. Send them to the Recycle Bin?"),
+        count if count > 1 => {
+            format!("{count} files/folders are selected. Send them to the Recycle Bin?")
+        }
         _ => String::new(),
     }
 }
@@ -3725,7 +4536,9 @@ fn apply_metadata_changes_to_path(
     let has_pending_taken_date = taken_date_override.is_some();
     if is_mp4_path(path) {
         if has_exif_metadata_changes_without_taken_date(ui) {
-            return Err("Only Media Date can be written to MP4 files.".to_string());
+            return Err(
+                "Only Media Date can be written to MP4/MOV/M4V/3GP/3G2 files.".to_string(),
+            );
         }
         if let Some(taken_date) = taken_date_override {
             write_mp4_media_date(path, taken_date)?;
@@ -3738,13 +4551,25 @@ fn apply_metadata_changes_to_path(
         write_dirty_file_times(ui, path, pending_created_dates, pending_modified_dates)?;
         return Ok(None);
     }
+    if is_mpeg_ts_path(path) {
+        if has_pending_taken_date || has_exif_metadata_changes(ui) {
+            return Err(
+                "Embedded Media Date writing is not supported for MTS/M2TS files.".to_string(),
+            );
+        }
+        write_dirty_file_times(ui, path, pending_created_dates, pending_modified_dates)?;
+        return Ok(None);
+    }
     if is_png_path(path) {
         if has_exif_metadata_changes_without_taken_date(ui) {
             return Err("Only Media Date can be written to PNG files.".to_string());
         }
         if let Some(taken_date) = taken_date_override {
             write_png_media_date(path, taken_date, ui.get_backup_before_changes())?;
-        } else if ui.get_selected_media_kind().as_str() == "png" && ui.get_taken_date_dirty() && pending_taken_dates.is_none() {
+        } else if ui.get_selected_media_kind().as_str() == "png"
+            && ui.get_taken_date_dirty()
+            && pending_taken_dates.is_none()
+        {
             write_png_media_date(
                 path,
                 ui.get_taken_date().as_str(),
@@ -3764,7 +4589,12 @@ fn apply_metadata_changes_to_path(
     let target_path = if has_exif_changes || has_pending_taken_date {
         let current_metadata = read_exif_metadata(path);
         if !current_metadata.has_exif {
-            let metadata = collect_dirty_exif_metadata(ui, current_metadata, taken_date_override, pending_taken_dates.is_some());
+            let metadata = collect_dirty_exif_metadata(
+                ui,
+                current_metadata,
+                taken_date_override,
+                pending_taken_dates.is_some(),
+            );
             let backup_before_changes = ui.get_backup_before_changes();
             let new_path = rewrite_basic_exif_metadata(path, &metadata, backup_before_changes)?;
             if backup_before_changes {
@@ -3773,14 +4603,26 @@ fn apply_metadata_changes_to_path(
             }
             Some(new_path)
         } else if is_generated_new_exif_path(path) {
-            let metadata = collect_dirty_exif_metadata(ui, current_metadata, taken_date_override, pending_taken_dates.is_some());
+            let metadata = collect_dirty_exif_metadata(
+                ui,
+                current_metadata,
+                taken_date_override,
+                pending_taken_dates.is_some(),
+            );
             rewrite_generated_basic_exif_metadata(path, &metadata)?;
             None
         } else {
-            if let Err(err) = write_dirty_exif_tags(ui, path, taken_date_override, pending_taken_dates.is_some()) {
+            if let Err(err) =
+                write_dirty_exif_tags(ui, path, taken_date_override, pending_taken_dates.is_some())
+            {
                 if is_missing_writable_exif_tag_error(&err) {
                     let current_metadata = read_exif_metadata(path);
-                    let metadata = collect_dirty_exif_metadata(ui, current_metadata, taken_date_override, pending_taken_dates.is_some());
+                    let metadata = collect_dirty_exif_metadata(
+                        ui,
+                        current_metadata,
+                        taken_date_override,
+                        pending_taken_dates.is_some(),
+                    );
                     rewrite_repairable_exif_metadata(
                         path,
                         &metadata,
@@ -3813,9 +4655,13 @@ fn write_dirty_exif_tags(
     using_pending_taken_dates: bool,
 ) -> Result<(), String> {
     if let Some(taken_date) = taken_date_override {
-        write_taken_date(path, taken_date)?;
+        write_taken_date_preserving_exif(path, taken_date, ui.get_backup_before_changes())?;
     } else if ui.get_taken_date_dirty() && !using_pending_taken_dates {
-        write_taken_date(path, ui.get_taken_date().as_str())?;
+        write_taken_date_preserving_exif(
+            path,
+            ui.get_taken_date().as_str(),
+            ui.get_backup_before_changes(),
+        )?;
     }
     if ui.get_camera_make_dirty() {
         write_camera_make(path, ui.get_camera_make().as_str())?;
@@ -3876,9 +4722,8 @@ fn has_gps_metadata_changes(ui: &MainWindow) -> bool {
 }
 
 fn write_dirty_gps_tags(ui: &MainWindow, path: &std::path::Path) -> Result<(), String> {
-    let coordinates_dirty = ui.get_gps_latitude_dirty()
-        || ui.get_gps_longitude_dirty()
-        || ui.get_gps_altitude_dirty();
+    let coordinates_dirty =
+        ui.get_gps_latitude_dirty() || ui.get_gps_longitude_dirty() || ui.get_gps_altitude_dirty();
     if coordinates_dirty
         && ui.get_gps_latitude().is_empty()
         && ui.get_gps_longitude().is_empty()
@@ -3958,8 +4803,7 @@ fn write_dirty_file_times(
 }
 
 fn has_exif_metadata_changes(ui: &MainWindow) -> bool {
-    ui.get_taken_date_dirty()
-        || has_exif_metadata_changes_without_taken_date(ui)
+    ui.get_taken_date_dirty() || has_exif_metadata_changes_without_taken_date(ui)
 }
 
 fn has_exif_metadata_changes_without_taken_date(ui: &MainWindow) -> bool {
@@ -4116,7 +4960,12 @@ fn collect_dirty_exif_metadata(
     metadata
 }
 
-fn parse_media_date_shift(days: &str, hours: &str, minutes: &str, seconds: &str) -> Result<ChronoDuration, String> {
+fn parse_media_date_shift(
+    days: &str,
+    hours: &str,
+    minutes: &str,
+    seconds: &str,
+) -> Result<ChronoDuration, String> {
     fn parse_part(value: &str, label: &str) -> Result<i128, String> {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -4141,8 +4990,10 @@ fn parse_media_date_shift(days: &str, hours: &str, minutes: &str, seconds: &str)
         .and_then(|value| value.checked_add(minutes.checked_mul(60)?))
         .and_then(|value| value.checked_add(seconds))
         .ok_or_else(|| "The requested time shift is too large.".to_string())?;
-    let seconds = i64::try_from(total).map_err(|_| "The requested time shift is too large.".to_string())?;
-    ChronoDuration::try_seconds(seconds).ok_or_else(|| "The requested time shift is too large.".to_string())
+    let seconds =
+        i64::try_from(total).map_err(|_| "The requested time shift is too large.".to_string())?;
+    ChronoDuration::try_seconds(seconds)
+        .ok_or_else(|| "The requested time shift is too large.".to_string())
 }
 
 fn media_date_for_shift(path: &std::path::Path, pending: &HashMap<PathBuf, String>) -> String {
@@ -4196,14 +5047,19 @@ fn build_shift_media_date_preview(
         };
         valid_count += 1;
         if lines.len() < 3 {
-            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("(unknown)");
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("(unknown)");
             lines.push(format!("{name}: {current}  ->  {shifted}"));
         }
     }
     if lines.is_empty() {
         return format!("No usable Media Date found.  Skipped: {skipped_count}");
     }
-    lines.push(format!("Ready: {valid_count} file(s)   Skipped: {skipped_count}"));
+    lines.push(format!(
+        "Ready: {valid_count} file(s)   Skipped: {skipped_count}"
+    ));
     lines.join("\n")
 }
 
@@ -4214,17 +5070,18 @@ fn gps_date_time_for_shift(
     if !is_jpeg_path(path) {
         return None;
     }
-    let (date, time) = pending
-        .get(path)
-        .cloned()
-        .unwrap_or_else(|| {
-            let metadata = read_exif_metadata(path);
-            (metadata.gps_date_stamp, metadata.gps_time_stamp)
-        });
+    let (date, time) = pending.get(path).cloned().unwrap_or_else(|| {
+        let metadata = read_exif_metadata(path);
+        (metadata.gps_date_stamp, metadata.gps_time_stamp)
+    });
     if date.is_empty() || time.is_empty() {
         return None;
     }
-    let value = format!("{} {}", date.trim(), time.trim().trim_end_matches("UTC").trim());
+    let value = format!(
+        "{} {}",
+        date.trim(),
+        time.trim().trim_end_matches("UTC").trim()
+    );
     parse_display_datetime_or_date(&value)?;
     Some(value)
 }
@@ -4260,10 +5117,7 @@ fn parse_combined_gps_date_time(value: &str) -> Result<(Option<String>, Option<S
     if chrono::NaiveTime::parse_from_str(value, "%H:%M:%S").is_ok() {
         return Ok((None, Some(value.to_string())));
     }
-    Err(
-        "Expected GPS UTC format: YYYY-MM-DD HH:MM:SS, YYYY-MM-DD, or HH:MM:SS"
-            .to_string(),
-    )
+    Err("Expected GPS UTC format: YYYY-MM-DD HH:MM:SS, YYYY-MM-DD, or HH:MM:SS".to_string())
 }
 
 fn gps_utc_to_kst_display(date: &str, time: &str) -> Option<String> {
@@ -4305,7 +5159,10 @@ fn build_shift_gps_date_time_preview(
         };
         valid_count += 1;
         if lines.len() < 3 {
-            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("(unknown)");
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("(unknown)");
             lines.push(format!("{name}: {current} UTC  ->  {shifted} UTC"));
         }
     }
@@ -4314,7 +5171,9 @@ fn build_shift_gps_date_time_preview(
             "No JPEG with both GPS Date Stamp and GPS Time Stamp.  Skipped: {skipped_count}"
         );
     }
-    lines.push(format!("Ready: {valid_count} file(s)   Skipped: {skipped_count}"));
+    lines.push(format!(
+        "Ready: {valid_count} file(s)   Skipped: {skipped_count}"
+    ));
     lines.join("\n")
 }
 
@@ -4345,10 +5204,8 @@ fn parse_display_datetime_or_date(value: &str) -> Option<NaiveDateTime> {
 
 fn earliest_file_timestamp(path: &std::path::Path) -> Option<String> {
     let metadata = std::fs::metadata(path).ok()?;
-    let timestamp = earliest_available_timestamp(
-        metadata.created().ok(),
-        metadata.modified().ok(),
-    )?;
+    let timestamp =
+        earliest_available_timestamp(metadata.created().ok(), metadata.modified().ok())?;
     let datetime: chrono::DateTime<Local> = timestamp.into();
     Some(datetime.format("%Y-%m-%d %H:%M:%S").to_string())
 }
@@ -4373,7 +5230,9 @@ fn auto_format_date_input(value: &str) -> String {
     let date = &value[..date_end];
     let suffix = &value[date_end..];
     if date.is_empty()
-        || !date.bytes().all(|byte| byte.is_ascii_digit() || byte == b'-')
+        || !date
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'-')
     {
         return value.to_string();
     }
@@ -4392,16 +5251,15 @@ fn auto_format_date_input(value: &str) -> String {
     let formatted_suffix = if suffix.is_empty() {
         String::new()
     } else {
-        let separator_len = suffix
-            .chars()
-            .next()
-            .map(char::len_utf8)
-            .unwrap_or(0);
+        let separator_len = suffix.chars().next().map(char::len_utf8).unwrap_or(0);
         let separator = &suffix[..separator_len];
         let time = &suffix[separator_len..];
         if time.is_empty() {
             suffix.to_string()
-        } else if time.bytes().all(|byte| byte.is_ascii_digit() || byte == b':') {
+        } else if time
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b':')
+        {
             let digits: String = time.chars().filter(|ch| ch.is_ascii_digit()).collect();
             if digits.len() > 6 {
                 suffix.to_string()
@@ -4584,8 +5442,7 @@ fn update_metadata_dirty_state(ui: &MainWindow) {
     let gps_date_stamp_dirty = ui.get_gps_date_stamp() != ui.get_original_gps_date_stamp();
     let gps_time_stamp_dirty = ui.get_gps_time_stamp() != ui.get_original_gps_time_stamp();
     let gps_date_time_dirty = ui.get_gps_date_time() != ui.get_original_gps_date_time();
-    let png_creation_time_dirty =
-        ui.get_png_creation_time() != ui.get_original_png_creation_time();
+    let png_creation_time_dirty = ui.get_png_creation_time() != ui.get_original_png_creation_time();
     let png_exif_date_time_original_dirty =
         ui.get_date_time_original() != ui.get_original_png_exif_date_time_original();
 
@@ -4685,10 +5542,29 @@ fn apply_exif_paste(ui: &MainWindow, values: &[(String, String)]) {
 
 fn collect_exif_section(ui: &MainWindow, section: &str) -> Vec<(String, String)> {
     let keys: &[&str] = match section {
-        "camera" => &["taken_date", "camera_make", "camera_model", "lens_model", "software", "artist"],
-        "exposure" => &["shutter_speed", "aperture", "iso_speed", "focal_length", "flash_fired", "metering_mode"],
+        "camera" => &[
+            "taken_date",
+            "camera_make",
+            "camera_model",
+            "lens_model",
+            "software",
+            "artist",
+        ],
+        "exposure" => &[
+            "shutter_speed",
+            "aperture",
+            "iso_speed",
+            "focal_length",
+            "flash_fired",
+            "metering_mode",
+        ],
         "image" => &["orientation", "color_space"],
-        "location" => &["gps_latitude", "gps_longitude", "gps_altitude", "gps_date_time"],
+        "location" => &[
+            "gps_latitude",
+            "gps_longitude",
+            "gps_altitude",
+            "gps_date_time",
+        ],
         _ => &[],
     };
     keys.iter()
@@ -4697,7 +5573,7 @@ fn collect_exif_section(ui: &MainWindow, section: &str) -> Vec<(String, String)>
 }
 
 fn is_writable_exif_section(section: &str) -> bool {
-    matches!(section, "camera" | "exposure" | "image")
+    matches!(section, "camera" | "exposure")
 }
 
 fn is_writable_exif_key(key: &str) -> bool {
@@ -4715,8 +5591,6 @@ fn is_writable_exif_key(key: &str) -> bool {
             | "focal_length"
             | "flash_fired"
             | "metering_mode"
-            | "orientation"
-            | "color_space"
             | "gps_date_stamp"
             | "gps_time_stamp"
             | "gps_date_time"
@@ -4747,8 +5621,6 @@ fn is_removable_exif_key(key: &str) -> bool {
             | "metering_mode"
             | "image_width"
             | "image_height"
-            | "orientation"
-            | "color_space"
             | "gps_latitude"
             | "gps_longitude"
             | "gps_altitude"
@@ -4922,25 +5794,13 @@ fn set_exif_value(ui: &MainWindow, key: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        auto_format_date_input,
-        auto_format_date_edit,
-        earliest_available_timestamp,
-        apply_filename_rename_plan,
-        combined_gps_date_time,
-        filename_from_media_date,
-        filename_from_media_date_with_reserved,
-        FilenameCollisionResolver,
-        gps_date_time_for_shift,
-        gps_utc_to_kst_display,
-        parse_combined_gps_date_time,
-        parse_media_date_shift,
-        preview_media_kind,
-        selection_index_after_deletion,
-        large_selection_exif_available,
-        PreviewMediaKind,
-        selection_summary,
-        shift_display_datetime,
-        should_mirror_png_date_source,
+        apply_filename_rename_plan, auto_format_date_edit, auto_format_date_input,
+        combined_gps_date_time, earliest_available_timestamp, filename_from_media_date,
+        filename_from_media_date_with_reserved, gps_date_time_for_shift, gps_utc_to_kst_display,
+        large_selection_exif_available, parse_combined_gps_date_time, parse_media_date_shift,
+        preview_info_text, preview_media_kind, selection_index_after_deletion, selection_summary,
+        shift_display_datetime, should_mirror_png_date_source, FilenameCollisionResolver,
+        PreviewMediaKind, PreviewResult,
     };
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
@@ -4954,20 +5814,14 @@ mod tests {
 
     #[test]
     fn preview_type_is_detected_from_file_signature() {
-        let dir = std::env::temp_dir().join(format!(
-            "sh148_preview_signature_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("sh148_preview_signature_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let jpeg_with_wrong_extension = dir.join("jpeg.bin");
         let png_with_wrong_extension = dir.join("png.jpg");
         let unsupported = dir.join("unsupported.png");
         std::fs::write(&jpeg_with_wrong_extension, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
-        std::fs::write(
-            &png_with_wrong_extension,
-            [137, 80, 78, 71, 13, 10, 26, 10],
-        )
-        .unwrap();
+        std::fs::write(&png_with_wrong_extension, [137, 80, 78, 71, 13, 10, 26, 10]).unwrap();
         std::fs::write(&unsupported, b"not an image").unwrap();
 
         assert_eq!(
@@ -4984,6 +5838,20 @@ mod tests {
         let _ = std::fs::remove_file(png_with_wrong_extension);
         let _ = std::fs::remove_file(unsupported);
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn preview_overlay_combines_source_dimensions_and_load_time() {
+        let result = PreviewResult {
+            pixel_width: 1024,
+            pixel_height: 768,
+            pixels: slint::SharedPixelBuffer::new(1, 1),
+            status: String::new(),
+        };
+        assert_eq!(
+            preview_info_text(&result, Duration::from_millis(122)),
+            "1024 x 768 (loaded in 122 ms)"
+        );
     }
 
     #[test]
@@ -5007,8 +5875,14 @@ mod tests {
             earliest_available_timestamp(Some(created), Some(modified)),
             Some(modified)
         );
-        assert_eq!(earliest_available_timestamp(Some(created), None), Some(created));
-        assert_eq!(earliest_available_timestamp(None, Some(modified)), Some(modified));
+        assert_eq!(
+            earliest_available_timestamp(Some(created), None),
+            Some(created)
+        );
+        assert_eq!(
+            earliest_available_timestamp(None, Some(modified)),
+            Some(modified)
+        );
     }
 
     #[test]
@@ -5050,10 +5924,7 @@ mod tests {
         );
         assert_eq!(
             parse_combined_gps_date_time("2015-05-14 19:31:13 UTC").unwrap(),
-            (
-                Some("2015-05-14".to_string()),
-                Some("19:31:13".to_string())
-            )
+            (Some("2015-05-14".to_string()), Some("19:31:13".to_string()))
         );
         assert_eq!(
             combined_gps_date_time("2015-05-14", ""),
@@ -5077,11 +5948,7 @@ mod tests {
     #[test]
     fn mirrors_png_date_edit_only_while_the_other_source_started_empty() {
         assert!(should_mirror_png_date_source("", "", "2015-"));
-        assert!(should_mirror_png_date_source(
-            "",
-            "2015-12-",
-            "2015-12-"
-        ));
+        assert!(should_mirror_png_date_source("", "2015-12-", "2015-12-"));
         assert!(!should_mirror_png_date_source(
             "2014-01-01 00:00:00",
             "2014-01-01 00:00:00",
@@ -5107,10 +5974,7 @@ mod tests {
             "2026-05-09 12:34:56"
         );
         assert_eq!(auto_format_date_input("2026-05-09"), "2026-05-09");
-        assert_eq!(
-            auto_format_date_input("2026-05-09 12"),
-            "2026-05-09 12:"
-        );
+        assert_eq!(auto_format_date_input("2026-05-09 12"), "2026-05-09 12:");
         assert_eq!(
             auto_format_date_input("2026-05-09 12:34"),
             "2026-05-09 12:34:"

@@ -1,11 +1,9 @@
 import { HorizontalBox, LineEdit } from "std-widgets.slint";
 import { HDivider } from "dividers.slint";
-import { FolderIcon, RefreshIcon, UpIcon } from "icons.slint";
+import { UpIcon } from "icons.slint";
 import { FontSettings, NativeColors } from "../theme.slint";
 
 component IconButton inherits Rectangle {
-    in property <bool> folder_icon: false;
-    in property <bool> up_icon: false;
     out property <bool> hovered: area.has-hover;
     callback clicked();
 
@@ -16,9 +14,7 @@ component IconButton inherits Rectangle {
     border-color: area.has-hover ? #8a8a8a : NativeColors.border;
     border-radius: 4px;
 
-    if up_icon: UpIcon { x: 5px; y: 3px; }
-    if folder_icon && !up_icon: FolderIcon { x: 5px; y: 3px; }
-    if !folder_icon && !up_icon: RefreshIcon { x: 5px; y: 3px; }
+    UpIcon { x: 5px; y: 3px; }
 
     area := TouchArea {
         width: 100%;
@@ -33,13 +29,11 @@ export component PathBar inherits Rectangle {
 
     callback change_dir(string);
     callback go_parent();
-    callback open_folder();
-    callback reload();
 
     height: 40px;
     background: NativeColors.subtle_surface;
 
-    property <string> hover_text: up_button.hovered ? "Up One Level" : (open_button.hovered ? "Open Folder (Ctrl+Shift+O)" : (refresh_button.hovered ? "Refresh (F5)" : ""));
+    property <string> hover_text: up_button.hovered ? "Up One Level" : "";
 
     HorizontalBox {
         width: 100%;
@@ -114,29 +108,14 @@ export component PathBar inherits Rectangle {
         }
 
         up_button := IconButton {
-            up_icon: true;
             clicked => {
                 root.go_parent();
-            }
-        }
-
-        open_button := IconButton {
-            folder_icon: true;
-            clicked => {
-                root.open_folder();
-            }
-        }
-
-        refresh_button := IconButton {
-            folder_icon: false;
-            clicked => {
-                root.reload();
             }
         }
     }
 
     if hover_text != "": Rectangle {
-        x: parent.width - 286px;
+        x: parent.width - 204px;
         y: 8px;
         width: 164px;
         height: 24px;

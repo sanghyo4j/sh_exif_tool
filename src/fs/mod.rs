@@ -183,9 +183,7 @@ pub fn analyze_img_vid_prefix_removal(
     Ok(removal_plan.stats())
 }
 
-pub fn remove_img_vid_prefixes(
-    paths: &[PathBuf],
-) -> Result<MediaPrefixRemovalStats, String> {
+pub fn remove_img_vid_prefixes(paths: &[PathBuf]) -> Result<MediaPrefixRemovalStats, String> {
     let removal_plan = build_img_vid_prefix_removal_plan(paths)?;
     let unmatched = removal_plan.unmatched;
     let deduplicated = removal_plan.deduplicated;
@@ -374,7 +372,10 @@ fn validate_rename_plan(
             return Err(format!("Multiple files would become {}.", target.display()));
         }
         if target.exists() && !source_keys.contains(&target_key) {
-            return Err(format!("A target file already exists: {}", target.display()));
+            return Err(format!(
+                "A target file already exists: {}",
+                target.display()
+            ));
         }
     }
 
@@ -587,6 +588,10 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     reveal_in_file_manager_impl(path)
 }
 
+pub fn choose_folder() -> Result<Option<PathBuf>, String> {
+    choose_folder_impl()
+}
+
 pub fn set_file_times(
     path: &Path,
     created: Option<SystemTime>,
@@ -754,7 +759,9 @@ fn set_file_times_with_powershell(
 
     fn ticks(time: Option<SystemTime>) -> Result<String, String> {
         match time {
-            Some(time) => system_time_to_filetime_intervals_for_shell(time).map(|value| value.to_string()),
+            Some(time) => {
+                system_time_to_filetime_intervals_for_shell(time).map(|value| value.to_string())
+            }
             None => Ok(String::new()),
         }
     }
@@ -802,7 +809,9 @@ if ($ModifiedTicks -ne '') {
         .map_err(|err| err.to_string())?;
 
     if !status.success() {
-        return Err(format!("Failed to set file time via PowerShell. Exit code: {status}"));
+        return Err(format!(
+            "Failed to set file time via PowerShell. Exit code: {status}"
+        ));
     }
     if !file_times_match(path, created, modified) {
         return Err("File time update did not take effect.".to_string());
@@ -823,15 +832,11 @@ fn set_file_times_impl(
     }
 
     let metadata = path.metadata().map_err(|err| err.to_string())?;
-    let accessed = metadata
-        .accessed()
-        .unwrap_or_else(|_| SystemTime::now());
+    let accessed = metadata.accessed().unwrap_or_else(|_| SystemTime::now());
     let access_ft = FileTime::from_system_time(accessed);
-    let modified_ft = modified
-        .map(FileTime::from_system_time)
-        .unwrap_or_else(|| {
-            FileTime::from_system_time(metadata.modified().unwrap_or_else(|_| SystemTime::now()))
-        });
+    let modified_ft = modified.map(FileTime::from_system_time).unwrap_or_else(|| {
+        FileTime::from_system_time(metadata.modified().unwrap_or_else(|_| SystemTime::now()))
+    });
     set_file_times(path, access_ft, modified_ft).map_err(|err| err.to_string())
 }
 
@@ -879,7 +884,9 @@ fn move_path_to_recycle_bin(path: &Path) -> Result<(), String> {
 
     let result = unsafe { SHFileOperationW(&mut operation) };
     if result != 0 {
-        return Err(format!("Failed to move file to Recycle Bin. Error code: {result}"));
+        return Err(format!(
+            "Failed to move file to Recycle Bin. Error code: {result}"
+        ));
     }
     if operation.f_any_operations_aborted != 0 {
         return Err("Delete operation was canceled.".to_string());
@@ -909,6 +916,83 @@ fn open_in_file_manager_impl(path: &Path) -> Result<(), String> {
     };
 
     shell_execute_windows(target.as_os_str(), None)
+}
+
+#[cfg(windows)]
+fn choose_folder_impl() -> Result<Option<PathBuf>, String> {
+    use std::ffi::{c_void, OsStr, OsString};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::ptr;
+
+    #[repr(C)]
+    struct BrowseInfoW {
+        owner: *mut c_void,
+        root: *const c_void,
+        display_name: *mut u16,
+        title: *const u16,
+        flags: u32,
+        callback: *const c_void,
+        callback_data: isize,
+        image: i32,
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHBrowseForFolderW(info: *const BrowseInfoW) -> *mut c_void;
+        fn SHGetPathFromIDListW(item: *const c_void, path: *mut u16) -> i32;
+    }
+
+    #[link(name = "ole32")]
+    extern "system" {
+        fn OleInitialize(reserved: *mut c_void) -> i32;
+        fn OleUninitialize();
+        fn CoTaskMemFree(memory: *mut c_void);
+    }
+
+    const BIF_RETURNONLYFSDIRS: u32 = 0x0001;
+    const BIF_NEWDIALOGSTYLE: u32 = 0x0040;
+
+    let title: Vec<u16> = OsStr::new("Select a folder")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut display_name = [0u16; 260];
+    let initialization = unsafe { OleInitialize(ptr::null_mut()) };
+    let info = BrowseInfoW {
+        owner: ptr::null_mut(),
+        root: ptr::null(),
+        display_name: display_name.as_mut_ptr(),
+        title: title.as_ptr(),
+        flags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        callback: ptr::null(),
+        callback_data: 0,
+        image: 0,
+    };
+
+    let item = unsafe { SHBrowseForFolderW(&info) };
+    let result = if item.is_null() {
+        Ok(None)
+    } else {
+        let mut path = [0u16; 260];
+        let converted = unsafe { SHGetPathFromIDListW(item, path.as_mut_ptr()) };
+        unsafe { CoTaskMemFree(item) };
+        if converted == 0 {
+            Err("Windows could not resolve the selected folder.".to_string())
+        } else {
+            let length = path.iter().position(|value| *value == 0).unwrap_or(path.len());
+            Ok(Some(PathBuf::from(OsString::from_wide(&path[..length]))))
+        }
+    };
+
+    if initialization >= 0 {
+        unsafe { OleUninitialize() };
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn choose_folder_impl() -> Result<Option<PathBuf>, String> {
+    Err("Folder selection is currently supported on Windows only.".to_string())
 }
 
 #[cfg(windows)]
@@ -965,16 +1049,9 @@ fn shell_execute_windows(
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let file: Vec<u16> = file
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let parameters: Option<Vec<u16>> = parameters.map(|value| {
-        value
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    });
+    let file: Vec<u16> = file.encode_wide().chain(std::iter::once(0)).collect();
+    let parameters: Option<Vec<u16>> =
+        parameters.map(|value| value.encode_wide().chain(std::iter::once(0)).collect());
     let parameter_pointer = parameters
         .as_ref()
         .map_or(ptr::null(), |value| value.as_ptr());
@@ -993,7 +1070,9 @@ fn shell_execute_windows(
     } as isize;
 
     if result <= 32 {
-        Err(format!("Windows Shell failed to open Explorer (code {result})."))
+        Err(format!(
+            "Windows Shell failed to open Explorer (code {result})."
+        ))
     } else {
         Ok(())
     }
@@ -1119,10 +1198,22 @@ mod tests {
             move_trailing_number_to_front_name(Path::new("xxxx-acbd-25.png")).as_deref(),
             Some("25_xxxx-acbd.png")
         );
-        assert_eq!(move_trailing_number_to_front_name(Path::new("20140809_131712.jpg")), None);
-        assert_eq!(move_trailing_number_to_front_name(Path::new("photo_1.jpg")), None);
-        assert_eq!(move_trailing_number_to_front_name(Path::new("photo_1000.jpg")), None);
-        assert_eq!(move_trailing_number_to_front_name(Path::new("photo123.jpg")), None);
+        assert_eq!(
+            move_trailing_number_to_front_name(Path::new("20140809_131712.jpg")),
+            None
+        );
+        assert_eq!(
+            move_trailing_number_to_front_name(Path::new("photo_1.jpg")),
+            None
+        );
+        assert_eq!(
+            move_trailing_number_to_front_name(Path::new("photo_1000.jpg")),
+            None
+        );
+        assert_eq!(
+            move_trailing_number_to_front_name(Path::new("photo123.jpg")),
+            None
+        );
     }
 
     #[test]
@@ -1139,9 +1230,18 @@ mod tests {
             remove_front_or_rear_number_name(Path::new("001_photo_25.jpg")).as_deref(),
             Some("photo.jpg")
         );
-        assert_eq!(remove_front_or_rear_number_name(Path::new("20140809_131712.jpg")), None);
-        assert_eq!(remove_front_or_rear_number_name(Path::new("photo_1.jpg")), None);
-        assert_eq!(remove_front_or_rear_number_name(Path::new("photo_1000.jpg")), None);
+        assert_eq!(
+            remove_front_or_rear_number_name(Path::new("20140809_131712.jpg")),
+            None
+        );
+        assert_eq!(
+            remove_front_or_rear_number_name(Path::new("photo_1.jpg")),
+            None
+        );
+        assert_eq!(
+            remove_front_or_rear_number_name(Path::new("photo_1000.jpg")),
+            None
+        );
     }
 
     #[test]
@@ -1242,7 +1342,10 @@ mod tests {
             directory.join("xxxx_xxxx_001.jpg"),
             directory.join("20140809_131712.jpg"),
         ];
-        assert_eq!(trailing_number_rename_candidate_count(&selected).unwrap(), 1);
+        assert_eq!(
+            trailing_number_rename_candidate_count(&selected).unwrap(),
+            1
+        );
         assert_eq!(move_trailing_numbers_to_front(&selected).unwrap(), 1);
         assert!(directory.join("001_xxxx_xxxx.jpg").is_file());
         assert!(directory.join("xxxx_acbd_25.jpg").is_file());
@@ -1266,7 +1369,10 @@ mod tests {
         let modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_100_000);
         set_file_times(&source_path, Some(created), Some(modified)).unwrap();
         assert_eq!(source_path.metadata().unwrap().created().unwrap(), created);
-        assert_eq!(source_path.metadata().unwrap().modified().unwrap(), modified);
+        assert_eq!(
+            source_path.metadata().unwrap().modified().unwrap(),
+            modified
+        );
 
         let target_path = duplicate_file(&source_path).unwrap();
         let target_metadata = target_path.metadata().unwrap();
