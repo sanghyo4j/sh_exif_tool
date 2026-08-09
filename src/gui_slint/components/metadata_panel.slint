@@ -361,7 +361,7 @@ export component MetadataPanel inherits Rectangle {
 
                     if root.selected_media_kind == "mp4": SectionHeader { title: "VIDEO"; }
                     if root.selected_media_kind == "mp4": ReadOnlyInfoRow { label: "Media Type"; value: root.selected_media_type; }
-                    if root.selected_media_kind == "mp4": EditableInfoRow { label: "Media Date"; date_input: true; value <=> root.taken_date; status <=> root.taken_date_status; dirty <=> root.taken_date_dirty; date_value_edited() => { root.taken_date_edited() } value_edited => { root.metadata_edited(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "mp4": EditableInfoRow { label: "Media Date"; metadata_key: "media_date"; date_input: true; value <=> root.taken_date; status <=> root.taken_date_status; dirty <=> root.taken_date_dirty; date_value_edited() => { root.taken_date_edited() } value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     if root.selected_media_kind == "mp4": ReadOnlyInfoRow { label: "Time Interpretation"; value: root.selected_time_interpretation == "" ? "-" : root.selected_time_interpretation; }
 
                     if root.selected_media_kind == "mts": SectionHeader { title: "VIDEO"; }

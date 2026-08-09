@@ -588,6 +588,14 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     reveal_in_file_manager_impl(path)
 }
 
+pub fn open_with_default_application(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err("Selected path does not exist.".to_string());
+    }
+
+    open_with_default_application_impl(path)
+}
+
 pub fn choose_folder() -> Result<Option<PathBuf>, String> {
     choose_folder_impl()
 }
@@ -1071,11 +1079,17 @@ fn shell_execute_windows(
 
     if result <= 32 {
         Err(format!(
-            "Windows Shell failed to open Explorer (code {result})."
+            "Windows Shell failed to open the selected item (code {result})."
         ))
     } else {
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn open_with_default_application_impl(path: &Path) -> Result<(), String> {
+    let path = explorer_compatible_path(path)?;
+    shell_execute_windows(path.as_os_str(), None)
 }
 
 #[cfg(target_os = "macos")]
@@ -1101,6 +1115,15 @@ fn reveal_in_file_manager_impl(path: &Path) -> Result<(), String> {
     }
 
     command.spawn().map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_with_default_application_impl(path: &Path) -> Result<(), String> {
+    Command::new("open")
+        .arg(path)
+        .spawn()
+        .map_err(|err| err.to_string())?;
     Ok(())
 }
 
@@ -1122,6 +1145,15 @@ fn open_in_file_manager_impl(path: &Path) -> Result<(), String> {
 #[cfg(all(not(windows), not(target_os = "macos")))]
 fn reveal_in_file_manager_impl(path: &Path) -> Result<(), String> {
     open_in_file_manager_impl(path)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn open_with_default_application_impl(path: &Path) -> Result<(), String> {
+    Command::new("xdg-open")
+        .arg(path)
+        .spawn()
+        .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]

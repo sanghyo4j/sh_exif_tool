@@ -131,6 +131,7 @@ struct Mp4Summary {
     time_interpretation: String,
     fallback_creation_seconds: Option<u64>,
     movie_header: Option<MovieHeaderTimeInfo>,
+    uses_3gpp_brand: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -151,7 +152,11 @@ fn scan_atoms(file: &mut File, allow_quicktime_without_ftyp: bool) -> Result<Mp4
     while position + 8 <= file_len {
         let atom = read_atom_header(file, position, file_len)?;
         match &atom.kind {
-            b"ftyp" => found_ftyp = true,
+            b"ftyp" => {
+                found_ftyp = true;
+                summary.uses_3gpp_brand = read_major_brand(file, atom.payload_start, atom.end)?
+                    .is_some_and(|brand| &brand[..3] == b"3gp" || &brand[..3] == b"3g2");
+            }
             b"moov" => {
                 scan_atom_children(file, atom.payload_start, atom.end, 0, &mut summary)?;
                 // Some Samsung files append an SEFT footer after the complete
@@ -174,11 +179,27 @@ fn scan_atoms(file: &mut File, allow_quicktime_without_ftyp: bool) -> Result<Mp4
         .or(summary.fallback_creation_seconds);
     if let Some(seconds) = creation_seconds {
         let (media_date, interpretation) =
-            interpret_quicktime_creation_date(seconds, summary.movie_header, file_modified);
+            interpret_quicktime_creation_date(
+                seconds,
+                summary.movie_header,
+                file_modified,
+                summary.uses_3gpp_brand,
+            );
         summary.media_date = media_date;
         summary.time_interpretation = interpretation;
     }
     Ok(summary)
+}
+
+fn read_major_brand(file: &mut File, start: u64, end: u64) -> Result<Option<[u8; 4]>, String> {
+    if end.saturating_sub(start) < 4 {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(start))
+        .map_err(|err| err.to_string())?;
+    let mut brand = [0u8; 4];
+    file.read_exact(&mut brand).map_err(|err| err.to_string())?;
+    Ok(Some(brand))
 }
 
 struct AtomHeader {
@@ -502,6 +523,7 @@ fn interpret_quicktime_creation_date(
     creation_seconds: u64,
     movie_header: Option<MovieHeaderTimeInfo>,
     file_modified: Option<std::time::SystemTime>,
+    uses_3gpp_brand: bool,
 ) -> (Option<String>, String) {
     let unix_seconds = creation_seconds as i64 - QUICKTIME_UNIX_EPOCH_OFFSET;
     let Some(utc_creation) = DateTime::<Utc>::from_timestamp(unix_seconds, 0) else {
@@ -509,6 +531,35 @@ fn interpret_quicktime_creation_date(
     };
     let raw_creation = utc_creation.naive_utc();
     let standard_creation = utc_creation.with_timezone(&Local);
+
+    // Some older 3GP encoders incorrectly wrote Unix-epoch seconds into the
+    // ISO BMFF fields that are defined to use the 1904 QuickTime epoch. Only
+    // accept that interpretation when it closely agrees with the filesystem
+    // timestamp; this avoids turning legitimate historical dates into modern
+    // ones merely because both epochs are mathematically valid.
+    let unix_epoch_creation = i64::try_from(creation_seconds)
+        .ok()
+        .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0))
+        .map(|datetime| datetime.with_timezone(&Local));
+    let use_nonstandard_unix_epoch = uses_3gpp_brand
+        && unix_epoch_creation
+            .zip(file_modified)
+            .is_some_and(|(candidate, modified)| {
+                let file_modification = DateTime::<Local>::from(modified);
+                (file_modification.timestamp() - candidate.timestamp()).abs() <= 300
+                    && (file_modification.timestamp() - standard_creation.timestamp()).abs()
+                        >= 31_536_000
+            });
+    if use_nonstandard_unix_epoch {
+        return (
+            unix_epoch_creation.map(|datetime| {
+                datetime
+                    .format(DISPLAY_DATETIME_FORMAT)
+                    .to_string()
+            }),
+            "UTC (Unix epoch, non-standard)".to_string(),
+        );
+    }
 
     let use_camera_local = movie_header
         .zip(file_modified)
@@ -614,6 +665,33 @@ mod tests {
             raw_modification,
             Some(311.311),
         ));
+    }
+
+    #[test]
+    fn recognizes_nonstandard_unix_epoch_used_by_a_3gp_encoder() {
+        let stored_seconds = 1_484_879_439u64;
+        let matching_file_time = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(stored_seconds);
+        let movie_header = MovieHeaderTimeInfo {
+            creation_seconds: stored_seconds,
+            modification_seconds: stored_seconds,
+            duration_seconds: Some(12.8),
+        };
+
+        let (date, interpretation) = interpret_quicktime_creation_date(
+            stored_seconds,
+            Some(movie_header),
+            Some(matching_file_time),
+            true,
+        );
+
+        let expected = DateTime::<Utc>::from_timestamp(stored_seconds as i64, 0)
+            .unwrap()
+            .with_timezone(&Local)
+            .format(DISPLAY_DATETIME_FORMAT)
+            .to_string();
+        assert_eq!(date.as_deref(), Some(expected.as_str()));
+        assert_eq!(interpretation, "UTC (Unix epoch, non-standard)");
     }
     use crate::media::scan_media_file;
 

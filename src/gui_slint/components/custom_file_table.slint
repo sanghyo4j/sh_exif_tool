@@ -103,12 +103,13 @@ export component CustomFileTable inherits Rectangle {
     callback revert_requested();
     callback exit_requested();
     callback sort_requested(int);
+    callback type_ahead_requested(string) -> int;
 
     property <length> menu_x: 0px;
     property <length> menu_y: 0px;
     property <length> menu_width: 192px;
     property <bool> context_target_is_dir: root.selected_index >= 0 && root.selected_index < root.files.length && root.files[root.selected_index].is_dir;
-    property <length> menu_height: root.context_target_is_dir ? 198px : 170px;
+    property <length> menu_height: 198px;
 
     background: NativeColors.surface;
     forward-focus: focus_scope;
@@ -316,13 +317,13 @@ export component CustomFileTable inherits Rectangle {
         border-color: #a0a0a0;
         border-radius: 0px;
 
-        if root.context_target_is_dir: MenuRow { y: 1px; title: "Open (O)"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.row_activated(root.selected_index); } }
-        MenuRow { y: root.context_target_is_dir ? 29px : 1px; title: "Open in Explorer (X)"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.open_in_file_manager_requested(root.selected_index); } }
-        MenuRow { y: root.context_target_is_dir ? 57px : 29px; title: "Refresh (E)"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.reload_requested(); } }
-        MenuRow { y: root.context_target_is_dir ? 85px : 57px; title: "Rename (M)"; danger: false; enabled: root.selected_recyclable_count == 1; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count == 1) { root.rename_requested(root.selected_index); } } }
-        MenuRow { y: root.context_target_is_dir ? 113px : 85px; title: "Copy (C)"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.copy_requested(); } } }
-        MenuRow { y: root.context_target_is_dir ? 141px : 113px; title: "Paste (P)"; danger: false; enabled: root.copied_file_count > 0; clicked => { root.context_menu_visible = false; if (root.copied_file_count > 0) { root.paste_requested(); } } }
-        MenuRow { y: root.context_target_is_dir ? 169px : 141px; title: "Delete (D)"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.delete_requested(); } } }
+        MenuRow { y: 1px; title: "Open (O)"; danger: false; enabled: root.selected_recyclable_count == 1; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count == 1) { root.row_activated(root.selected_index); } } }
+        MenuRow { y: 29px; title: "Open in Explorer (X)"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.open_in_file_manager_requested(root.selected_index); } }
+        MenuRow { y: 57px; title: "Refresh (E)"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.reload_requested(); } }
+        MenuRow { y: 85px; title: "Rename (M)"; danger: false; enabled: root.selected_recyclable_count == 1; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count == 1) { root.rename_requested(root.selected_index); } } }
+        MenuRow { y: 113px; title: "Copy (C)"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.copy_requested(); } } }
+        MenuRow { y: 141px; title: "Paste (P)"; danger: false; enabled: root.copied_file_count > 0; clicked => { root.context_menu_visible = false; if (root.copied_file_count > 0) { root.paste_requested(); } } }
+        MenuRow { y: 169px; title: "Delete (D)"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.delete_requested(); } } }
     }
 
     focus_scope := FocusScope {
@@ -336,7 +337,11 @@ export component CustomFileTable inherits Rectangle {
                 root.context_menu_visible = false;
                 return accept;
             }
-            if (root.context_menu_visible && (event.text == "O" || event.text == "o") && !event.modifiers.control && root.context_target_is_dir) {
+            if (event.text == Key.Escape) {
+                root.type_ahead_requested("");
+                return accept;
+            }
+            if (root.context_menu_visible && (event.text == "O" || event.text == "o") && !event.modifiers.control && root.selected_recyclable_count == 1) {
                 root.context_menu_visible = false;
                 root.row_activated(root.selected_index);
                 return accept;
@@ -374,6 +379,13 @@ export component CustomFileTable inherits Rectangle {
             if ((event.text == "A" || event.text == "a") && event.modifiers.control) {
                 root.context_menu_visible = false;
                 root.select_all_requested();
+                return accept;
+            }
+            if ((event.text == "D" || event.text == "d") && event.modifiers.control) {
+                root.context_menu_visible = false;
+                if (root.selected_recyclable_count > 0) {
+                    root.delete_requested();
+                }
                 return accept;
             }
             if (event.text == Key.Delete) {
@@ -417,6 +429,15 @@ export component CustomFileTable inherits Rectangle {
             if ((event.text == "R" || event.text == "r") && event.modifiers.alt && event.modifiers.shift) { root.open_in_file_manager_requested(root.selected_index); return accept; }
             if ((event.text == "R" || event.text == "r") && event.modifiers.control && !event.modifiers.shift) { root.revert_requested(); return accept; }
             if ((event.text == "W" || event.text == "w") && event.modifiers.control) { root.exit_requested(); return accept; }
+            if (event.text != "" && !event.modifiers.control && !event.modifiers.alt) {
+                let match_index = root.type_ahead_requested(event.text);
+                if (match_index >= 0 && match_index < root.files.length) {
+                    root.selected_index = match_index;
+                    root.row_selected(match_index, false, false);
+                    selection_scroll_timer.restart();
+                }
+                return accept;
+            }
             reject
         }
     }

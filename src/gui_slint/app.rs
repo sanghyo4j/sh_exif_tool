@@ -316,6 +316,36 @@ impl SlintApp {
             .and_then(|index| i32::try_from(index + 1).ok())
     }
 
+    pub fn ui_index_for_filename_prefix(&self, query: &str, current_index: i32) -> Option<i32> {
+        let query = query.to_lowercase();
+        if query.is_empty() {
+            return None;
+        }
+        let visible = self.visible_files();
+        if visible.is_empty() {
+            return None;
+        }
+
+        let include_current = query.chars().count() > 1;
+        let current_position = usize::try_from(current_index.saturating_sub(1)).unwrap_or(0);
+        let start = if include_current {
+            current_position.min(visible.len() - 1)
+        } else if current_index > 0 {
+            (current_position + 1) % visible.len()
+        } else {
+            0
+        };
+
+        (0..visible.len()).find_map(|offset| {
+            let position = (start + offset) % visible.len();
+            let name = visible[position].path.file_name()?.to_string_lossy();
+            name.to_lowercase()
+                .starts_with(&query)
+                .then(|| i32::try_from(position + 1).ok())
+                .flatten()
+        })
+    }
+
     pub fn ui_details_for_index(&self, index: i32) -> Option<(String, String, String, bool)> {
         let idx = usize::try_from(index).ok()?;
         if idx == 0 {
@@ -955,6 +985,29 @@ mod tests {
             app.path_for_ui_index(1).unwrap(),
             PathBuf::from("IMG_10.jpg")
         );
+    }
+
+    #[test]
+    fn filename_prefix_search_keeps_growing_queries_and_wraps_single_keys() {
+        let mut app = sortable_app();
+        app.files.push(FileSystemEntry {
+            path: PathBuf::from("2017_0318_110404.mov"),
+            size: 0,
+            modified: None,
+            created: None,
+            is_dir: false,
+        });
+        app.files.push(FileSystemEntry {
+            path: PathBuf::from("2017_0318_122327.mov"),
+            size: 0,
+            modified: None,
+            created: None,
+            is_dir: false,
+        });
+
+        assert_eq!(app.ui_index_for_filename_prefix("2017_0318_11", 1), Some(3));
+        assert_eq!(app.ui_index_for_filename_prefix("i", 1), Some(2));
+        assert_eq!(app.ui_index_for_filename_prefix("i", 2), Some(1));
     }
 
     #[test]

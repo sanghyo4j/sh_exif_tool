@@ -1485,6 +1485,20 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
     let mut candidates = Vec::new();
 
     for start in 0..chars.len() {
+        if start + 16 <= chars.len() {
+            let mixed: String = chars[start..start + 16].iter().collect();
+            if let Some(parsed) = parse_mixed_compact_filename_datetime(&mixed) {
+                candidates.push(parsed);
+            }
+        }
+
+        if start + 17 <= chars.len() {
+            let mixed: String = chars[start..start + 17].iter().collect();
+            if let Some(parsed) = parse_mixed_compact_filename_datetime(&mixed) {
+                candidates.push(parsed);
+            }
+        }
+
         if start + 19 <= chars.len() {
             let separated: String = chars[start..start + 19].iter().collect();
             if let Some(parsed) = parse_separated_filename_datetime(&separated) {
@@ -1539,6 +1553,37 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
 
     let earliest = candidates.into_iter().min()?;
     Some(format_datetime_for_display(earliest))
+}
+
+fn parse_mixed_compact_filename_datetime(value: &str) -> Option<NaiveDateTime> {
+    let bytes = value.as_bytes();
+    let digit_positions: &[usize] = match bytes.len() {
+        // YYYY_MMDD_HHMMSS
+        16 => &[0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15],
+        // YYYY_MM_DD_HHMMSS
+        17 => &[0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 13, 14, 15, 16],
+        _ => return None,
+    };
+    let separator_positions: &[usize] = match bytes.len() {
+        16 => &[4, 9],
+        17 => &[4, 7, 10],
+        _ => return None,
+    };
+    if !digit_positions
+        .iter()
+        .all(|index| bytes[*index].is_ascii_digit())
+        || !separator_positions
+            .iter()
+            .all(|index| matches!(bytes[*index], b'_' | b'-' | b'.' | b' ' | b'T'))
+    {
+        return None;
+    }
+
+    let digits: String = digit_positions
+        .iter()
+        .map(|index| bytes[*index] as char)
+        .collect();
+    parse_compact_filename_datetime(&digits)
 }
 
 fn parse_separated_filename_datetime(value: &str) -> Option<NaiveDateTime> {
@@ -3087,6 +3132,18 @@ mod tests {
         assert_eq!(
             extract_datetime_from_filename(Path::new("20130401_195241_65.jpg")).as_deref(),
             Some("2013-04-01 19:52:41")
+        );
+    }
+
+    #[test]
+    fn extracts_datetime_from_mixed_compact_date_patterns() {
+        assert_eq!(
+            extract_datetime_from_filename(Path::new("2017_0318_110404_license.mp4")).as_deref(),
+            Some("2017-03-18 11:04:04")
+        );
+        assert_eq!(
+            extract_datetime_from_filename(Path::new("2017_03_18_122327_test.mp4")).as_deref(),
+            Some("2017-03-18 12:23:27")
         );
     }
 

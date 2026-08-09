@@ -212,6 +212,7 @@ export component MainWindow inherits Window {
     );
 
     callback open_dir(int);
+    callback open_file(int);
     callback reload();
     callback go_parent();
     callback choose_folder();
@@ -247,6 +248,7 @@ export component MainWindow inherits Window {
     callback set_show_only_missing_media_date(bool);
     callback set_show_extension_in_file_name(bool);
     callback sort_file_list(int);
+    callback find_file_by_prefix(string) -> int;
     callback select_files_without_exif();
     callback exif_tag_right_clicked(string, string);
     callback exif_section_right_clicked(string);
@@ -269,7 +271,20 @@ export component MainWindow inherits Window {
 
     public function focus_file_list() {
         file_table.focus();
-        file_table.reveal_selected_row();
+        file_selection_reveal_timer.restart();
+    }
+
+    public function reveal_file_selection() {
+        file_selection_reveal_timer.restart();
+    }
+
+    file_selection_reveal_timer := Timer {
+        interval: 16ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            file_table.reveal_selected_row();
+        }
     }
 
     rename_focus_timer := Timer {
@@ -631,7 +646,7 @@ export component MainWindow inherits Window {
             self.focus();
         }
 
-        key-pressed(event) => {
+        capture-key-pressed(event) => {
             if (root.exif_context_menu_visible && event.text == Key.Escape) {
                 root.exif_context_menu_visible = false;
                 return accept;
@@ -655,6 +670,23 @@ export component MainWindow inherits Window {
             if ((event.text == "R" || event.text == "r") && event.modifiers.alt && event.modifiers.shift) {
                 root.editing_path = false;
                 root.open_in_explorer();
+                return accept;
+            }
+
+            if (event.text == Key.F2 && root.selected_index > 0 && root.selected_index < root.files.length) {
+                root.editing_path = false;
+                root.file_context_menu_visible = false;
+                rename_focus_timer.restart();
+                return accept;
+            }
+
+            if ((event.text == "D" || event.text == "d") && event.modifiers.control && root.selected_recyclable_count > 0) {
+                root.editing_path = false;
+                root.file_context_menu_visible = false;
+                root.confirm_yes_selected = true;
+                root.confirm_delete_visible = true;
+                root.message_title = "Delete";
+                root.message_text = root.selected_delete_message;
                 return accept;
             }
 
@@ -706,6 +738,9 @@ export component MainWindow inherits Window {
                     root.file_context_menu_visible = false;
                     root.sort_file_list(column);
                 }
+                type_ahead_requested(key) => {
+                    return root.find_file_by_prefix(key);
+                }
                 row_selected(index, ctrl, shift) => {
                     root.editing_path = false;
                     metadata_panel.close_tools_menu();
@@ -751,7 +786,11 @@ export component MainWindow inherits Window {
                     root.table_row_clicked(index);
                 }
                 row_activated(index) => {
-                    root.open_dir(index);
+                    if (index >= 0 && index < root.files.length && root.files[index].is_dir) {
+                        root.open_dir(index);
+                    } else {
+                        root.open_file(index);
+                    }
                 }
                 select_all_requested() => {
                     root.editing_path = false;
