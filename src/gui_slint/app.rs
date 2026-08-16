@@ -1,7 +1,10 @@
 use super::FileEntry as UiFileEntry;
 use crate::exif::{read_exif_metadata, ExifMetadata};
 use crate::fs::{read_directory, FileSystemEntry};
-use crate::media::{MediaScanJob, MediaScanResult};
+use crate::media::{
+    fallback_video_media_type, is_image_path, is_jpeg_path, is_mp4_path, is_mpeg_ts_path,
+    is_png_path, is_video_path, MediaScanJob, MediaScanResult,
+};
 use slint::{ModelRc, StandardListViewItem, VecModel};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
@@ -93,6 +96,45 @@ impl SlintApp {
         }
     }
 
+    /// Reloads filesystem fields without throwing away valid media scans.
+    /// Changed files are deliberately left uncached so the regular background
+    /// scanner refreshes them without blocking the UI thread after Save.
+    pub fn reload_folder_after_changes(&mut self, changed_paths: &[PathBuf]) {
+        self.scan_epoch.fetch_add(1, Ordering::Relaxed);
+        let path = std::path::Path::new(&self.current_path);
+        let Ok(entries) = read_directory(path) else {
+            self.files.clear();
+            self.selected_indices.clear();
+            self.selection_anchor = None;
+            return;
+        };
+
+        let changed: HashSet<&PathBuf> = changed_paths.iter().collect();
+        let current: HashMap<_, _> = entries
+            .iter()
+            .filter(|entry| !entry.is_dir)
+            .map(|entry| (entry.path.clone(), (entry.size, entry.modified)))
+            .collect();
+        {
+            let mut cache = self
+                .scan_results
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.retain(|cached_path, cached| {
+                !changed.contains(cached_path)
+                    && current.get(cached_path).is_some_and(|(size, modified)| {
+                        cached.size == *size && cached.modified == *modified
+                    })
+            });
+        }
+
+        self.files = entries;
+        self.selected_indices.clear();
+        self.selection_anchor = None;
+
+        self.dynamic_sort_ready = false;
+    }
+
     pub fn remove_deleted_paths(&mut self, paths: &[PathBuf]) {
         if paths.is_empty() {
             return;
@@ -110,6 +152,11 @@ impl SlintApp {
 
     pub fn get_ui_model(&self) -> ModelRc<UiFileEntry> {
         let mut ui_items: Vec<UiFileEntry> = Vec::new();
+        // Selection checks happen once per displayed row. Keeping the selected
+        // indices in a Vec made every model rebuild O(rows * selections), which
+        // became especially expensive while Ctrl+A and background scan refreshes
+        // were active.
+        let selected_indices: HashSet<i32> = self.selected_indices.iter().copied().collect();
 
         ui_items.push(UiFileEntry {
             name: "[..]".into(),
@@ -117,7 +164,7 @@ impl SlintApp {
             modified: "-".into(),
             created: "-".into(),
             is_dir: true,
-            selected: self.selected_indices.contains(&0),
+            selected: selected_indices.contains(&0),
             media_kind: "folder".into(),
             media_date: "-".into(),
             metadata_status: "-".into(),
@@ -198,7 +245,7 @@ impl SlintApp {
                     .unwrap_or_else(|| "-".into())
                     .into(),
                 is_dir: f.is_dir,
-                selected: self.selected_indices.contains(&ui_index),
+                selected: selected_indices.contains(&ui_index),
                 media_kind: if f.is_dir {
                     "folder"
                 } else {
@@ -429,7 +476,9 @@ impl SlintApp {
                 let index = usize::try_from(*selected).ok()?;
                 if index == 0 {
                     return Some(SelectedEntryDetails {
-                        path: PathBuf::from(&self.current_path).parent().map(PathBuf::from),
+                        path: PathBuf::from(&self.current_path)
+                            .parent()
+                            .map(PathBuf::from),
                         name: "[..]".to_string(),
                         exact_size: "-".to_string(),
                         created: "-".to_string(),
@@ -451,8 +500,22 @@ impl SlintApp {
                     .map(|value| value.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Unknown".to_string());
                 let scan = scan_result_from_cache(&cache, entry);
-                let (media_kind, media_type, media_date, metadata_status, time_interpretation, exif_metadata) = if entry.is_dir {
-                    ("folder".to_string(), "Folder".to_string(), "-".to_string(), "-".to_string(), String::new(), None)
+                let (
+                    media_kind,
+                    media_type,
+                    media_date,
+                    metadata_status,
+                    time_interpretation,
+                    exif_metadata,
+                ) = if entry.is_dir {
+                    (
+                        "folder".to_string(),
+                        "Folder".to_string(),
+                        "-".to_string(),
+                        "-".to_string(),
+                        String::new(),
+                        None,
+                    )
                 } else if let Some(scan) = scan {
                     (
                         scan.media_kind,
@@ -462,17 +525,52 @@ impl SlintApp {
                         scan.time_interpretation,
                         scan.exif_metadata,
                     )
-                } else if is_jpeg_file(&entry.path) {
-                    ("jpeg".to_string(), "JPEG image".to_string(), "Scanning...".to_string(), "Scanning...".to_string(), String::new(), None)
-                } else if is_png_file(&entry.path) {
-                    ("png".to_string(), "PNG image".to_string(), "Scanning...".to_string(), "Scanning...".to_string(), String::new(), None)
-                } else if is_mp4_file(&entry.path) {
+                } else if is_jpeg_path(&entry.path) {
+                    (
+                        "jpeg".to_string(),
+                        "JPEG image".to_string(),
+                        "Scanning...".to_string(),
+                        "Scanning...".to_string(),
+                        String::new(),
+                        None,
+                    )
+                } else if is_png_path(&entry.path) {
+                    (
+                        "png".to_string(),
+                        "PNG image".to_string(),
+                        "Scanning...".to_string(),
+                        "Scanning...".to_string(),
+                        String::new(),
+                        None,
+                    )
+                } else if is_mp4_path(&entry.path) {
                     let media_type = fallback_video_media_type(&entry.path);
-                    ("mp4".to_string(), media_type.to_string(), "Scanning...".to_string(), "Scanning...".to_string(), String::new(), None)
-                } else if is_mpeg_ts_file(&entry.path) {
-                    ("mts".to_string(), "AVCHD transport stream".to_string(), "Scanning...".to_string(), "Scanning...".to_string(), String::new(), None)
+                    (
+                        "mp4".to_string(),
+                        media_type.to_string(),
+                        "Scanning...".to_string(),
+                        "Scanning...".to_string(),
+                        String::new(),
+                        None,
+                    )
+                } else if is_mpeg_ts_path(&entry.path) {
+                    (
+                        "mts".to_string(),
+                        "AVCHD transport stream".to_string(),
+                        "Scanning...".to_string(),
+                        "Scanning...".to_string(),
+                        String::new(),
+                        None,
+                    )
                 } else {
-                    (String::new(), String::new(), String::new(), String::new(), String::new(), None)
+                    (
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        None,
+                    )
                 };
 
                 Some(SelectedEntryDetails {
@@ -483,8 +581,14 @@ impl SlintApp {
                     } else {
                         format!("{} Byte", format_number_with_commas(entry.size))
                     },
-                    created: entry.created.map(format_time).unwrap_or_else(|| "-".to_string()),
-                    modified: entry.modified.map(format_time).unwrap_or_else(|| "-".to_string()),
+                    created: entry
+                        .created
+                        .map(format_time)
+                        .unwrap_or_else(|| "-".to_string()),
+                    modified: entry
+                        .modified
+                        .map(format_time)
+                        .unwrap_or_else(|| "-".to_string()),
                     is_dir: entry.is_dir,
                     media_kind,
                     media_type,
@@ -495,6 +599,24 @@ impl SlintApp {
                 })
             })
             .collect()
+    }
+
+    /// Returns the latest cached media fields for one visible UI row. The
+    /// file-list model is a snapshot, while Details reads the cache directly;
+    /// callers use this to keep the selected row in sync between full model
+    /// refreshes.
+    pub fn cached_media_fields_for_ui_index(&self, index: i32) -> Option<(String, String, String)> {
+        let index = usize::try_from(index).ok()?;
+        if index == 0 {
+            return None;
+        }
+        let visible = self.visible_files();
+        let entry = *visible.get(index - 1)?;
+        if entry.is_dir {
+            return None;
+        }
+        let scan = self.scan_result_for(entry)?;
+        Some((scan.media_kind, scan.media_date, scan.metadata_status))
     }
 
     pub fn select_all_visible_entries(&mut self) {
@@ -511,7 +633,7 @@ impl SlintApp {
             .enumerate()
             .filter(|(_, entry)| {
                 !entry.is_dir
-                    && is_jpeg_file(&entry.path)
+                    && is_jpeg_path(&entry.path)
                     && !file_has_exif(&entry.path, entry.is_dir)
             })
             .filter_map(|(index, _)| i32::try_from(index + 1).ok())
@@ -545,8 +667,45 @@ impl SlintApp {
                 modified: entry.modified,
             })
             .collect();
-        jobs.sort_by_key(|job| (!selected_paths.contains(&job.path), job.size));
+        // Keep the same order the user sees in the file table. Selected rows
+        // form the only leading group; the stable sort preserves display order
+        // inside both groups.
+        jobs.sort_by_key(|job| !selected_paths.contains(&job.path));
         (epoch, jobs)
+    }
+
+    pub fn scan_priority_paths_for_ui_range(&self, first: i32, last: i32) -> Vec<PathBuf> {
+        let visible = self.visible_files();
+        let mut paths = Vec::new();
+        let mut seen = HashSet::new();
+        // A small explicit selection should jump ahead of the viewport. For a
+        // large selection (most notably Ctrl+A), prepare_scan_jobs() already
+        // preserves display order for the whole selected group. Copying every
+        // selected path into the live priority list made every scan dequeue
+        // progressively more expensive without changing that order.
+        if self.selected_indices.len() <= 5 {
+            for index in &self.selected_indices {
+                let Ok(index) = usize::try_from(*index) else {
+                    continue;
+                };
+                let Some(entry) = index.checked_sub(1).and_then(|index| visible.get(index)) else {
+                    continue;
+                };
+                if !entry.is_dir && seen.insert(entry.path.clone()) {
+                    paths.push(entry.path.clone());
+                }
+            }
+        }
+        if last >= first {
+            let first = first.max(1) as usize;
+            let last = last.max(0) as usize;
+            for entry in (first..=last).filter_map(|ui_index| visible.get(ui_index - 1)) {
+                if !entry.is_dir && seen.insert(entry.path.clone()) {
+                    paths.push(entry.path.clone());
+                }
+            }
+        }
+        paths
     }
 
     pub fn restart_scan(&self) {
@@ -630,7 +789,7 @@ impl SlintApp {
                 if !self.show_only_missing_media_date {
                     return true;
                 }
-                if !is_image_file(&entry.path) && !is_video_file(&entry.path) {
+                if !is_image_path(&entry.path) && !is_video_path(&entry.path) {
                     return false;
                 }
                 let scan = scan_result_from_cache(&cache, entry);
@@ -712,7 +871,7 @@ fn format_number_with_commas(value: u64) -> String {
     let digits = value.to_string();
     let mut result = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             result.push(',');
         }
         result.push(character);
@@ -848,83 +1007,30 @@ fn format_time(t: SystemTime) -> String {
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-fn is_image_file(path: &std::path::Path) -> bool {
-    is_jpeg_file(path) || is_png_file(path)
-}
-
 fn matches_file_filter(filter: i32, path: &std::path::Path) -> bool {
     match filter {
-        0 => is_image_file(path) || is_video_file(path),
-        1 => is_image_file(path),
-        2 => is_video_file(path),
-        4 => is_jpeg_file(path),
-        5 => is_png_file(path),
+        0 => is_image_path(path) || is_video_path(path),
+        1 => is_image_path(path),
+        2 => is_video_path(path),
+        4 => is_jpeg_path(path),
+        5 => is_png_path(path),
         _ => true,
     }
 }
 
-fn is_video_file(path: &std::path::Path) -> bool {
-    is_mp4_file(path) || is_mpeg_ts_file(path)
-}
-
-fn is_mp4_file(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "mp4" | "mov" | "m4v" | "3gp" | "3g2" | "qt"
-            )
-        })
-}
-
-fn is_mpeg_ts_file(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(extension.to_ascii_lowercase().as_str(), "mts" | "m2ts")
-        })
-}
-
-fn fallback_video_media_type(path: &std::path::Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("mov" | "qt") => "QuickTime movie",
-        Some("m4v") => "MPEG-4 video",
-        Some("3gp") => "3GPP media",
-        Some("3g2") => "3GPP2 media",
-        _ => "MPEG-4 media",
-    }
-}
-
 fn file_has_exif(path: &std::path::Path, is_dir: bool) -> bool {
-    !is_dir && is_jpeg_file(path) && read_exif_metadata(path).has_exif
+    !is_dir && is_jpeg_path(path) && read_exif_metadata(path).has_exif
 }
 
-fn is_jpeg_file(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg"))
-}
-
-fn is_png_file(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
-}
-
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::{
-        format_number_with_commas, is_image_file, is_video_file, matches_file_filter,
-        media_date_is_missing, natural_name_cmp, CachedMediaScan, SlintApp,
+        format_number_with_commas, matches_file_filter, media_date_is_missing, natural_name_cmp,
+        CachedMediaScan, SlintApp,
     };
     use crate::fs::FileSystemEntry;
-    use crate::media::MediaScanResult;
+    use crate::media::{is_image_path, is_video_path, MediaScanResult};
     use slint::Model;
     use std::cmp::Ordering as CmpOrdering;
     use std::collections::HashMap;
@@ -1029,12 +1135,12 @@ mod tests {
         ] {
             let path = Path::new(name);
             assert!(
-                is_image_file(path) || is_video_file(path),
+                is_image_path(path) || is_video_path(path),
                 "{name} should be supported"
             );
         }
-        assert!(!is_image_file(Path::new("notes.txt")));
-        assert!(!is_video_file(Path::new("notes.txt")));
+        assert!(!is_image_path(Path::new("notes.txt")));
+        assert!(!is_video_path(Path::new("notes.txt")));
     }
 
     #[test]
@@ -1062,6 +1168,63 @@ mod tests {
     fn exact_byte_counts_use_thousands_separators() {
         assert_eq!(format_number_with_commas(5_234_415), "5,234,415");
         assert_eq!(format_number_with_commas(999), "999");
+    }
+
+    #[test]
+    fn scan_jobs_follow_display_order_instead_of_file_size() {
+        let mut app = sortable_app();
+        app.selected_indices.clear();
+        app.files[0].size = 8_000_000;
+        app.files[1].size = 1;
+
+        let (_, jobs) = app.prepare_scan_jobs();
+        let paths: Vec<_> = jobs.into_iter().map(|job| job.path).collect();
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("IMG_10.jpg"), PathBuf::from("IMG_2.jpg")]
+        );
+    }
+
+    #[test]
+    fn scan_priority_is_selected_row_then_visible_rows_in_display_order() {
+        let mut app = sortable_app();
+        app.files.push(FileSystemEntry {
+            path: PathBuf::from("IMG_30.jpg"),
+            size: 0,
+            modified: None,
+            created: None,
+            is_dir: false,
+        });
+        app.selected_indices = vec![3];
+
+        assert_eq!(
+            app.scan_priority_paths_for_ui_range(1, 2),
+            vec![
+                PathBuf::from("IMG_30.jpg"),
+                PathBuf::from("IMG_10.jpg"),
+                PathBuf::from("IMG_2.jpg"),
+            ]
+        );
+    }
+
+    #[test]
+    fn large_selection_keeps_only_viewport_paths_in_live_scan_priority() {
+        let mut app = sortable_app();
+        for index in 3..=8 {
+            app.files.push(FileSystemEntry {
+                path: PathBuf::from(format!("IMG_{index}.jpg")),
+                size: 0,
+                modified: None,
+                created: None,
+                is_dir: false,
+            });
+        }
+        app.selected_indices = (1..=8).collect();
+
+        assert_eq!(
+            app.scan_priority_paths_for_ui_range(2, 3),
+            vec![PathBuf::from("IMG_2.jpg"), PathBuf::from("IMG_3.jpg")]
+        );
     }
 
     #[test]

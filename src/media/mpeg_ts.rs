@@ -20,7 +20,8 @@ pub(super) fn scan(file: &File) -> Result<MediaScanResult, String> {
     let mut bytes = [0u8; M2TS_PACKET_SIZE * 3];
     use std::io::{Read, Seek, SeekFrom};
     let mut file = file.try_clone().map_err(|error| error.to_string())?;
-    file.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| error.to_string())?;
     let count = file.read(&mut bytes).map_err(|error| error.to_string())?;
     if !has_transport_stream_signature(&bytes[..count]) {
         return Err("MPEG transport-stream sync bytes were not found.".to_string());
@@ -53,6 +54,8 @@ mod tests {
             m2ts[offset] = 0x47;
         }
         assert!(has_transport_stream_signature(&m2ts));
-        assert!(!has_transport_stream_signature(&[0u8; M2TS_PACKET_SIZE * 3]));
+        assert!(!has_transport_stream_signature(
+            &[0u8; M2TS_PACKET_SIZE * 3]
+        ));
     }
 }

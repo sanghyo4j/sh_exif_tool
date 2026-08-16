@@ -1,10 +1,10 @@
 mod jpeg;
-mod mpeg_ts;
 mod mp4;
+mod mpeg_ts;
 mod png;
 
-pub(crate) use png::PngDateSources;
 use crate::exif::ExifMetadata;
+pub(crate) use png::PngDateSources;
 
 use std::fs::File;
 use std::io::Read;
@@ -28,6 +28,53 @@ pub struct MediaScanJob {
     pub modified: Option<SystemTime>,
 }
 
+pub(crate) fn is_jpeg_path(path: &Path) -> bool {
+    has_extension(path, &["jpg", "jpeg"])
+}
+
+pub(crate) fn is_png_path(path: &Path) -> bool {
+    has_extension(path, &["png"])
+}
+
+pub(crate) fn is_image_path(path: &Path) -> bool {
+    is_jpeg_path(path) || is_png_path(path)
+}
+
+pub(crate) fn is_mp4_path(path: &Path) -> bool {
+    has_extension(path, &["mp4", "mov", "m4v", "3gp", "3g2", "qt"])
+}
+
+pub(crate) fn is_mpeg_ts_path(path: &Path) -> bool {
+    has_extension(path, &["mts", "m2ts"])
+}
+
+pub(crate) fn is_video_path(path: &Path) -> bool {
+    is_mp4_path(path) || is_mpeg_ts_path(path)
+}
+
+pub(crate) fn fallback_video_media_type(path: &Path) -> &'static str {
+    match lowercase_extension(path).as_deref() {
+        Some("mov" | "qt") => "QuickTime movie",
+        Some("m4v") => "MPEG-4 video",
+        Some("3gp") => "3GPP media",
+        Some("3g2") => "3GPP2 media",
+        Some("mts" | "m2ts") => "AVCHD transport stream",
+        _ => "MPEG-4 media",
+    }
+}
+
+fn has_extension(path: &Path, extensions: &[&str]) -> bool {
+    lowercase_extension(path)
+        .as_deref()
+        .is_some_and(|extension| extensions.contains(&extension))
+}
+
+fn lowercase_extension(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+}
+
 pub fn scan_media_file(path: &Path) -> MediaScanResult {
     let mut signature = [0u8; 192 * 3];
     let Ok(mut file) = File::open(path) else {
@@ -45,8 +92,7 @@ pub fn scan_media_file(path: &Path) -> MediaScanResult {
         .map(|value| value.to_ascii_lowercase());
     let allow_quicktime_without_ftyp = matches!(extension.as_deref(), Some("mov" | "qt"));
     if mp4::has_mp4_signature(&signature[..read_len])
-        || (allow_quicktime_without_ftyp
-            && mp4::has_quicktime_signature(&signature[..read_len]))
+        || (allow_quicktime_without_ftyp && mp4::has_quicktime_signature(&signature[..read_len]))
     {
         let media_type = iso_media_type(extension.as_deref(), &signature[..read_len]);
         return mp4::scan(&mut file, allow_quicktime_without_ftyp)

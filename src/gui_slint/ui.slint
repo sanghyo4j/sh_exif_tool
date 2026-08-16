@@ -277,7 +277,8 @@ export component MainWindow inherits Window {
     callback png_creation_time_input_edited() -> int;
     callback png_exif_date_time_original_input_edited() -> int;
     callback table_row_clicked(int);
-    callback table_row_selected(int, bool, bool);
+    callback table_row_selected(int, bool, bool) -> bool;
+    callback table_visible_range_changed(int, int);
     callback select_all_table_rows();
     callback set_file_filter(int);
     callback set_show_only_missing_media_date(bool);
@@ -313,6 +314,10 @@ export component MainWindow inherits Window {
 
     public function reveal_file_selection() {
         file_selection_reveal_timer.restart();
+    }
+
+    public function report_file_visible_range() {
+        file_table.report_visible_range();
     }
 
     public function begin_rename_selected() {
@@ -779,6 +784,9 @@ export component MainWindow inherits Window {
                 rename_edit_index <=> root.rename_edit_index;
                 rename_text <=> root.selected_name;
                 rename_pending: root.selected_name_dirty;
+                visible_range_changed(first, last) => {
+                    root.table_visible_range_changed(first, last);
+                }
                 selected_file_count: root.selected_file_count;
                 selected_recyclable_count: root.selected_recyclable_count;
                 copied_file_count: root.copied_file_count;
@@ -794,6 +802,9 @@ export component MainWindow inherits Window {
                     return root.find_file_by_prefix(key);
                 }
                 row_selected(index, ctrl, shift) => {
+                    if (!root.table_row_selected(index, ctrl, shift)) {
+                        return false;
+                    }
                     root.rename_edit_index = -1;
                     file_table.focus();
                     root.editing_path = false;
@@ -834,7 +845,7 @@ export component MainWindow inherits Window {
                         root.original_selected_modified = root.files[index].modified;
                         root.selected_is_dir = root.files[index].is_dir;
                     }
-                    root.table_row_selected(index, ctrl, shift);
+                    return true;
                 }
                 row_clicked(index) => {
                     root.table_row_clicked(index);

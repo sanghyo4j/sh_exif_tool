@@ -89,6 +89,10 @@ export component EditableInfoRow inherits Rectangle {
     in property <string> status: "";
     in property <bool> date_input: false;
     property <bool> date_spinner_visible: root.date_input && root.status != "Mixed" && root.value != "";
+    // Keep the last segment chosen inside the text field. Clicking a spinner
+    // button moves focus away from TextInput, so reading its live cursor from
+    // the button callback would otherwise fall back to the year segment.
+    property <int> date_adjust_cursor: 18;
     in-out property <string> value;
     callback value_edited();
     callback date_value_edited() -> int;
@@ -105,7 +109,7 @@ export component EditableInfoRow inherits Rectangle {
         if (!root.date_input || root.value == "") {
             return;
         }
-        let cursor = input.cursor-position-byte-offset;
+        let cursor = root.date_adjust_cursor;
         let adjusted = root.date_value_adjusted(root.value, cursor, delta);
         if (adjusted == root.value) {
             return;
@@ -180,6 +184,12 @@ export component EditableInfoRow inherits Rectangle {
             vertical-alignment: center;
             single-line: true;
             color: NativeColors.text;
+
+            changed cursor-position-byte-offset => {
+                if (self.has-focus) {
+                    root.date_adjust_cursor = self.cursor-position-byte-offset;
+                }
+            }
 
             edited => {
                 if (root.date_input) {

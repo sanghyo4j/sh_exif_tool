@@ -1,7 +1,122 @@
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
+
+static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Writes a replacement beside the destination and atomically swaps it into
+/// place. The original remains untouched if writing, flushing, or replacing
+/// the temporary file fails.
+pub fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Could not resolve the file's parent folder.".to_string())?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| "Could not resolve the filename.".to_string())?
+        .to_string_lossy();
+    let permissions = std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+
+    let temporary = (0..1000)
+        .find_map(|_| {
+            let sequence = ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let candidate = parent.join(format!(
+                ".{name}.sh148-write-{}-{sequence}",
+                std::process::id()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(file) => Some(Ok((candidate, file))),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(error.to_string())),
+            }
+        })
+        .transpose()?
+        .ok_or_else(|| "Could not allocate a temporary file for the update.".to_string())?;
+    let (temporary_path, mut temporary_file) = temporary;
+
+    let write_result = (|| {
+        temporary_file
+            .write_all(bytes)
+            .map_err(|error| error.to_string())?;
+        temporary_file
+            .sync_all()
+            .map_err(|error| error.to_string())?;
+        drop(temporary_file);
+        if let Some(permissions) = permissions {
+            std::fs::set_permissions(&temporary_path, permissions)
+                .map_err(|error| error.to_string())?;
+        }
+        if path.exists() {
+            replace_file_atomically(path, &temporary_path)
+        } else {
+            std::fs::rename(&temporary_path, path).map_err(|error| error.to_string())
+        }
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+    }
+    write_result
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(path: &Path, replacement: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn ReplaceFileW(
+            replaced_file_name: *const u16,
+            replacement_file_name: *const u16,
+            backup_file_name: *const u16,
+            replace_flags: u32,
+            exclude: *mut std::ffi::c_void,
+            reserved: *mut std::ffi::c_void,
+        ) -> i32;
+    }
+
+    const REPLACEFILE_IGNORE_MERGE_ERRORS: u32 = 0x00000002;
+    let replaced: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let replacement: Vec<u16> = replacement
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: both paths are valid, null-terminated UTF-16 buffers that remain
+    // alive until this synchronous call returns. Optional pointers are null.
+    let result = unsafe {
+        ReplaceFileW(
+            replaced.as_ptr(),
+            replacement.as_ptr(),
+            std::ptr::null(),
+            REPLACEFILE_IGNORE_MERGE_ERRORS,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error().to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(path: &Path, replacement: &Path) -> Result<(), String> {
+    std::fs::rename(replacement, path).map_err(|error| error.to_string())
+}
 
 #[derive(Clone, Debug)]
 pub struct FileSystemEntry {
@@ -228,8 +343,7 @@ fn apply_atomic_rename_plan(plan: Vec<(PathBuf, PathBuf)>) -> Result<usize, Stri
         staged.push((source, target, temporary));
     }
 
-    let mut committed = 0usize;
-    for (_, target, temporary) in &staged {
+    for (committed, (_, target, temporary)) in staged.iter().enumerate() {
         if let Err(err) = std::fs::rename(temporary, target) {
             for (_, committed_target, committed_temporary) in staged[..committed].iter().rev() {
                 let _ = std::fs::rename(committed_target, committed_temporary);
@@ -241,7 +355,6 @@ fn apply_atomic_rename_plan(plan: Vec<(PathBuf, PathBuf)>) -> Result<usize, Stri
             }
             return Err(format!("Failed to rename to {}: {err}", target.display()));
         }
-        committed += 1;
     }
 
     Ok(staged.len())
@@ -345,7 +458,7 @@ fn build_trailing_number_rename_plan(paths: &[PathBuf]) -> Result<Vec<(PathBuf, 
         if !source.is_file() {
             continue;
         }
-        let Some(target_name) = move_trailing_number_to_front_name(&source) else {
+        let Some(target_name) = move_trailing_number_to_front_name(source) else {
             continue;
         };
         let directory = source
@@ -904,12 +1017,9 @@ fn move_path_to_recycle_bin(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn move_path_to_recycle_bin(path: &Path) -> Result<(), String> {
-    if path.is_dir() {
-        std::fs::remove_dir_all(path).map_err(|err| err.to_string())
-    } else {
-        std::fs::remove_file(path).map_err(|err| err.to_string())
-    }
+fn move_path_to_recycle_bin(_path: &Path) -> Result<(), String> {
+    Err("Moving items to the system Trash is not implemented on this platform; no file was deleted."
+        .to_string())
 }
 
 #[cfg(windows)]
@@ -987,7 +1097,10 @@ fn choose_folder_impl() -> Result<Option<PathBuf>, String> {
         if converted == 0 {
             Err("Windows could not resolve the selected folder.".to_string())
         } else {
-            let length = path.iter().position(|value| *value == 0).unwrap_or(path.len());
+            let length = path
+                .iter()
+                .position(|value| *value == 0)
+                .unwrap_or(path.len());
             Ok(Some(PathBuf::from(OsString::from_wide(&path[..length]))))
         }
     };
@@ -1159,6 +1272,31 @@ fn open_with_default_application_impl(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_write_replaces_existing_contents_without_leaving_a_temporary_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "sh148-atomic-write-{}-{}",
+            std::process::id(),
+            ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("photo.jpg");
+        std::fs::write(&path, b"original").unwrap();
+        let original_created =
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        set_file_times(&path, Some(original_created), None).unwrap();
+
+        atomic_write_file(&path, b"replacement").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().created().unwrap(),
+            original_created
+        );
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn collision_resolver_uses_stable_dup_suffixes_and_reserves_batch_names() {

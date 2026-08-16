@@ -44,9 +44,7 @@ pub(super) fn write_media_date(path: &Path, display_value: &str) -> Result<(), S
     let local_datetime = Local
         .from_local_datetime(&datetime)
         .single()
-        .ok_or_else(|| {
-            "Media Date is ambiguous or invalid in the local time zone.".to_string()
-        })?;
+        .ok_or_else(|| "Media Date is ambiguous or invalid in the local time zone.".to_string())?;
     let quicktime_seconds = local_datetime
         .with_timezone(&Utc)
         .timestamp()
@@ -178,13 +176,12 @@ fn scan_atoms(file: &mut File, allow_quicktime_without_ftyp: bool) -> Result<Mp4
         .map(|header| header.creation_seconds)
         .or(summary.fallback_creation_seconds);
     if let Some(seconds) = creation_seconds {
-        let (media_date, interpretation) =
-            interpret_quicktime_creation_date(
-                seconds,
-                summary.movie_header,
-                file_modified,
-                summary.uses_3gpp_brand,
-            );
+        let (media_date, interpretation) = interpret_quicktime_creation_date(
+            seconds,
+            summary.movie_header,
+            file_modified,
+            summary.uses_3gpp_brand,
+        );
         summary.media_date = media_date;
         summary.time_interpretation = interpretation;
     }
@@ -321,9 +318,7 @@ fn find_creation_time_fields(
 fn is_mov_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(extension.to_ascii_lowercase().as_str(), "mov" | "qt")
-        })
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "mov" | "qt"))
 }
 
 fn collect_creation_time_fields(
@@ -552,11 +547,8 @@ fn interpret_quicktime_creation_date(
             });
     if use_nonstandard_unix_epoch {
         return (
-            unix_epoch_creation.map(|datetime| {
-                datetime
-                    .format(DISPLAY_DATETIME_FORMAT)
-                    .to_string()
-            }),
+            unix_epoch_creation
+                .map(|datetime| datetime.format(DISPLAY_DATETIME_FORMAT).to_string()),
             "UTC (Unix epoch, non-standard)".to_string(),
         );
     }
@@ -607,7 +599,7 @@ fn should_use_camera_local_time(
 ) -> bool {
     let camera_difference = (file_modified - raw_modification).num_seconds().abs();
     let standard_difference = (file_modified - standard_modification).num_seconds().abs();
-    let timeline_is_coherent = duration_seconds.map_or(true, |duration| {
+    let timeline_is_coherent = duration_seconds.is_none_or(|duration| {
         let recorded_span = (raw_modification - raw_creation).num_seconds() as f64;
         (recorded_span - duration).abs() <= 300.0
     });
@@ -670,8 +662,8 @@ mod tests {
     #[test]
     fn recognizes_nonstandard_unix_epoch_used_by_a_3gp_encoder() {
         let stored_seconds = 1_484_879_439u64;
-        let matching_file_time = std::time::UNIX_EPOCH
-            + std::time::Duration::from_secs(stored_seconds);
+        let matching_file_time =
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(stored_seconds);
         let movie_header = MovieHeaderTimeInfo {
             creation_seconds: stored_seconds,
             modification_seconds: stored_seconds,

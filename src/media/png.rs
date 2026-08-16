@@ -7,6 +7,7 @@ use crate::exif::{
     create_date_only_exif_tiff, exif_backup_path, read_exif_tiff_metadata,
     remove_exif_tiff_date_time_original, rewrite_exif_tiff_dates,
 };
+use crate::fs::atomic_write_file;
 
 use super::MediaScanResult;
 
@@ -152,12 +153,12 @@ pub(super) fn write_date_sources(
         }
     }
 
-    if let Err(err) = fs::write(path, &updated) {
-        let _ = fs::write(path, &bytes);
+    if let Err(err) = atomic_write_file(path, &updated) {
+        let _ = atomic_write_file(path, &bytes);
         return Err(err.to_string());
     }
     if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
-        let _ = fs::write(path, &bytes);
+        let _ = atomic_write_file(path, &bytes);
         let _ = crate::fs::set_file_times(path, original_created, original_modified);
         return Err(err);
     }
@@ -170,7 +171,7 @@ pub(super) fn write_date_sources(
         .as_ref()
         .is_none_or(|display| written.date_time_original == *display);
     if !creation_verified || !exif_verified {
-        let _ = fs::write(path, &bytes);
+        let _ = atomic_write_file(path, &bytes);
         let _ = crate::fs::set_file_times(path, original_created, original_modified);
         return Err("PNG date metadata verification failed.".to_string());
     }
@@ -243,17 +244,17 @@ pub(super) fn remove_date_metadata(path: &Path, backup_before_changes: bool) -> 
         fs::copy(path, &backup_path).map_err(|err| err.to_string())?;
     }
 
-    if let Err(err) = fs::write(path, &updated) {
-        let _ = fs::write(path, &bytes);
+    if let Err(err) = atomic_write_file(path, &updated) {
+        let _ = atomic_write_file(path, &bytes);
         return Err(err.to_string());
     }
     if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
-        let _ = fs::write(path, &bytes);
+        let _ = atomic_write_file(path, &bytes);
         let _ = crate::fs::set_file_times(path, original_created, original_modified);
         return Err(err);
     }
     if read_date_sources(path).has_existing_date() {
-        let _ = fs::write(path, &bytes);
+        let _ = atomic_write_file(path, &bytes);
         let _ = crate::fs::set_file_times(path, original_created, original_modified);
         return Err("PNG date metadata removal verification failed.".to_string());
     }
@@ -293,12 +294,12 @@ pub(super) fn remove_date_source(
             fs::copy(path, &backup_path).map_err(|err| err.to_string())?;
         }
     }
-    if let Err(err) = fs::write(path, &updated) {
-        let _ = fs::write(path, &bytes);
+    if let Err(err) = atomic_write_file(path, &updated) {
+        let _ = atomic_write_file(path, &bytes);
         return Err(err.to_string());
     }
     if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
-        let _ = fs::write(path, &bytes);
+        let _ = atomic_write_file(path, &bytes);
         let _ = crate::fs::set_file_times(path, original_created, original_modified);
         return Err(err);
     }
@@ -309,7 +310,7 @@ pub(super) fn remove_date_source(
         _ => false,
     };
     if !removed {
-        let _ = fs::write(path, &bytes);
+        let _ = atomic_write_file(path, &bytes);
         let _ = crate::fs::set_file_times(path, original_created, original_modified);
         return Err("PNG metadata tag removal verification failed.".to_string());
     }

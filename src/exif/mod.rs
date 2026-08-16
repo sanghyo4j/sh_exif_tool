@@ -3,6 +3,8 @@ use std::fs;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use crate::fs::atomic_write_file;
+
 const DISPLAY_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const EXIF_DATETIME_FORMAT: &str = "%Y:%m:%d %H:%M:%S";
 const DEFAULT_WRITABLE_ASCII_LEN: usize = 64;
@@ -356,7 +358,7 @@ where
         target[..value_bytes.len()].copy_from_slice(&value_bytes);
     }
 
-    fs::write(path, bytes).map_err(|err| err.to_string())?;
+    atomic_write_file(path, &bytes)?;
     restore_matching_file_time(path, matching_file_time)
 }
 
@@ -497,9 +499,9 @@ pub fn write_taken_date_preserving_exif(
         }
     }
 
-    fs::write(path, &updated).map_err(|err| err.to_string())?;
+    atomic_write_file(path, &updated)?;
     if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
-        let _ = fs::write(path, &bytes);
+        let _ = atomic_write_file(path, &bytes);
         let _ = crate::fs::set_file_times(path, original_created, original_modified);
         return Err(err);
     }
@@ -550,7 +552,7 @@ where
     target.fill(0);
     target[..value_bytes.len()].copy_from_slice(&value_bytes);
 
-    fs::write(path, bytes).map_err(|err| err.to_string())?;
+    atomic_write_file(path, &bytes)?;
     restore_matching_file_time(path, matching_file_time)
 }
 
@@ -597,7 +599,7 @@ pub fn write_gps_date_time(path: &Path, date_value: &str, time_value: &str) -> R
 
     write_gps_date_stamp(path, date_value)?;
     if let Err(err) = write_gps_time_stamp(path, time_value) {
-        fs::write(path, original)
+        atomic_write_file(path, &original)
             .map_err(|rollback_err| format!("{err} Rollback failed: {rollback_err}"))?;
         crate::fs::set_file_times(path, original_created, original_modified).map_err(
             |rollback_err| format!("{err} Rollback timestamp restore failed: {rollback_err}"),
@@ -735,7 +737,7 @@ pub fn remove_gps_information(path: &Path) -> Result<(), String> {
         }
     }
 
-    fs::write(path, bytes).map_err(|err| err.to_string())?;
+    atomic_write_file(path, &bytes)?;
     restore_matching_file_time(path, matching_file_time)
 }
 
@@ -760,9 +762,9 @@ pub fn remove_exif_metadata(path: &Path, backup_before_changes: bool) -> Result<
     let original_modified = original_file_metadata.modified().ok();
 
     if !backup_before_changes {
-        fs::write(path, &updated).map_err(|err| err.to_string())?;
+        atomic_write_file(path, &updated)?;
         if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
-            let _ = fs::write(path, &original);
+            let _ = atomic_write_file(path, &original);
             let _ = crate::fs::set_file_times(path, original_created, original_modified);
             return Err(err);
         }
@@ -777,7 +779,7 @@ pub fn remove_exif_metadata(path: &Path, backup_before_changes: bool) -> Result<
         ));
     }
     fs::rename(path, &backup_path).map_err(|err| err.to_string())?;
-    if let Err(err) = fs::write(path, updated) {
+    if let Err(err) = atomic_write_file(path, &updated) {
         let _ = fs::rename(&backup_path, path);
         return Err(err.to_string());
     }
@@ -804,11 +806,11 @@ pub fn rewrite_basic_exif_metadata(
         let original_file_metadata = fs::metadata(path).map_err(|err| err.to_string())?;
         let original_created = original_file_metadata.created().ok();
         let original_modified = original_file_metadata.modified().ok();
-        if let Err(err) = fs::write(path, updated) {
+        if let Err(err) = atomic_write_file(path, &updated) {
             return Err(err.to_string());
         }
         if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
-            let _ = fs::write(path, &bytes);
+            let _ = atomic_write_file(path, &bytes);
             let _ = crate::fs::set_file_times(path, original_created, original_modified);
             return Err(err);
         }
@@ -824,7 +826,7 @@ pub fn rewrite_basic_exif_metadata(
     }
 
     fs::rename(path, &backup_path).map_err(|err| err.to_string())?;
-    if let Err(err) = fs::write(path, updated) {
+    if let Err(err) = atomic_write_file(path, &updated) {
         let _ = fs::rename(&backup_path, path);
         return Err(err.to_string());
     }
@@ -849,7 +851,7 @@ pub fn rewrite_generated_basic_exif_metadata(
 
     let exif_segment = build_basic_exif_app1(metadata)?;
     let updated = replace_or_insert_exif_app1(&bytes, &exif_segment)?;
-    fs::write(path, updated).map_err(|err| err.to_string())?;
+    atomic_write_file(path, &updated)?;
     restore_matching_file_time(path, matching_file_time)
 }
 
@@ -880,8 +882,8 @@ pub fn rewrite_repairable_exif_metadata(
         }
     }
 
-    if let Err(err) = fs::write(path, updated) {
-        let _ = fs::write(path, &bytes);
+    if let Err(err) = atomic_write_file(path, &updated) {
+        let _ = atomic_write_file(path, &bytes);
         return Err(err.to_string());
     }
     restore_matching_file_time(path, matching_file_time)
@@ -941,9 +943,9 @@ pub fn remove_exif_tag(path: &Path, key: &str, backup_before_changes: bool) -> R
             fs::copy(path, backup_path).map_err(|err| err.to_string())?;
         }
     }
-    fs::write(path, updated).map_err(|err| err.to_string())?;
+    atomic_write_file(path, &updated)?;
     if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
-        let _ = fs::write(path, bytes);
+        let _ = atomic_write_file(path, &bytes);
         let _ = crate::fs::set_file_times(path, original_created, original_modified);
         return Err(err);
     }
@@ -1670,10 +1672,7 @@ pub(crate) fn rewrite_exif_tiff_dates(tiff: &[u8], display_value: &str) -> Resul
     rewrite_exif_tiff_date_tags(tiff, display_value, false)
 }
 
-fn rewrite_exif_tiff_taken_dates(
-    tiff: &[u8],
-    display_value: &str,
-) -> Result<Vec<u8>, String> {
+fn rewrite_exif_tiff_taken_dates(tiff: &[u8], display_value: &str) -> Result<Vec<u8>, String> {
     rewrite_exif_tiff_date_tags(tiff, display_value, true)
 }
 
@@ -1714,19 +1713,15 @@ fn rewrite_exif_tiff_date_tags(
 
     let mut ifd0_entries: Vec<(u16, [u8; 12])> = old_ifd0
         .into_iter()
-        .filter(|(tag, _)| {
-            *tag != 0x8769 && (!include_all_taken_date_tags || *tag != 0x0132)
-        })
+        .filter(|(tag, _)| *tag != 0x8769 && (!include_all_taken_date_tags || *tag != 0x0132))
         .collect();
     let mut exif_entries: Vec<(u16, [u8; 12])> = old_exif
         .into_iter()
-        .filter(|(tag, _)| {
-            *tag != 0x9003 && (!include_all_taken_date_tags || *tag != 0x9004)
-        })
+        .filter(|(tag, _)| *tag != 0x9003 && (!include_all_taken_date_tags || *tag != 0x9004))
         .collect();
 
     let mut output = tiff.to_vec();
-    if output.len() % 2 != 0 {
+    if !output.len().is_multiple_of(2) {
         output.push(0);
     }
     let new_ifd0_offset = output.len();
@@ -1847,7 +1842,7 @@ fn rewrite_exif_tiff_software(tiff: &[u8], value: &str) -> Result<Vec<u8>, Strin
         .filter(|(tag, _)| *tag != 0x0131)
         .collect();
     let mut output = tiff.to_vec();
-    if output.len() % 2 != 0 {
+    if !output.len().is_multiple_of(2) {
         output.push(0);
     }
     let new_ifd0_offset = output.len();
@@ -1923,7 +1918,7 @@ fn rewrite_exif_tiff_removing_tags(
         .map(|value| value as usize);
 
     let mut output = tiff.to_vec();
-    if output.len() % 2 != 0 {
+    if !output.len().is_multiple_of(2) {
         output.push(0);
     }
 
@@ -1945,7 +1940,7 @@ fn rewrite_exif_tiff_removing_tags(
         None
     };
 
-    if output.len() % 2 != 0 {
+    if !output.len().is_multiple_of(2) {
         output.push(0);
     }
     let new_gps_offset = if let Some(offset) = old_gps_offset {
@@ -1962,7 +1957,7 @@ fn rewrite_exif_tiff_removing_tags(
         None
     };
 
-    if output.len() % 2 != 0 {
+    if !output.len().is_multiple_of(2) {
         output.push(0);
     }
     let mut new_ifd0: Vec<_> = old_ifd0
@@ -2151,8 +2146,10 @@ fn parse_tiff(data: &[u8]) -> Option<ExifMetadata> {
     }
 
     let ifd0_offset = read_u32(data, 4, endian)? as usize;
-    let mut meta = ExifMetadata::default();
-    meta.has_exif = true;
+    let mut meta = ExifMetadata {
+        has_exif: true,
+        ..ExifMetadata::default()
+    };
     let mut exif_ifd = None;
     let mut gps_ifd = None;
 
@@ -2823,8 +2820,10 @@ mod tests {
             "PhotoScape (SH148 Thumbnail Extracted)"
         );
 
-        let mut metadata = ExifMetadata::default();
-        metadata.software = "PhotoScape".to_string();
+        let metadata = ExifMetadata {
+            software: "PhotoScape".to_string(),
+            ..ExifMetadata::default()
+        };
         let original = build_basic_tiff(&metadata).unwrap();
         let updated_value = thumbnail_extracted_software_value(&metadata.software);
         let updated = rewrite_exif_tiff_software(&original, &updated_value).unwrap();
@@ -3558,8 +3557,10 @@ mod tests {
         ));
         std::fs::write(&path, minimal_jpeg_with_camera_make("Canon")).unwrap();
 
-        let mut metadata = ExifMetadata::default();
-        metadata.camera_make = "Sony".to_string();
+        let metadata = ExifMetadata {
+            camera_make: "Sony".to_string(),
+            ..ExifMetadata::default()
+        };
         let err = rewrite_basic_exif_metadata(&path, &metadata, true).unwrap_err();
 
         assert!(err.contains("Refusing to rewrite an existing EXIF structure"));

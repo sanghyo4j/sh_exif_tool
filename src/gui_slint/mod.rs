@@ -12,17 +12,16 @@ use crate::exif::{
     write_software, write_taken_date_preserving_exif, ExifMetadata,
 };
 use crate::fs::{
-    analyze_front_or_rear_number_removal, analyze_img_vid_prefix_removal, copy_file_times,
-    choose_folder, copy_file_to_folder, move_file_to_recycle_bin, move_trailing_numbers_to_front,
+    analyze_front_or_rear_number_removal, analyze_img_vid_prefix_removal, choose_folder,
+    copy_file_times, copy_file_to_folder, move_file_to_recycle_bin, move_trailing_numbers_to_front,
     open_with_default_application, remove_front_or_rear_numbers, remove_img_vid_prefixes,
     rename_entry, reveal_in_file_manager, save_file_copy, set_file_times,
-    trailing_number_rename_candidate_count,
-    FilenameCollisionResolver,
+    trailing_number_rename_candidate_count, FilenameCollisionResolver,
 };
 use crate::media::{
-    read_png_date_sources, remove_png_date_metadata, remove_png_date_source, scan_media_file,
-    write_mp4_media_date, write_png_date_sources, write_png_media_date, MediaScanJob,
-    PngDateSources,
+    is_jpeg_path, is_mp4_path, is_mpeg_ts_path, is_png_path, is_video_path, read_png_date_sources,
+    remove_png_date_metadata, remove_png_date_source, scan_media_file, write_mp4_media_date,
+    write_png_date_sources, write_png_media_date, MediaScanJob, PngDateSources,
 };
 use crate::GuiRunner;
 use chrono::{
@@ -82,6 +81,7 @@ fn start_media_scan_worker(
     results: Arc<std::sync::Mutex<HashMap<PathBuf, CachedMediaScan>>>,
     results_dirty: Arc<AtomicBool>,
     scan_active: Arc<AtomicBool>,
+    priority_paths: Arc<Mutex<Vec<PathBuf>>>,
 ) {
     std::thread::spawn(move || {
         while let Ok(mut batch) = batches.recv() {
@@ -91,7 +91,17 @@ fn start_media_scan_worker(
                     batch = newer_batch;
                     jobs = VecDeque::from(batch.jobs);
                 }
-                let Some(job) = jobs.pop_front() else {
+                let priority = priority_paths
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                let prioritized_position = priority
+                    .iter()
+                    .find_map(|path| jobs.iter().position(|job| &job.path == path));
+                let job = prioritized_position
+                    .and_then(|position| jobs.remove(position))
+                    .or_else(|| jobs.pop_front());
+                let Some(job) = job else {
                     break;
                 };
                 if current_epoch.load(Ordering::Acquire) != batch.epoch {
@@ -135,6 +145,13 @@ struct PreviewResult {
     status: String,
 }
 
+struct PreviewRequest {
+    generation: u64,
+    path: PathBuf,
+    key: PreviewCacheKey,
+    ui_handle: slint::Weak<MainWindow>,
+}
+
 #[derive(Default)]
 struct PreviewCache {
     entries: HashMap<PreviewCacheKey, PreviewResult>,
@@ -154,9 +171,7 @@ impl PreviewCache {
         const MAX_PREVIEW_CACHE_BYTES: usize = 48 * 1024 * 1024;
         const MAX_PREVIEW_CACHE_ITEMS: usize = 8;
         if let Some(previous) = self.entries.remove(&key) {
-            self.bytes = self
-                .bytes
-                .saturating_sub(previous.pixels.as_bytes().len());
+            self.bytes = self.bytes.saturating_sub(previous.pixels.as_bytes().len());
             self.order.retain(|existing| existing != &key);
         }
         self.bytes = self.bytes.saturating_add(value.pixels.as_bytes().len());
@@ -167,9 +182,7 @@ impl PreviewCache {
                 break;
             };
             if let Some(removed) = self.entries.remove(&oldest) {
-                self.bytes = self
-                    .bytes
-                    .saturating_sub(removed.pixels.as_bytes().len());
+                self.bytes = self.bytes.saturating_sub(removed.pixels.as_bytes().len());
             }
         }
     }
@@ -187,15 +200,21 @@ struct PreviewController {
     current: Rc<RefCell<Option<PreviewCacheKey>>>,
     cache: Arc<Mutex<PreviewCache>>,
     load_timer: Rc<slint::Timer>,
+    request_sender: std::sync::mpsc::Sender<PreviewRequest>,
 }
 
 impl PreviewController {
     fn new() -> Self {
+        let generation = Arc::new(AtomicU64::new(0));
+        let cache = Arc::new(Mutex::new(PreviewCache::default()));
+        let (request_sender, requests) = std::sync::mpsc::channel();
+        start_preview_worker(requests, generation.clone(), cache.clone());
         Self {
-            generation: Arc::new(AtomicU64::new(0)),
+            generation,
             current: Rc::new(RefCell::new(None)),
-            cache: Arc::new(Mutex::new(PreviewCache::default())),
+            cache,
             load_timer: Rc::new(slint::Timer::default()),
+            request_sender,
         }
     }
 
@@ -210,16 +229,7 @@ impl PreviewController {
             self.clear(ui);
             return;
         };
-        if path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| {
-                matches!(
-                    extension.to_ascii_lowercase().as_str(),
-                    "mp4" | "mov" | "m4v" | "3gp" | "3g2" | "qt" | "mts" | "m2ts"
-                )
-            })
-        {
+        if is_video_path(&path) {
             self.clear(ui);
             return;
         }
@@ -267,7 +277,7 @@ impl PreviewController {
 
         let ui_handle = ui.as_weak();
         let generation_handle = self.generation.clone();
-        let cache = self.cache.clone();
+        let request_sender = self.request_sender.clone();
         self.load_timer.start(
             slint::TimerMode::SingleShot,
             Duration::from_millis(80),
@@ -275,52 +285,11 @@ impl PreviewController {
                 if generation_handle.load(Ordering::Acquire) != generation {
                     return;
                 }
-                let ui_handle = ui_handle.clone();
-                let generation_handle = generation_handle.clone();
-                let cache = cache.clone();
-                let path = path.clone();
-                let key = key.clone();
-                std::thread::spawn(move || {
-                    let started_at = Instant::now();
-                    let kind = preview_media_kind(&path);
-                    let initial_dimensions = preview_dimensions(&path);
-                    let result = kind.and_then(|kind| decode_preview(&path, kind, initial_dimensions));
-                    if generation_handle.load(Ordering::Acquire) != generation {
-                        return;
-                    }
-                    if let Some(value) = result.as_ref() {
-                        cache
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .insert(key, value.clone());
-                    }
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if generation_handle.load(Ordering::Acquire) != generation {
-                            return;
-                        }
-                        let Some(ui) = ui_handle.upgrade() else {
-                            return;
-                        };
-                        match result {
-                            Some(value) => {
-                                apply_preview_result(&ui, &value);
-                                ui.set_preview_info(
-                                    preview_info_text(&value, started_at.elapsed()).into(),
-                                );
-                            }
-                            None => {
-                                ui.set_preview_ready(false);
-                                ui.set_preview_status("Image could not be decoded".into());
-                                ui.set_preview_info(
-                                    format!(
-                                        "Preview unavailable (failed in {} ms)",
-                                        started_at.elapsed().as_millis()
-                                    )
-                                    .into(),
-                                );
-                            }
-                        }
-                    });
+                let _ = request_sender.send(PreviewRequest {
+                    generation,
+                    path: path.clone(),
+                    key: key.clone(),
+                    ui_handle: ui_handle.clone(),
                 });
             },
         );
@@ -339,6 +308,70 @@ impl PreviewController {
         ui.set_preview_pixel_width(0);
         ui.set_preview_pixel_height(0);
     }
+}
+
+fn start_preview_worker(
+    requests: std::sync::mpsc::Receiver<PreviewRequest>,
+    current_generation: Arc<AtomicU64>,
+    cache: Arc<Mutex<PreviewCache>>,
+) {
+    std::thread::spawn(move || {
+        while let Ok(mut request) = requests.recv() {
+            // Only the newest queued selection is useful. An image already in
+            // the decoder cannot be interrupted safely, but this keeps stale
+            // selections from starting additional concurrent decoders.
+            while let Ok(newer) = requests.try_recv() {
+                request = newer;
+            }
+            if current_generation.load(Ordering::Acquire) != request.generation {
+                continue;
+            }
+
+            let started_at = Instant::now();
+            let kind = preview_media_kind(&request.path);
+            let initial_dimensions = preview_dimensions(&request.path);
+            let result =
+                kind.and_then(|kind| decode_preview(&request.path, kind, initial_dimensions));
+            if current_generation.load(Ordering::Acquire) != request.generation {
+                continue;
+            }
+            if let Some(value) = result.as_ref() {
+                cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(request.key, value.clone());
+            }
+
+            let generation = request.generation;
+            let ui_handle = request.ui_handle;
+            let current_generation = current_generation.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if current_generation.load(Ordering::Acquire) != generation {
+                    return;
+                }
+                let Some(ui) = ui_handle.upgrade() else {
+                    return;
+                };
+                match result {
+                    Some(value) => {
+                        apply_preview_result(&ui, &value);
+                        ui.set_preview_info(preview_info_text(&value, started_at.elapsed()).into());
+                    }
+                    None => {
+                        ui.set_preview_ready(false);
+                        ui.set_preview_status("Image could not be decoded".into());
+                        ui.set_preview_info(
+                            format!(
+                                "Preview unavailable (failed in {} ms)",
+                                started_at.elapsed().as_millis()
+                            )
+                            .into(),
+                        );
+                    }
+                }
+            });
+        }
+    });
 }
 
 fn preview_media_kind(path: &std::path::Path) -> Option<PreviewMediaKind> {
@@ -508,6 +541,8 @@ impl GuiRunner for SlintRunner {
         let date_overwrite_confirmed = Rc::new(Cell::new(false));
         let scan_results_dirty = Arc::new(AtomicBool::new(false));
         let scan_active = Arc::new(AtomicBool::new(false));
+        let scan_priority_paths = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+        let visible_scan_range = Rc::new(Cell::new((0i32, -1i32)));
         let (scan_batch_sender, scan_batch_receiver) = std::sync::mpsc::channel();
 
         {
@@ -518,6 +553,7 @@ impl GuiRunner for SlintRunner {
                 app.scan_results.clone(),
                 scan_results_dirty.clone(),
                 scan_active.clone(),
+                scan_priority_paths.clone(),
             );
         }
 
@@ -553,6 +589,9 @@ impl GuiRunner for SlintRunner {
                             ui.set_sort_direction(app.sort_direction);
                             ui.set_files(app.get_ui_model());
                             set_selected_files(&ui, &app);
+                            if !scan_active.load(Ordering::Acquire) {
+                                ui.invoke_report_file_visible_range();
+                            }
                             if ui.get_selected_index() != previous_selected_index {
                                 ui.invoke_reveal_file_selection();
                             }
@@ -611,12 +650,24 @@ impl GuiRunner for SlintRunner {
                     ui.set_sort_direction(app.sort_direction);
                     ui.set_files(app.get_ui_model());
                     set_selected_files(&ui, &app);
+                    ui.invoke_report_file_visible_range();
                     preview.update(&ui, &app);
                     drop(app);
                     schedule_scan();
                 }
             }
         };
+
+        {
+            let app_handle = app.clone();
+            let priority_paths = scan_priority_paths.clone();
+            let visible_range = visible_scan_range.clone();
+            ui.on_table_visible_range_changed(move |first, last| {
+                visible_range.set((first, last));
+                let app = app_handle.borrow();
+                update_scan_priority_paths(&app, &priority_paths, (first, last));
+            });
+        }
 
         // 초기 실행
         refresh_ui(None);
@@ -645,6 +696,7 @@ impl GuiRunner for SlintRunner {
             ui.set_sort_direction(app.sort_direction);
             ui.set_files(app.get_ui_model());
             set_selected_files(&ui, &app);
+            ui.invoke_report_file_visible_range();
             preview.update(&ui, &app);
         });
 
@@ -1231,40 +1283,52 @@ impl GuiRunner for SlintRunner {
         let pending_exif_tag_removals_handle = pending_exif_tag_removals.clone();
         let ui_handle = ui.as_weak();
         let preview = preview_controller.clone();
+        let priority_paths = scan_priority_paths.clone();
+        let visible_range = visible_scan_range.clone();
         ui.on_table_row_selected(move |index, ctrl, shift| {
-            if let Some(ui) = ui_handle.upgrade() {
-                pending_renames.borrow_mut().clear();
-                pending_taken_dates.borrow_mut().clear();
-                pending_gps_date_times_handle.borrow_mut().clear();
-                pending_created_dates_handle.borrow_mut().clear();
-                pending_modified_dates_handle.borrow_mut().clear();
-                pending_exif_removals_handle.borrow_mut().clear();
-                pending_exif_tag_removals_handle.borrow_mut().clear();
-                ui.set_activity_text("".into());
-                let mut app = app_handle.borrow_mut();
-                let previous_selection = if ctrl {
-                    Vec::new()
-                } else {
-                    app.selected_indices().to_vec()
-                };
-                app.select_ui_index(index, ctrl, shift);
-                ui.set_selected_index(index);
-                if ctrl {
-                    sync_file_selection_row(
-                        &ui,
-                        index,
-                        app.selected_indices().binary_search(&index).is_ok(),
-                    );
-                } else {
-                    sync_changed_file_selection_model(
-                        &ui,
-                        &previous_selection,
-                        app.selected_indices(),
-                    );
-                }
-                set_selected_files(&ui, &app);
-                preview.update(&ui, &app);
+            let Some(ui) = ui_handle.upgrade() else {
+                return false;
+            };
+            let has_unsaved_edits = ui.get_metadata_dirty()
+                || ui.get_selected_name_dirty()
+                || !pending_renames.borrow().is_empty()
+                || !pending_taken_dates.borrow().is_empty()
+                || !pending_gps_date_times_handle.borrow().is_empty()
+                || !pending_created_dates_handle.borrow().is_empty()
+                || !pending_modified_dates_handle.borrow().is_empty()
+                || !pending_exif_removals_handle.borrow().is_empty()
+                || !pending_exif_tag_removals_handle.borrow().is_empty();
+            if has_unsaved_edits {
+                show_toast(
+                    &ui,
+                    "Save with Ctrl+S or Revert before changing the selection.",
+                );
+                return false;
             }
+
+            ui.set_activity_text("".into());
+            let mut app = app_handle.borrow_mut();
+            let previous_selection = if ctrl {
+                Vec::new()
+            } else {
+                app.selected_indices().to_vec()
+            };
+            app.select_ui_index(index, ctrl, shift);
+            ui.set_selected_index(index);
+            if ctrl {
+                sync_file_selection_row(
+                    &ui,
+                    index,
+                    app.selected_indices().binary_search(&index).is_ok(),
+                );
+            } else {
+                sync_changed_file_selection_model(&ui, &previous_selection, app.selected_indices());
+            }
+            set_selected_files(&ui, &app);
+            sync_file_row_media_fields(&ui, &app, index);
+            update_scan_priority_paths(&app, &priority_paths, visible_range.get());
+            preview.update(&ui, &app);
+            true
         });
 
         let app_handle = app.clone();
@@ -2363,9 +2427,8 @@ impl GuiRunner for SlintRunner {
                         return;
                     };
 
-                    save_file_copy(&path).map(|target_path| {
+                    save_file_copy(&path).inspect(|_| {
                         app.load_folder();
-                        target_path
                     })
                 };
 
@@ -2418,22 +2481,34 @@ impl GuiRunner for SlintRunner {
                     return;
                 }
 
-                let result = (|| {
+                let (target_path, copied_count, failures) = {
                     let mut app = app_handle.borrow_mut();
                     let target_dir = PathBuf::from(&app.current_path);
 
                     let mut last_target_path = None;
+                    let mut copied_count = 0usize;
+                    let mut failures = Vec::new();
                     for path in copied_paths {
-                        last_target_path = Some(copy_file_to_folder(&path, &target_dir)?);
+                        match copy_file_to_folder(&path, &target_dir) {
+                            Ok(target) => {
+                                last_target_path = Some(target);
+                                copied_count += 1;
+                            }
+                            Err(error) => failures.push((path, error)),
+                        }
                     }
 
                     app.load_folder();
-                    Ok::<Option<PathBuf>, String>(last_target_path)
-                })();
+                    (last_target_path, copied_count, failures)
+                };
 
-                match result {
-                    Ok(target_path) => refresh(target_path),
-                    Err(err) => show_message(&ui, "Paste Failed", &err),
+                refresh(target_path);
+                if !failures.is_empty() {
+                    show_message(
+                        &ui,
+                        "Paste Partially Completed",
+                        &format_operation_failures("copied", copied_count, &failures),
+                    );
                 }
             }
         });
@@ -2474,24 +2549,36 @@ impl GuiRunner for SlintRunner {
                     let paths = selected_recyclable_paths(&app);
                     if paths.is_empty() {
                         show_message(&ui, "Delete Failed", "Selected file could not be resolved.");
-                        return Ok::<Option<PathBuf>, String>(None);
+                        return Ok::<_, String>((None, 0, Vec::new()));
                     }
 
+                    let mut deleted = Vec::new();
+                    let mut failures = Vec::new();
                     for path in &paths {
-                        move_file_to_recycle_bin(path)?;
+                        match move_file_to_recycle_bin(path) {
+                            Ok(()) => deleted.push(path.clone()),
+                            Err(error) => failures.push((path.clone(), error)),
+                        }
                     }
 
-                    app.remove_deleted_paths(&paths);
+                    app.remove_deleted_paths(&deleted);
                     let next_path =
                         selection_index_after_deletion(selection_index, app.visible_entry_count())
                             .and_then(|next_index| app.path_for_ui_index(next_index));
-                    Ok::<Option<PathBuf>, String>(next_path)
+                    Ok::<_, String>((next_path, deleted.len(), failures))
                 })();
 
                 match result {
-                    Ok(next_path) => {
+                    Ok((next_path, deleted_count, failures)) => {
                         refresh(next_path);
                         ui.invoke_focus_file_list();
+                        if !failures.is_empty() {
+                            show_message(
+                                &ui,
+                                "Delete Partially Completed",
+                                &format_operation_failures("deleted", deleted_count, &failures),
+                            );
+                        }
                     }
                     Err(err) => show_message(&ui, "Delete Failed", &err),
                 }
@@ -2540,9 +2627,8 @@ impl GuiRunner for SlintRunner {
             let result = {
                 let mut app = app_handle.borrow_mut();
                 let paths = selected_file_paths(&app);
-                move_trailing_numbers_to_front(&paths).map(|count| {
+                move_trailing_numbers_to_front(&paths).inspect(|_| {
                     app.load_folder();
-                    count
                 })
             };
 
@@ -2602,9 +2688,8 @@ impl GuiRunner for SlintRunner {
             let result = {
                 let mut app = app_handle.borrow_mut();
                 let paths = selected_file_paths(&app);
-                remove_front_or_rear_numbers(&paths).map(|stats| {
+                remove_front_or_rear_numbers(&paths).inspect(|_| {
                     app.load_folder();
-                    stats
                 })
             };
 
@@ -2667,9 +2752,8 @@ impl GuiRunner for SlintRunner {
             let result = {
                 let mut app = app_handle.borrow_mut();
                 let paths = selected_file_paths(&app);
-                remove_img_vid_prefixes(&paths).map(|stats| {
+                remove_img_vid_prefixes(&paths).inspect(|_| {
                     app.load_folder();
-                    stats
                 })
             };
 
@@ -2855,22 +2939,10 @@ impl GuiRunner for SlintRunner {
                     let renamed_count = renamed.len();
                     remap_selected_paths(&mut selected_path, &mut selected_paths, &renamed);
                     remap_hash_map_paths(&mut pending_taken_dates.borrow_mut(), &renamed);
-                    remap_hash_map_paths(
-                        &mut pending_gps_date_times_handle.borrow_mut(),
-                        &renamed,
-                    );
-                    remap_hash_map_paths(
-                        &mut pending_created_dates_handle.borrow_mut(),
-                        &renamed,
-                    );
-                    remap_hash_map_paths(
-                        &mut pending_modified_dates_handle.borrow_mut(),
-                        &renamed,
-                    );
-                    remap_hash_set_paths(
-                        &mut pending_exif_removals_handle.borrow_mut(),
-                        &renamed,
-                    );
+                    remap_hash_map_paths(&mut pending_gps_date_times_handle.borrow_mut(), &renamed);
+                    remap_hash_map_paths(&mut pending_created_dates_handle.borrow_mut(), &renamed);
+                    remap_hash_map_paths(&mut pending_modified_dates_handle.borrow_mut(), &renamed);
+                    remap_hash_set_paths(&mut pending_exif_removals_handle.borrow_mut(), &renamed);
                     remap_hash_map_paths(
                         &mut pending_exif_tag_removals_handle.borrow_mut(),
                         &renamed,
@@ -2883,11 +2955,7 @@ impl GuiRunner for SlintRunner {
                 if ui.get_selected_name_dirty() {
                     let requested_name = ui.get_selected_name().trim().to_string();
                     let Some(current_path) = selected_path.clone() else {
-                        show_message(
-                            &ui,
-                            "Rename Failed",
-                            "Selected file could not be resolved.",
-                        );
+                        show_message(&ui, "Rename Failed", "Selected file could not be resolved.");
                         return;
                     };
                     let new_name = rename_name_preserving_extension(&current_path, &requested_name);
@@ -2902,22 +2970,10 @@ impl GuiRunner for SlintRunner {
                     let renamed = vec![(current_path, new_path)];
                     remap_selected_paths(&mut selected_path, &mut selected_paths, &renamed);
                     remap_hash_map_paths(&mut pending_taken_dates.borrow_mut(), &renamed);
-                    remap_hash_map_paths(
-                        &mut pending_gps_date_times_handle.borrow_mut(),
-                        &renamed,
-                    );
-                    remap_hash_map_paths(
-                        &mut pending_created_dates_handle.borrow_mut(),
-                        &renamed,
-                    );
-                    remap_hash_map_paths(
-                        &mut pending_modified_dates_handle.borrow_mut(),
-                        &renamed,
-                    );
-                    remap_hash_set_paths(
-                        &mut pending_exif_removals_handle.borrow_mut(),
-                        &renamed,
-                    );
+                    remap_hash_map_paths(&mut pending_gps_date_times_handle.borrow_mut(), &renamed);
+                    remap_hash_map_paths(&mut pending_created_dates_handle.borrow_mut(), &renamed);
+                    remap_hash_map_paths(&mut pending_modified_dates_handle.borrow_mut(), &renamed);
+                    remap_hash_set_paths(&mut pending_exif_removals_handle.borrow_mut(), &renamed);
                     remap_hash_map_paths(
                         &mut pending_exif_tag_removals_handle.borrow_mut(),
                         &renamed,
@@ -2937,7 +2993,8 @@ impl GuiRunner for SlintRunner {
                 if filename_changed && !ui.get_metadata_dirty() && !has_pending_metadata {
                     {
                         let mut app = app_handle.borrow_mut();
-                        app.load_folder();
+                        let changed_paths: Vec<_> = selected_path.iter().cloned().collect();
+                        app.reload_folder_after_changes(&changed_paths);
                     }
                     refresh(selected_path.clone());
                     ui.invoke_focus_file_list();
@@ -2952,26 +3009,36 @@ impl GuiRunner for SlintRunner {
                     && pending_exif_tag_removals_handle.borrow().is_empty()
                 {
                     let mut saved_count = 0usize;
+                    let mut failures = Vec::new();
                     for path in &selected_paths {
                         let Some((gps_date, gps_time)) = pending_gps_snapshot.get(path) else {
                             continue;
                         };
-                        if let Err(err) = write_gps_date_time(path, gps_date, gps_time) {
-                            show_message(&ui, "Apply Failed", &err);
-                            return;
+                        let result =
+                            ensure_jpeg_change_backup(path, ui.get_backup_before_changes())
+                                .and_then(|()| write_gps_date_time(path, gps_date, gps_time));
+                        match result {
+                            Ok(()) => saved_count += 1,
+                            Err(error) => failures.push((path.clone(), error)),
                         }
-                        saved_count += 1;
                     }
                     pending_gps_date_times_handle.borrow_mut().clear();
                     {
                         let mut app = app_handle.borrow_mut();
-                        app.load_folder();
+                        app.reload_folder_after_changes(&selected_paths);
                     }
                     refresh(selected_path.clone());
                     show_toast(
                         &ui,
                         &format!("Saved GPS Date/Time for {saved_count} file(s)."),
                     );
+                    if !failures.is_empty() {
+                        show_message(
+                            &ui,
+                            "Apply Partially Completed",
+                            &format_operation_failures("updated", saved_count, &failures),
+                        );
+                    }
                     if filename_changed {
                         ui.invoke_focus_file_list();
                     }
@@ -3029,39 +3096,34 @@ impl GuiRunner for SlintRunner {
                     } else {
                         Some(&pending_created_dates_snapshot)
                     };
+                    let mut saved_count = 0usize;
+                    let mut failures = Vec::new();
                     for path in &selected_paths {
-                        if pending_exif_removals_snapshot.contains(path) {
-                            if let Err(err) =
-                                remove_supported_metadata(path, ui.get_backup_before_changes())
+                        let result = (|| {
+                            if pending_exif_removals_snapshot.contains(path) {
+                                remove_supported_metadata(path, ui.get_backup_before_changes())?;
+                                return Ok::<(), String>(());
+                            }
+                            if let Some((gps_date, gps_time)) =
+                                pending_gps_date_times_snapshot.get(path)
                             {
-                                show_message(&ui, "Remove Metadata Failed", &err);
-                                return;
+                                ensure_jpeg_change_backup(path, ui.get_backup_before_changes())?;
+                                write_gps_date_time(path, gps_date, gps_time)?;
                             }
-                            continue;
-                        }
-                        if let Some((gps_date, gps_time)) =
-                            pending_gps_date_times_snapshot.get(path)
-                        {
-                            if let Err(err) = write_gps_date_time(path, gps_date, gps_time) {
-                                show_message(&ui, "Apply Failed", &err);
-                                return;
-                            }
-                        }
-                        match apply_metadata_changes_to_path(
-                            &ui,
-                            path,
-                            pending_taken_dates_arg,
-                            pending_created_dates_arg,
-                            pending_modified_dates_arg,
-                        ) {
-                            Ok(Some(new_path)) => {
+                            if let Some(new_path) = apply_metadata_changes_to_path(
+                                &ui,
+                                path,
+                                pending_taken_dates_arg,
+                                pending_created_dates_arg,
+                                pending_modified_dates_arg,
+                            )? {
                                 refresh_path = Some(new_path);
                             }
-                            Ok(None) => {}
-                            Err(err) => {
-                                show_message(&ui, "Apply Failed", &err);
-                                return;
-                            }
+                            Ok(())
+                        })();
+                        match result {
+                            Ok(()) => saved_count += 1,
+                            Err(error) => failures.push((path.clone(), error)),
                         }
                     }
 
@@ -3075,9 +3137,22 @@ impl GuiRunner for SlintRunner {
                     update_metadata_dirty_state(&ui);
                     {
                         let mut app = app_handle.borrow_mut();
-                        app.load_folder();
+                        let mut changed_paths = selected_paths.clone();
+                        if let Some(path) = refresh_path.as_ref() {
+                            if !changed_paths.contains(path) {
+                                changed_paths.push(path.clone());
+                            }
+                        }
+                        app.reload_folder_after_changes(&changed_paths);
                     }
                     refresh(refresh_path);
+                    if !failures.is_empty() {
+                        show_message(
+                            &ui,
+                            "Apply Partially Completed",
+                            &format_operation_failures("updated", saved_count, &failures),
+                        );
+                    }
                     if filename_changed {
                         ui.invoke_focus_file_list();
                     }
@@ -3110,7 +3185,8 @@ impl GuiRunner for SlintRunner {
                         {
                             {
                                 let mut app = app_handle.borrow_mut();
-                                app.load_folder();
+                                let changed_paths: Vec<_> = selected_path.iter().cloned().collect();
+                                app.reload_folder_after_changes(&changed_paths);
                             }
                             refresh(selected_path);
                             show_toast(&ui, "Metadata tag(s) removed.");
@@ -3137,7 +3213,8 @@ impl GuiRunner for SlintRunner {
                         update_metadata_dirty_state(&ui);
                         {
                             let mut app = app_handle.borrow_mut();
-                            app.load_folder();
+                            let changed_paths: Vec<_> = selected_path.iter().cloned().collect();
+                            app.reload_folder_after_changes(&changed_paths);
                         }
                         refresh(selected_path);
                         show_toast(&ui, "Metadata tags were removed.");
@@ -3279,7 +3356,7 @@ impl GuiRunner for SlintRunner {
                         update_metadata_dirty_state(&ui);
                         {
                             let mut app = app_handle.borrow_mut();
-                            app.load_folder();
+                            app.reload_folder_after_changes(std::slice::from_ref(&new_path));
                         }
                         refresh(Some(new_path.clone()));
                         show_message(
@@ -3336,7 +3413,8 @@ impl GuiRunner for SlintRunner {
                         update_metadata_dirty_state(&ui);
                         {
                             let mut app = app_handle.borrow_mut();
-                            app.load_folder();
+                            let changed_paths: Vec<_> = selected_path.iter().cloned().collect();
+                            app.reload_folder_after_changes(&changed_paths);
                         }
                         refresh(selected_path);
                         if filename_changed {
@@ -3386,7 +3464,8 @@ impl GuiRunner for SlintRunner {
                 update_metadata_dirty_state(&ui);
                 {
                     let mut app = app_handle.borrow_mut();
-                    app.load_folder();
+                    let changed_paths: Vec<_> = selected_path.iter().cloned().collect();
+                    app.reload_folder_after_changes(&changed_paths);
                 }
                 refresh(selected_path);
                 if filename_changed {
@@ -3568,11 +3647,7 @@ fn sync_file_selection_model(ui: &MainWindow, app: &SlintApp) {
     }
 }
 
-fn sync_changed_file_selection_model(
-    ui: &MainWindow,
-    previous: &[i32],
-    current: &[i32],
-) {
+fn sync_changed_file_selection_model(ui: &MainWindow, previous: &[i32], current: &[i32]) {
     let model = ui.get_files();
     let previous: HashSet<i32> = previous.iter().copied().collect();
     let current: HashSet<i32> = current.iter().copied().collect();
@@ -3602,6 +3677,36 @@ fn sync_file_selection_row(ui: &MainWindow, index: i32, selected: bool) {
     }
 }
 
+fn sync_file_row_media_fields(ui: &MainWindow, app: &SlintApp, index: i32) {
+    let Some((media_kind, media_date, metadata_status)) =
+        app.cached_media_fields_for_ui_index(index)
+    else {
+        return;
+    };
+    let Ok(row_index) = usize::try_from(index) else {
+        return;
+    };
+    let model = ui.get_files();
+    let Some(mut row) = model.row_data(row_index) else {
+        return;
+    };
+    row.media_kind = media_kind.into();
+    row.media_date = media_date.into();
+    row.metadata_status = metadata_status.into();
+    model.set_row_data(row_index, row);
+}
+
+fn update_scan_priority_paths(
+    app: &SlintApp,
+    priority_paths: &Arc<Mutex<Vec<PathBuf>>>,
+    visible_range: (i32, i32),
+) {
+    let paths = app.scan_priority_paths_for_ui_range(visible_range.0, visible_range.1);
+    *priority_paths
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = paths;
+}
+
 fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
     let indices = app.selected_indices();
     if indices.is_empty() {
@@ -3615,7 +3720,8 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
     }
 
     if indices.len() > 5 {
-        let (file_count, recyclable_count, has_dir) = set_large_selection_media_details(ui, indices);
+        let (file_count, recyclable_count, has_dir) =
+            set_large_selection_media_details(ui, indices);
         let summary = format!("{} items selected", indices.len());
         ui.set_selected_index(*indices.last().unwrap_or(&-1));
         ui.set_selected_name(summary.clone().into());
@@ -3635,11 +3741,13 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
         // Determining the selected media kind only uses the already-loaded file
         // entries/extensions, so large selections can keep their tools available
         // without performing EXIF aggregation.
-        let mut metadata = ExifMetadata::default();
-        metadata.has_exif = large_selection_exif_available(
-            ui.get_selected_media_kind().as_str(),
-            ui.get_selected_metadata_status().as_str(),
-        );
+        let metadata = ExifMetadata {
+            has_exif: large_selection_exif_available(
+                ui.get_selected_media_kind().as_str(),
+                ui.get_selected_metadata_status().as_str(),
+            ),
+            ..ExifMetadata::default()
+        };
         set_loaded_exif_metadata(ui, metadata);
         if ui.get_exif_available() {
             set_large_selection_metadata_statuses(ui);
@@ -3648,7 +3756,10 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
     }
 
     let selected_entries = app.selected_entry_details();
-    let file_count = selected_entries.iter().filter(|entry| !entry.is_dir).count();
+    let file_count = selected_entries
+        .iter()
+        .filter(|entry| !entry.is_dir)
+        .count();
     let recyclable_count = selected_entries
         .iter()
         .filter(|entry| entry.path.is_some())
@@ -3744,10 +3855,7 @@ fn clear_selected_file(ui: &MainWindow) {
     set_loaded_exif_metadata(ui, ExifMetadata::default());
 }
 
-fn set_selected_media_details_from_entries(
-    ui: &MainWindow,
-    entries: &[SelectedEntryDetails],
-) {
+fn set_selected_media_details_from_entries(ui: &MainWindow, entries: &[SelectedEntryDetails]) {
     ui.set_selected_time_interpretation("Mixed".into());
     let mut kinds: Vec<&str> = entries
         .iter()
@@ -3777,10 +3885,7 @@ fn set_selected_media_details_from_entries(
     }
 }
 
-fn set_large_selection_media_details(
-    ui: &MainWindow,
-    indices: &[i32],
-) -> (usize, usize, bool) {
+fn set_large_selection_media_details(ui: &MainWindow, indices: &[i32]) -> (usize, usize, bool) {
     let model = ui.get_files();
     let mut file_count = 0usize;
     let mut recyclable_count = 0usize;
@@ -4689,10 +4794,7 @@ fn remap_selected_paths(
     }
 }
 
-fn remap_hash_map_paths<V>(
-    values: &mut HashMap<PathBuf, V>,
-    renames: &[(PathBuf, PathBuf)],
-) {
+fn remap_hash_map_paths<V>(values: &mut HashMap<PathBuf, V>, renames: &[(PathBuf, PathBuf)]) {
     for (source, target) in renames {
         if let Some(value) = values.remove(source) {
             values.insert(target.clone(), value);
@@ -4714,37 +4816,6 @@ fn selected_file_paths(app: &SlintApp) -> Vec<PathBuf> {
         .filter_map(|index| app.path_for_ui_index(*index))
         .filter(|path| path.is_file())
         .collect()
-}
-
-fn is_jpeg_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg"))
-}
-
-fn is_png_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
-}
-
-fn is_mp4_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "mp4" | "mov" | "m4v" | "3gp" | "3g2" | "qt"
-            )
-        })
-}
-
-fn is_mpeg_ts_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(extension.to_ascii_lowercase().as_str(), "mts" | "m2ts")
-        })
 }
 
 fn remove_supported_metadata(
@@ -4779,6 +4850,31 @@ fn delete_confirmation_message(count: i32) -> String {
     }
 }
 
+fn format_operation_failures(
+    completed_verb: &str,
+    completed_count: usize,
+    failures: &[(PathBuf, String)],
+) -> String {
+    let mut message = format!(
+        "{completed_count} item(s) {completed_verb}; {} failed.",
+        failures.len()
+    );
+    for (path, error) in failures.iter().take(5) {
+        let name = path
+            .file_name()
+            .map(|value| value.to_string_lossy())
+            .unwrap_or_else(|| path.as_os_str().to_string_lossy());
+        message.push_str(&format!("\n{name}: {error}"));
+    }
+    if failures.len() > 5 {
+        message.push_str(&format!("\n...and {} more.", failures.len() - 5));
+    }
+    if completed_count > 0 {
+        message.push_str("\nCompleted files were not rolled back.");
+    }
+    message
+}
+
 fn is_type_ahead_text(value: &str) -> bool {
     !value.is_empty()
         && value.chars().all(|character| {
@@ -4801,9 +4897,7 @@ fn apply_metadata_changes_to_path(
     let has_pending_taken_date = taken_date_override.is_some();
     if is_mp4_path(path) {
         if has_exif_metadata_changes_without_taken_date(ui) {
-            return Err(
-                "Only Media Date can be written to MP4/MOV/M4V/3GP/3G2 files.".to_string(),
-            );
+            return Err("Only Media Date can be written to MP4/MOV/M4V/3GP/3G2 files.".to_string());
         }
         if let Some(taken_date) = taken_date_override {
             write_mp4_media_date(path, taken_date)?;
@@ -4877,6 +4971,7 @@ fn apply_metadata_changes_to_path(
             rewrite_generated_basic_exif_metadata(path, &metadata)?;
             None
         } else {
+            ensure_jpeg_change_backup(path, ui.get_backup_before_changes())?;
             if let Err(err) =
                 write_dirty_exif_tags(ui, path, taken_date_override, pending_taken_dates.is_some())
             {
@@ -4969,6 +5064,22 @@ fn write_dirty_exif_tags(
     }
     if has_gps_metadata_changes(ui) {
         write_dirty_gps_tags(ui, path)?;
+    }
+    Ok(())
+}
+
+fn ensure_jpeg_change_backup(path: &std::path::Path, enabled: bool) -> Result<(), String> {
+    if !enabled || !is_jpeg_path(path) {
+        return Ok(());
+    }
+    let backup_path = exif_backup_path(path);
+    if backup_path.exists() {
+        return Ok(());
+    }
+    std::fs::copy(path, &backup_path).map_err(|error| error.to_string())?;
+    if let Err(error) = copy_file_times(path, &backup_path) {
+        let _ = std::fs::remove_file(&backup_path);
+        return Err(error);
     }
     Ok(())
 }
@@ -5459,14 +5570,7 @@ fn parse_timestamp(value: &str) -> Result<SystemTime, String> {
 
 fn adjust_datetime_segment(value: &str, cursor: i32, delta: i32) -> String {
     let value = value.trim();
-    let Some(datetime) = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
-        .ok()
-        .or_else(|| {
-            NaiveDate::parse_from_str(value, "%Y-%m-%d")
-                .ok()
-                .and_then(|date| date.and_hms_opt(0, 0, 0))
-        })
-    else {
+    let Some(datetime) = parse_display_datetime_or_date(value) else {
         return value.to_string();
     };
     if delta == 0 {
@@ -5476,7 +5580,8 @@ fn adjust_datetime_segment(value: &str, cursor: i32, delta: i32) -> String {
     let adjusted = if cursor <= 4 {
         let year = datetime.year().saturating_add(delta).clamp(1, 9_999);
         let day = datetime.day().min(days_in_month(year, datetime.month()));
-        NaiveDate::from_ymd_opt(year, datetime.month(), day).map(|date| date.and_time(datetime.time()))
+        NaiveDate::from_ymd_opt(year, datetime.month(), day)
+            .map(|date| date.and_time(datetime.time()))
     } else if cursor <= 7 {
         let month_index = datetime.year() * 12 + datetime.month0() as i32 + delta;
         let year = month_index.div_euclid(12);
@@ -5536,6 +5641,42 @@ fn parse_display_datetime_or_date(value: &str) -> Option<NaiveDateTime> {
                 .ok()
                 .and_then(|date| date.and_hms_opt(0, 0, 0))
         })
+        .or_else(|| parse_compact_datetime_input(value))
+}
+
+fn parse_compact_datetime_input(value: &str) -> Option<NaiveDateTime> {
+    let value = value.trim();
+    if value.is_empty()
+        || !value.chars().all(|character| {
+            character.is_ascii_digit()
+                || matches!(
+                    character,
+                    '-' | '_' | '/' | '.' | ' ' | 'T' | 't' | ':' | ';'
+                )
+        })
+    {
+        return None;
+    }
+    let digits: String = value
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .collect();
+    if !matches!(digits.len(), 8 | 10 | 12 | 14) {
+        return None;
+    }
+    let year = digits[0..4].parse().ok()?;
+    let month = digits[4..6].parse().ok()?;
+    let day = digits[6..8].parse().ok()?;
+    let hour = digits
+        .get(8..10)
+        .map_or(Some(0), |value| value.parse().ok())?;
+    let minute = digits
+        .get(10..12)
+        .map_or(Some(0), |value| value.parse().ok())?;
+    let second = digits
+        .get(12..14)
+        .map_or(Some(0), |value| value.parse().ok())?;
+    NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, second)
 }
 
 fn earliest_file_timestamp(path: &std::path::Path) -> Option<String> {
@@ -5559,6 +5700,12 @@ fn earliest_available_timestamp(
 }
 
 fn auto_format_date_input(value: &str) -> String {
+    let compact_digit_count = value.chars().filter(|ch| ch.is_ascii_digit()).count();
+    if compact_digit_count == 14 {
+        if let Some(datetime) = parse_compact_datetime_input(value) {
+            return datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+        }
+    }
     let date_end = value
         .char_indices()
         .find_map(|(index, ch)| (ch.is_whitespace() || ch == 'T').then_some(index))
@@ -6136,8 +6283,8 @@ fn set_exif_value(ui: &MainWindow, key: &str, value: &str) {
 mod tests {
     use super::{
         adjust_datetime_segment, adjust_nonnegative_shift_value, apply_filename_rename_plan,
-        auto_format_date_edit, auto_format_date_input,
-        combined_gps_date_time, earliest_available_timestamp, filename_from_media_date,
+        auto_format_date_edit, auto_format_date_input, combined_gps_date_time,
+        earliest_available_timestamp, filename_from_media_date,
         filename_from_media_date_with_reserved, gps_date_time_for_shift, gps_utc_to_kst_display,
         large_selection_exif_available, parse_combined_gps_date_time, parse_media_date_shift,
         preview_info_text, preview_media_kind, selection_index_after_deletion, selection_summary,
@@ -6329,6 +6476,18 @@ mod tests {
             auto_format_date_input("2026-05-09 12::34"),
             "2026-05-09 12:34:"
         );
+        assert_eq!(
+            auto_format_date_input("20171020_152544"),
+            "2017-10-20 15:25:44"
+        );
+        assert_eq!(
+            auto_format_date_input("20171020-152544"),
+            "2017-10-20 15:25:44"
+        );
+        assert_eq!(
+            auto_format_date_input("20171020 152544"),
+            "2017-10-20 15:25:44"
+        );
     }
 
     #[test]
@@ -6359,6 +6518,10 @@ mod tests {
         assert_eq!(
             adjust_datetime_segment("2017-12-12", 9, -1),
             "2017-12-11 00:00:00"
+        );
+        assert_eq!(
+            adjust_datetime_segment("20171020_152544", 18, 1),
+            "2017-10-20 15:25:45"
         );
     }
 

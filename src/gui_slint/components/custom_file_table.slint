@@ -91,7 +91,7 @@ export component CustomFileTable inherits Rectangle {
     in-out property <string> rename_text: "";
     in property <bool> rename_pending: false;
 
-    callback row_selected(int, bool, bool);
+    callback row_selected(int, bool, bool) -> bool;
     callback row_clicked(int);
     callback row_activated(int);
     callback select_all_requested();
@@ -110,12 +110,15 @@ export component CustomFileTable inherits Rectangle {
     callback exit_requested();
     callback sort_requested(int);
     callback type_ahead_requested(string) -> int;
+    callback visible_range_changed(int, int);
 
     property <length> menu_x: 0px;
     property <length> menu_y: 0px;
     property <length> menu_width: 192px;
     property <bool> context_target_is_dir: root.selected_index >= 0 && root.selected_index < root.files.length && root.files[root.selected_index].is_dir;
     property <length> menu_height: 198px;
+    property <int> first_visible_index: max(0, floor(-list.viewport-y / 30px));
+    property <int> last_visible_index: min(root.files.length - 1, ceil((-list.viewport-y + list.visible-height) / 30px));
 
     background: NativeColors.surface;
     forward-focus: focus_scope;
@@ -135,6 +138,10 @@ export component CustomFileTable inherits Rectangle {
         }
     }
 
+    public function report_visible_range() {
+        visible_range_timer.restart();
+    }
+
     selection_scroll_timer := Timer {
         interval: 16ms;
         running: false;
@@ -144,6 +151,18 @@ export component CustomFileTable inherits Rectangle {
             root.reveal_selected_row();
         }
     }
+
+    visible_range_timer := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.visible_range_changed(root.first_visible_index, root.last_visible_index);
+        }
+    }
+
+    changed first_visible_index => { visible_range_timer.restart(); }
+    changed last_visible_index => { visible_range_timer.restart(); }
 
     background_close_area := TouchArea {
         width: 100%;
@@ -294,20 +313,20 @@ export component CustomFileTable inherits Rectangle {
                         if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
                             root.context_menu_visible = false;
                             root.focus();
-                            root.selected_index = i;
-                            root.row_selected(i, event.modifiers.control, event.modifiers.shift);
-                            root.row_clicked(i);
+                            if (root.row_selected(i, event.modifiers.control, event.modifiers.shift)) {
+                                root.selected_index = i;
+                                root.row_clicked(i);
+                            }
                         }
 
                         if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                             root.focus();
-                            root.selected_index = i;
-                            if (!entry.selected) {
-                                root.row_selected(i, false, false);
+                            if (entry.selected || root.row_selected(i, false, false)) {
+                                root.selected_index = i;
+                                root.menu_x = min(root.width - root.menu_width - 1px, max(1px, self.absolute-position.x - root.absolute-position.x + self.mouse-x + 1px));
+                                root.menu_y = min(root.height - root.menu_height - 1px, max(1px, self.absolute-position.y - root.absolute-position.y + self.mouse-y + 1px));
+                                root.context_menu_visible = true;
                             }
-                            root.menu_x = min(root.width - root.menu_width - 1px, max(1px, self.absolute-position.x - root.absolute-position.x + self.mouse-x + 1px));
-                            root.menu_y = min(root.height - root.menu_height - 1px, max(1px, self.absolute-position.y - root.absolute-position.y + self.mouse-y + 1px));
-                            root.context_menu_visible = true;
                         }
                     }
                 }
@@ -454,27 +473,27 @@ export component CustomFileTable inherits Rectangle {
                 return accept;
             }
             if (event.text == Key.UpArrow) {
-                if (root.selected_index > 0) { root.selected_index -= 1; root.row_selected(root.selected_index, false, false); root.reveal_selected_row(); selection_scroll_timer.restart(); }
+                if (root.selected_index > 0) { let next = root.selected_index - 1; if (root.row_selected(next, false, false)) { root.selected_index = next; root.reveal_selected_row(); selection_scroll_timer.restart(); } }
                 return accept;
             }
             if (event.text == Key.DownArrow) {
-                if (root.selected_index < root.files.length - 1) { root.selected_index += 1; root.row_selected(root.selected_index, false, false); root.reveal_selected_row(); selection_scroll_timer.restart(); }
+                if (root.selected_index < root.files.length - 1) { let next = root.selected_index + 1; if (root.row_selected(next, false, false)) { root.selected_index = next; root.reveal_selected_row(); selection_scroll_timer.restart(); } }
                 return accept;
             }
             if (event.text == Key.Home) {
-                if (root.files.length > 0) { root.selected_index = 0; root.row_selected(root.selected_index, false, false); root.reveal_selected_row(); selection_scroll_timer.restart(); }
+                if (root.files.length > 0 && root.row_selected(0, false, false)) { root.selected_index = 0; root.reveal_selected_row(); selection_scroll_timer.restart(); }
                 return accept;
             }
             if (event.text == Key.End) {
-                if (root.files.length > 0) { root.selected_index = root.files.length - 1; root.row_selected(root.selected_index, false, false); root.reveal_selected_row(); selection_scroll_timer.restart(); }
+                if (root.files.length > 0) { let next = root.files.length - 1; if (root.row_selected(next, false, false)) { root.selected_index = next; root.reveal_selected_row(); selection_scroll_timer.restart(); } }
                 return accept;
             }
             if (event.text == Key.PageUp) {
-                if (root.files.length > 0) { root.selected_index = max(0, root.selected_index - max(1, floor(list.visible-height / 30px) - 1)); root.row_selected(root.selected_index, false, false); root.reveal_selected_row(); selection_scroll_timer.restart(); }
+                if (root.files.length > 0) { let next = max(0, root.selected_index - max(1, floor(list.visible-height / 30px) - 1)); if (root.row_selected(next, false, false)) { root.selected_index = next; root.reveal_selected_row(); selection_scroll_timer.restart(); } }
                 return accept;
             }
             if (event.text == Key.PageDown) {
-                if (root.files.length > 0) { root.selected_index = min(root.files.length - 1, root.selected_index + max(1, floor(list.visible-height / 30px) - 1)); root.row_selected(root.selected_index, false, false); root.reveal_selected_row(); selection_scroll_timer.restart(); }
+                if (root.files.length > 0) { let next = min(root.files.length - 1, root.selected_index + max(1, floor(list.visible-height / 30px) - 1)); if (root.row_selected(next, false, false)) { root.selected_index = next; root.reveal_selected_row(); selection_scroll_timer.restart(); } }
                 return accept;
             }
             if (event.text == Key.Return) { if (root.selected_index >= 0 && root.selected_index < root.files.length) { root.row_activated(root.selected_index); } return accept; }
@@ -490,9 +509,10 @@ export component CustomFileTable inherits Rectangle {
             if (event.text != "" && !event.modifiers.control && !event.modifiers.alt) {
                 let match_index = root.type_ahead_requested(event.text);
                 if (match_index >= 0 && match_index < root.files.length) {
-                    root.selected_index = match_index;
-                    root.row_selected(match_index, false, false);
-                    selection_scroll_timer.restart();
+                    if (root.row_selected(match_index, false, false)) {
+                        root.selected_index = match_index;
+                        selection_scroll_timer.restart();
+                    }
                 }
                 return accept;
             }
