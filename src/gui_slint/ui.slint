@@ -8,6 +8,40 @@ import { CustomFileTable } from "components/custom_file_table.slint";
 import { MetadataPanel } from "components/metadata_panel.slint";
 import { FontSettings, MetadataContextMenuState, NativeColors } from "theme.slint";
 
+component ShiftNumberInput inherits Rectangle {
+    in-out property <string> value: "0";
+    callback value_changed(string);
+    callback adjusted(string, int) -> string;
+
+    LineEdit {
+        x: 0px;
+        width: parent.width - 40px;
+        height: 30px;
+        text <=> root.value;
+        edited(value) => { root.value_changed(value); }
+    }
+    Rectangle {
+        x: parent.width - 40px;
+        width: 20px;
+        height: 30px;
+        background: minus_area.has-hover ? NativeColors.hover : NativeColors.surface;
+        border-width: 1px;
+        border-color: NativeColors.border;
+        Text { width: 100%; height: 100%; text: "-"; color: NativeColors.text; horizontal-alignment: center; vertical-alignment: center; font-weight: 600; }
+        minus_area := TouchArea { width: 100%; height: 100%; clicked => { root.value = root.adjusted(root.value, -1); root.value_changed(root.value); } }
+    }
+    Rectangle {
+        x: parent.width - 20px;
+        width: 20px;
+        height: 30px;
+        background: plus_area.has-hover ? NativeColors.hover : NativeColors.surface;
+        border-width: 1px;
+        border-color: NativeColors.border;
+        Text { width: 100%; height: 100%; text: "+"; color: NativeColors.text; horizontal-alignment: center; vertical-alignment: center; font-weight: 600; }
+        plus_area := TouchArea { width: 100%; height: 100%; clicked => { root.value = root.adjusted(root.value, 1); root.value_changed(root.value); } }
+    }
+}
+
 export { FileEntry, Palette, FontSettings }
 
 export component MainWindow inherits Window {
@@ -27,6 +61,7 @@ export component MainWindow inherits Window {
     in-out property <[FileEntry]> files;
     in-out property <[[StandardListViewItem]]> table_rows;
     in-out property <int> selected_index: -1;
+    in-out property <int> rename_edit_index: -1;
     in-out property <bool> editing_path: false;
     in-out property <string> selected_name: "N/A";
     in-out property <string> selected_size: "N/A";
@@ -249,6 +284,8 @@ export component MainWindow inherits Window {
     callback set_show_extension_in_file_name(bool);
     callback sort_file_list(int);
     callback find_file_by_prefix(string) -> int;
+    callback adjust_date_value(string, int, int) -> string;
+    callback adjust_shift_value(string, int) -> string;
     callback select_files_without_exif();
     callback exif_tag_right_clicked(string, string);
     callback exif_section_right_clicked(string);
@@ -278,6 +315,20 @@ export component MainWindow inherits Window {
         file_selection_reveal_timer.restart();
     }
 
+    public function begin_rename_selected() {
+        if (root.selected_recyclable_count != 1 || root.selected_index < 0 || root.selected_index >= root.files.length) {
+            return;
+        }
+        root.editing_path = false;
+        root.file_context_menu_visible = false;
+        root.exif_context_menu_visible = false;
+        if (!root.selected_name_dirty) {
+            root.selected_name = root.files[root.selected_index].name;
+            root.original_selected_name = root.selected_name;
+        }
+        rename_focus_timer.restart();
+    }
+
     file_selection_reveal_timer := Timer {
         interval: 16ms;
         running: false;
@@ -292,7 +343,7 @@ export component MainWindow inherits Window {
         running: false;
         triggered => {
             self.running = false;
-            metadata_panel.focus_file_name();
+            root.rename_edit_index = root.selected_index;
         }
     }
 
@@ -673,10 +724,8 @@ export component MainWindow inherits Window {
                 return accept;
             }
 
-            if (event.text == Key.F2 && root.selected_index > 0 && root.selected_index < root.files.length) {
-                root.editing_path = false;
-                root.file_context_menu_visible = false;
-                rename_focus_timer.restart();
+            if (event.text == Key.F2) {
+                root.begin_rename_selected();
                 return accept;
             }
 
@@ -727,6 +776,9 @@ export component MainWindow inherits Window {
                 height: 100%;
                 files: root.files;
                 selected_index <=> root.selected_index;
+                rename_edit_index <=> root.rename_edit_index;
+                rename_text <=> root.selected_name;
+                rename_pending: root.selected_name_dirty;
                 selected_file_count: root.selected_file_count;
                 selected_recyclable_count: root.selected_recyclable_count;
                 copied_file_count: root.copied_file_count;
@@ -742,6 +794,8 @@ export component MainWindow inherits Window {
                     return root.find_file_by_prefix(key);
                 }
                 row_selected(index, ctrl, shift) => {
+                    root.rename_edit_index = -1;
+                    file_table.focus();
                     root.editing_path = false;
                     metadata_panel.close_tools_menu();
                     root.metadata_dirty = false;
@@ -799,7 +853,20 @@ export component MainWindow inherits Window {
                 }
                 rename_requested(index) => {
                     root.selected_index = index;
-                    rename_focus_timer.restart();
+                    root.begin_rename_selected();
+                }
+                rename_value_edited() => {
+                    root.metadata_value_edited();
+                }
+                rename_finished() => {
+                    root.rename_edit_index = -1;
+                    file_table.focus();
+                }
+                rename_cancelled() => {
+                    root.selected_name = root.original_selected_name;
+                    root.rename_edit_index = -1;
+                    root.metadata_value_edited();
+                    file_table.focus();
                 }
                 reload_requested() => {
                     root.editing_path = false;
@@ -1149,6 +1216,9 @@ export component MainWindow inherits Window {
                 gps_date_time_dirty <=> root.gps_date_time_dirty;
                 png_creation_time_dirty <=> root.png_creation_time_dirty;
                 png_exif_date_time_original_dirty <=> root.png_exif_date_time_original_dirty;
+                date_value_adjusted(value, cursor, delta) => {
+                    return root.adjust_date_value(value, cursor, delta);
+                }
                 apply_changes() => {
                     root.editing_path = false;
                     root.apply_changes();
@@ -1565,10 +1635,10 @@ export component MainWindow inherits Window {
             Text { x: 286px; y: 102px; width: 70px; height: 22px; text: "Minutes"; color: NativeColors.secondary_text; vertical-alignment: center; }
             Text { x: 418px; y: 102px; width: 70px; height: 22px; text: "Seconds"; color: NativeColors.secondary_text; vertical-alignment: center; }
 
-            LineEdit { x: 22px; y: 126px; width: 110px; height: 30px; text <=> root.shift_media_date_days; edited(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(value, root.shift_media_date_hours, root.shift_media_date_minutes, root.shift_media_date_seconds, root.shift_media_date_subtract); } }
-            LineEdit { x: 154px; y: 126px; width: 110px; height: 30px; text <=> root.shift_media_date_hours; edited(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, value, root.shift_media_date_minutes, root.shift_media_date_seconds, root.shift_media_date_subtract); } }
-            LineEdit { x: 286px; y: 126px; width: 110px; height: 30px; text <=> root.shift_media_date_minutes; edited(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, root.shift_media_date_hours, value, root.shift_media_date_seconds, root.shift_media_date_subtract); } }
-            LineEdit { x: 418px; y: 126px; width: 110px; height: 30px; text <=> root.shift_media_date_seconds; edited(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, root.shift_media_date_hours, root.shift_media_date_minutes, value, root.shift_media_date_subtract); } }
+            ShiftNumberInput { x: 22px; y: 126px; width: 110px; height: 30px; value <=> root.shift_media_date_days; adjusted(value, delta) => { root.adjust_shift_value(value, delta) } value_changed(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(value, root.shift_media_date_hours, root.shift_media_date_minutes, root.shift_media_date_seconds, root.shift_media_date_subtract); } }
+            ShiftNumberInput { x: 154px; y: 126px; width: 110px; height: 30px; value <=> root.shift_media_date_hours; adjusted(value, delta) => { root.adjust_shift_value(value, delta) } value_changed(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, value, root.shift_media_date_minutes, root.shift_media_date_seconds, root.shift_media_date_subtract); } }
+            ShiftNumberInput { x: 286px; y: 126px; width: 110px; height: 30px; value <=> root.shift_media_date_minutes; adjusted(value, delta) => { root.adjust_shift_value(value, delta) } value_changed(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, root.shift_media_date_hours, value, root.shift_media_date_seconds, root.shift_media_date_subtract); } }
+            ShiftNumberInput { x: 418px; y: 126px; width: 110px; height: 30px; value <=> root.shift_media_date_seconds; adjusted(value, delta) => { root.adjust_shift_value(value, delta) } value_changed(value) => { root.shift_media_date_preview = root.update_shift_media_date_preview(root.shift_media_date_days, root.shift_media_date_hours, root.shift_media_date_minutes, value, root.shift_media_date_subtract); } }
 
             Text { x: 22px; y: 174px; width: parent.width - 44px; height: 22px; text: "Preview"; color: NativeColors.text; font-weight: 700; vertical-alignment: center; }
             Rectangle { x: 22px; y: 200px; width: parent.width - 44px; height: 118px; background: NativeColors.subtle_surface; border-width: 1px; border-color: NativeColors.border; border-radius: 3px;

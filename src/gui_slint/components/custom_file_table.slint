@@ -87,12 +87,18 @@ export component CustomFileTable inherits Rectangle {
     in property <int> sort_column: 0;
     in property <int> sort_direction: 0;
     in-out property <bool> context_menu_visible: false;
+    in-out property <int> rename_edit_index: -1;
+    in-out property <string> rename_text: "";
+    in property <bool> rename_pending: false;
 
     callback row_selected(int, bool, bool);
     callback row_clicked(int);
     callback row_activated(int);
     callback select_all_requested();
     callback rename_requested(int);
+    callback rename_value_edited();
+    callback rename_finished();
+    callback rename_cancelled();
     callback reload_requested();
     callback copy_requested();
     callback paste_requested();
@@ -196,7 +202,58 @@ export component CustomFileTable inherits Rectangle {
                     spacing: 0px;
 
                     IconCell { is_dir: entry.is_dir; media_kind: entry.media_kind; }
-                    Text { width: parent.width - 22px - media_date_cell.width - size_cell.width - modified_cell.width - metadata_cell.width - 20px; text: entry.is_dir && entry.name != "[..]" ? "[" + entry.name + "]" : entry.name; color: entry.duplicate_name ? NativeColors.duplicate : NativeColors.text; font-weight: entry.duplicate_name ? 600 : 400; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                    filename_cell := Rectangle {
+                        width: parent.width - 22px - media_date_cell.width - size_cell.width - modified_cell.width - metadata_cell.width - 20px;
+
+                        if root.rename_edit_index != i: Text {
+                            width: 100%;
+                            height: 100%;
+                            text: entry.selected && root.rename_pending
+                                ? root.rename_text
+                                : (entry.is_dir && entry.name != "[..]" ? "[" + entry.name + "]" : entry.name);
+                            color: entry.duplicate_name ? NativeColors.duplicate : NativeColors.text;
+                            font-weight: entry.duplicate_name ? 600 : 400;
+                            font-size: FontSettings.font_size_pt * 1pt;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        if root.rename_edit_index == i: Rectangle {
+                            y: 2px;
+                            width: 100%;
+                            height: 26px;
+                            background: NativeColors.surface;
+                            border-width: 1px;
+                            border-color: NativeColors.accent;
+                            border-radius: 2px;
+
+                            rename_input := TextInput {
+                                x: 4px;
+                                width: parent.width - 8px;
+                                height: 100%;
+                                text <=> root.rename_text;
+                                single-line: true;
+                                font-family: FontSettings.font_family;
+                                font-size: FontSettings.font_size_pt * 1pt;
+                                color: NativeColors.text;
+                                vertical-alignment: center;
+
+                                init => {
+                                    self.focus();
+                                    self.select-all();
+                                }
+                                edited => { root.rename_value_edited(); }
+                                accepted => { root.rename_finished(); }
+                                key-pressed(event) => {
+                                    if (event.text == Key.Escape) {
+                                        root.rename_cancelled();
+                                        return accept;
+                                    }
+                                    reject
+                                }
+                            }
+                        }
+                    }
                     size_cell := Text { width: 78px; text: entry.size; color: entry.duplicate_size ? NativeColors.duplicate : NativeColors.secondary_text; font-weight: entry.duplicate_size ? 600 : 400; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
                     modified_cell := Rectangle {
                         width: 146px;
@@ -229,6 +286,7 @@ export component CustomFileTable inherits Rectangle {
                 }
 
                 row_touch := TouchArea {
+                    enabled: root.rename_edit_index != i;
                     width: 100%;
                     height: 100%;
 
@@ -420,7 +478,7 @@ export component CustomFileTable inherits Rectangle {
                 return accept;
             }
             if (event.text == Key.Return) { if (root.selected_index >= 0 && root.selected_index < root.files.length) { root.row_activated(root.selected_index); } return accept; }
-            if (event.text == Key.F2) { if (root.selected_index > 0 && root.selected_index < root.files.length) { root.rename_requested(root.selected_index); } return accept; }
+            if (event.text == Key.F2) { if (root.selected_recyclable_count == 1 && root.selected_index >= 0 && root.selected_index < root.files.length) { root.rename_requested(root.selected_index); } return accept; }
             if (event.text == Key.F5) { root.reload_requested(); return accept; }
             if ((event.text == "C" || event.text == "c") && event.modifiers.control) { root.copy_requested(); return accept; }
             if ((event.text == "V" || event.text == "v") && event.modifiers.control) { root.paste_requested(); return accept; }

@@ -1514,6 +1514,7 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
         }
 
         let mut digits = String::new();
+        let mut candidate_8 = None;
         let mut candidate_10 = None;
         let mut candidate_12 = None;
 
@@ -1526,7 +1527,9 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
                 break;
             }
 
-            if digits.len() == 10 {
+            if digits.len() == 8 {
+                candidate_8 = parse_compact_filename_datetime(&digits);
+            } else if digits.len() == 10 {
                 candidate_10 = parse_compact_filename_datetime(&digits);
             } else if digits.len() == 12 {
                 candidate_12 = parse_compact_filename_datetime(&digits);
@@ -1537,6 +1540,7 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
                 }
                 candidate_10 = None;
                 candidate_12 = None;
+                candidate_8 = None;
             }
 
             if digits.len() >= 14 {
@@ -1547,6 +1551,8 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
         if let Some(parsed) = candidate_12 {
             candidates.push(parsed);
         } else if let Some(parsed) = candidate_10 {
+            candidates.push(parsed);
+        } else if let Some(parsed) = candidate_8 {
             candidates.push(parsed);
         }
     }
@@ -2114,6 +2120,7 @@ fn parse_compact_filename_datetime(value: &str) -> Option<NaiveDateTime> {
     let padded = match value.len() {
         14 => value.to_string(),
         12 => format!("{value}00"),
+        8 => format!("{value}000000"),
         10 => {
             let yy = value[0..2].parse::<i32>().ok()?;
             let year = if yy <= 79 { 2000 + yy } else { 1900 + yy };
@@ -3144,6 +3151,14 @@ mod tests {
         assert_eq!(
             extract_datetime_from_filename(Path::new("2017_03_18_122327_test.mp4")).as_deref(),
             Some("2017-03-18 12:23:27")
+        );
+    }
+
+    #[test]
+    fn extracts_date_only_from_filename() {
+        assert_eq!(
+            extract_datetime_from_filename(Path::new("20171212_IMG_5582.jpg")).as_deref(),
+            Some("2017-12-12 00:00:00")
         );
     }
 

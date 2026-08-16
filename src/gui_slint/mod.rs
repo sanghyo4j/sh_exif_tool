@@ -26,7 +26,8 @@ use crate::media::{
 };
 use crate::GuiRunner;
 use chrono::{
-    Duration as ChronoDuration, FixedOffset, Local, NaiveDate, NaiveDateTime, TimeZone, Utc,
+    Datelike, Duration as ChronoDuration, FixedOffset, Local, NaiveDate, NaiveDateTime, TimeZone,
+    Utc,
 };
 use slint::{language::ColorScheme, ComponentHandle, Model};
 use std::cell::{Cell, RefCell};
@@ -1068,6 +1069,7 @@ impl GuiRunner for SlintRunner {
         // 4. 상위 폴더 이동 핸들러
         let app_handle = app.clone();
         let refresh = refresh_ui.clone();
+        let ui_handle = ui.as_weak();
         let last_table_click: Rc<RefCell<Option<(i32, Instant)>>> = Rc::new(RefCell::new(None));
         let last_table_click_handle = last_table_click.clone();
         ui.on_table_row_clicked(move |index| {
@@ -1089,6 +1091,7 @@ impl GuiRunner for SlintRunner {
             }
 
             let mut changed = false;
+            let mut file_to_open = None;
             {
                 let mut app = app_handle.borrow_mut();
                 let idx = index as usize;
@@ -1104,13 +1107,21 @@ impl GuiRunner for SlintRunner {
                         app.current_path = path.to_string_lossy().to_string();
                         app.load_folder();
                         changed = true;
+                    } else if path.is_file() {
+                        file_to_open = Some(path);
                     }
                 }
             }
 
+            *last_table_click_handle.borrow_mut() = None;
             if changed {
-                *last_table_click_handle.borrow_mut() = None;
                 refresh(None);
+            } else if let Some(path) = file_to_open {
+                if let Err(err) = open_with_default_application(&path) {
+                    if let Some(ui) = ui_handle.upgrade() {
+                        show_message(&ui, "Open Failed", &err);
+                    }
+                }
             }
         });
 
@@ -1788,10 +1799,14 @@ impl GuiRunner for SlintRunner {
 
         let app_handle = app.clone();
         let pending_taken_dates = pending_filename_taken_dates.clone();
+        let pending_created_dates_handle = pending_created_dates.clone();
+        let pending_modified_dates_handle = pending_modified_dates.clone();
         let ui_handle = ui.as_weak();
         ui.on_fill_taken_date_from_filename(move || {
             if let Some(ui) = ui_handle.upgrade() {
-                let date_label = if matches!(ui.get_selected_media_kind().as_str(), "mp4" | "png") {
+                let date_label = if ui.get_selected_media_kind().as_str() == "mts" {
+                    "File Dates"
+                } else if matches!(ui.get_selected_media_kind().as_str(), "mp4" | "png") {
                     "Media Date"
                 } else {
                     "Taken Date"
@@ -1818,7 +1833,11 @@ impl GuiRunner for SlintRunner {
 
                 if selected_paths.len() == 1 {
                     let path = &selected_paths[0];
-                    if !is_jpeg_path(path) && !is_png_path(path) && !is_mp4_path(path) {
+                    if !is_jpeg_path(path)
+                        && !is_png_path(path)
+                        && !is_mp4_path(path)
+                        && !is_mpeg_ts_path(path)
+                    {
                         show_message(&ui, &unable_title, "The selected file is not a supported media file.");
                         return;
                     }
@@ -1826,6 +1845,32 @@ impl GuiRunner for SlintRunner {
                         show_message(&ui, &unable_title, "No supported date pattern was found in the filename.");
                         return;
                     };
+                    if is_mpeg_ts_path(path) {
+                        let timestamp = match parse_timestamp(&datetime) {
+                            Ok(timestamp) => timestamp,
+                            Err(err) => {
+                                show_message(&ui, &unable_title, &err);
+                                return;
+                            }
+                        };
+                        pending_taken_dates.borrow_mut().clear();
+                        pending_created_dates_handle.borrow_mut().clear();
+                        pending_modified_dates_handle.borrow_mut().clear();
+                        pending_created_dates_handle
+                            .borrow_mut()
+                            .insert(path.clone(), timestamp);
+                        pending_modified_dates_handle
+                            .borrow_mut()
+                            .insert(path.clone(), timestamp);
+                        ui.set_selected_created(datetime.clone().into());
+                        ui.set_selected_modified(datetime.into());
+                        update_metadata_dirty_state(&ui);
+                        show_toast(
+                            &ui,
+                            "Staged File Created and Modified dates from filename. Ctrl+S to save.",
+                        );
+                        return;
+                    }
                     if !should_apply_taken_date_candidate(ui.get_taken_date().as_str(), &datetime) {
                         show_message(
                             &ui,
@@ -1850,8 +1895,19 @@ impl GuiRunner for SlintRunner {
                 }
 
                 let mut pending = HashMap::new();
+                let mut pending_created = HashMap::new();
+                let mut pending_modified = HashMap::new();
                 let mut new_exif_count = 0usize;
                 for path in &selected_paths {
+                    if is_mpeg_ts_path(path) {
+                        if let Some(datetime) = extract_datetime_from_filename(path) {
+                            if let Ok(timestamp) = parse_timestamp(&datetime) {
+                                pending_created.insert(path.clone(), timestamp);
+                                pending_modified.insert(path.clone(), timestamp);
+                            }
+                        }
+                        continue;
+                    }
                     if !is_jpeg_path(path) && !is_png_path(path) && !is_mp4_path(path) {
                         continue;
                     }
@@ -1871,18 +1927,30 @@ impl GuiRunner for SlintRunner {
                     }
                 }
 
-                if pending.is_empty() {
+                let parsed_count = pending.len() + pending_created.len();
+                if parsed_count == 0 {
                     show_message(&ui, &unable_title, "No supported date pattern was found in the selected filenames.");
                     return;
                 }
 
-                let parsed_count = pending.len();
                 let skipped_count = selected_paths.len().saturating_sub(parsed_count);
                 *pending_taken_dates.borrow_mut() = pending;
+                *pending_created_dates_handle.borrow_mut() = pending_created;
+                *pending_modified_dates_handle.borrow_mut() = pending_modified;
 
-                ui.set_taken_date("".into());
-                ui.set_taken_date_status("Mixed".into());
-                ui.set_taken_date_dirty(true);
+                if !pending_taken_dates.borrow().is_empty() {
+                    ui.set_taken_date("".into());
+                    ui.set_taken_date_status("Mixed".into());
+                    ui.set_taken_date_dirty(true);
+                }
+                if !pending_created_dates_handle.borrow().is_empty() {
+                    ui.set_selected_created("".into());
+                    ui.set_selected_modified("".into());
+                    ui.set_selected_created_status("Mixed".into());
+                    ui.set_selected_modified_status("Mixed".into());
+                    ui.set_selected_created_dirty(true);
+                    ui.set_selected_modified_dirty(true);
+                }
                 ui.set_metadata_dirty(true);
                 if selected_paths.iter().all(|path| is_jpeg_path(path)) && !ui.get_exif_available() {
                     // Each EXIF-less JPEG will receive its structure during Apply.
@@ -2206,6 +2274,7 @@ impl GuiRunner for SlintRunner {
         let ui_handle = ui.as_weak();
         ui.on_revert_changes(move || {
             if let Some(ui) = ui_handle.upgrade() {
+                ui.set_rename_edit_index(-1);
                 pending_renames.borrow_mut().clear();
                 pending_taken_dates.borrow_mut().clear();
                 pending_gps_date_times_handle.borrow_mut().clear();
@@ -2760,6 +2829,7 @@ impl GuiRunner for SlintRunner {
         let ui_handle = ui.as_weak();
         ui.on_apply_changes(move || {
             if let Some(ui) = ui_handle.upgrade() {
+                ui.set_rename_edit_index(-1);
                 trim_taken_date_before_save(&ui);
                 trim_png_date_sources_before_save(&ui);
 
@@ -3341,6 +3411,14 @@ impl GuiRunner for SlintRunner {
             } else {
                 -1
             }
+        });
+
+        ui.on_adjust_date_value(move |value, cursor, delta| {
+            adjust_datetime_segment(value.as_str(), cursor, delta).into()
+        });
+
+        ui.on_adjust_shift_value(move |value, delta| {
+            adjust_nonnegative_shift_value(value.as_str(), delta).into()
         });
 
         let previous_input = previous_png_creation_time_input.clone();
@@ -5379,6 +5457,77 @@ fn parse_timestamp(value: &str) -> Result<SystemTime, String> {
         .map(|dt| dt.into())
 }
 
+fn adjust_datetime_segment(value: &str, cursor: i32, delta: i32) -> String {
+    let value = value.trim();
+    let Some(datetime) = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .or_else(|| {
+            NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+        })
+    else {
+        return value.to_string();
+    };
+    if delta == 0 {
+        return datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+    }
+
+    let adjusted = if cursor <= 4 {
+        let year = datetime.year().saturating_add(delta).clamp(1, 9_999);
+        let day = datetime.day().min(days_in_month(year, datetime.month()));
+        NaiveDate::from_ymd_opt(year, datetime.month(), day).map(|date| date.and_time(datetime.time()))
+    } else if cursor <= 7 {
+        let month_index = datetime.year() * 12 + datetime.month0() as i32 + delta;
+        let year = month_index.div_euclid(12);
+        let month = month_index.rem_euclid(12) as u32 + 1;
+        if !(1..=9_999).contains(&year) {
+            None
+        } else {
+            let day = datetime.day().min(days_in_month(year, month));
+            NaiveDate::from_ymd_opt(year, month, day).map(|date| date.and_time(datetime.time()))
+        }
+    } else {
+        let duration = if cursor <= 10 {
+            ChronoDuration::days(i64::from(delta))
+        } else if cursor <= 13 {
+            ChronoDuration::hours(i64::from(delta))
+        } else if cursor <= 16 {
+            ChronoDuration::minutes(i64::from(delta))
+        } else {
+            ChronoDuration::seconds(i64::from(delta))
+        };
+        datetime.checked_add_signed(duration)
+    };
+
+    adjusted
+        .unwrap_or(datetime)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
+fn adjust_nonnegative_shift_value(value: &str, delta: i32) -> String {
+    value
+        .trim()
+        .parse::<i64>()
+        .unwrap_or(0)
+        .saturating_add(i64::from(delta))
+        .max(0)
+        .to_string()
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .and_then(|date| date.pred_opt())
+        .map(|date| date.day())
+        .unwrap_or(28)
+}
+
 fn parse_display_datetime_or_date(value: &str) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
         .ok()
@@ -5986,7 +6135,8 @@ fn set_exif_value(ui: &MainWindow, key: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_filename_rename_plan, auto_format_date_edit, auto_format_date_input,
+        adjust_datetime_segment, adjust_nonnegative_shift_value, apply_filename_rename_plan,
+        auto_format_date_edit, auto_format_date_input,
         combined_gps_date_time, earliest_available_timestamp, filename_from_media_date,
         filename_from_media_date_with_reserved, gps_date_time_for_shift, gps_utc_to_kst_display,
         large_selection_exif_available, parse_combined_gps_date_time, parse_media_date_shift,
@@ -6190,6 +6340,33 @@ mod tests {
             auto_format_date_edit("2014-05-09 12:", "2014-05-09 12"),
             "2014-05-09 12"
         );
+    }
+
+    #[test]
+    fn adjusts_the_datetime_segment_at_the_cursor() {
+        assert_eq!(
+            adjust_datetime_segment("2016-02-29 23:59:59", 2, 1),
+            "2017-02-28 23:59:59"
+        );
+        assert_eq!(
+            adjust_datetime_segment("2015-01-31 12:00:00", 6, 1),
+            "2015-02-28 12:00:00"
+        );
+        assert_eq!(
+            adjust_datetime_segment("2015-12-31 23:59:59", 18, 1),
+            "2016-01-01 00:00:00"
+        );
+        assert_eq!(
+            adjust_datetime_segment("2017-12-12", 9, -1),
+            "2017-12-11 00:00:00"
+        );
+    }
+
+    #[test]
+    fn shift_spinner_values_do_not_become_negative() {
+        assert_eq!(adjust_nonnegative_shift_value("0", -1), "0");
+        assert_eq!(adjust_nonnegative_shift_value("9", 1), "10");
+        assert_eq!(adjust_nonnegative_shift_value("invalid", 1), "1");
     }
 
     #[test]
