@@ -1483,10 +1483,26 @@ struct TiffEntryBuilder {
 
 pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
     let filename = path.file_stem()?.to_str()?;
+
+    // Some Android applications use `YYYYMMDD_<Unix milliseconds>` names.
+    // The leading date can be UTC while the millisecond value resolves to the
+    // following day locally, so prefer the precise timestamp when both parts
+    // describe the same moment within one calendar day.
+    if let Some(datetime) = parse_prefixed_unix_milliseconds(filename) {
+        return Some(format_datetime_for_display(datetime));
+    }
+
     let chars: Vec<char> = filename.chars().collect();
     let mut candidates = Vec::new();
 
     for start in 0..chars.len() {
+        // Never reinterpret a slice from the middle of a continuous number as
+        // another date. For example, the millisecond timestamp in
+        // `20181016_1539706188309` used to yield the bogus date 5397-06-18.
+        if start > 0 && chars[start - 1].is_ascii_digit() {
+            continue;
+        }
+
         if start + 16 <= chars.len() {
             let mixed: String = chars[start..start + 16].iter().collect();
             if let Some(parsed) = parse_mixed_compact_filename_datetime(&mixed) {
@@ -1539,10 +1555,10 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
             } else if digits.len() == 14 {
                 if let Some(parsed) = parse_compact_filename_datetime(&digits) {
                     candidates.push(parsed);
+                    candidate_8 = None;
                 }
                 candidate_10 = None;
                 candidate_12 = None;
-                candidate_8 = None;
             }
 
             if digits.len() >= 14 {
@@ -1561,6 +1577,31 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
 
     let earliest = candidates.into_iter().min()?;
     Some(format_datetime_for_display(earliest))
+}
+
+fn parse_prefixed_unix_milliseconds(filename: &str) -> Option<NaiveDateTime> {
+    let numeric_parts: Vec<&str> = filename
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .collect();
+
+    for pair in numeric_parts.windows(2) {
+        if pair[0].len() != 8 || pair[1].len() != 13 {
+            continue;
+        }
+
+        let prefix_date = NaiveDate::parse_from_str(pair[0], "%Y%m%d").ok()?;
+        let milliseconds = pair[1].parse::<i64>().ok()?;
+        let local_datetime = DateTime::<chrono::Utc>::from_timestamp_millis(milliseconds)?
+            .with_timezone(&Local)
+            .naive_local();
+        let day_difference = (local_datetime.date() - prefix_date).num_days().abs();
+        if day_difference <= 1 {
+            return Some(local_datetime);
+        }
+    }
+
+    None
 }
 
 fn parse_mixed_compact_filename_datetime(value: &str) -> Option<NaiveDateTime> {
@@ -3151,6 +3192,30 @@ mod tests {
             extract_datetime_from_filename(Path::new("2017_03_18_122327_test.mp4")).as_deref(),
             Some("2017-03-18 12:23:27")
         );
+    }
+
+    #[test]
+    fn ignores_false_dates_inside_long_numeric_filename_suffixes() {
+        for milliseconds in [
+            1_539_706_188_309,
+            1_539_706_189_826,
+            1_539_706_191_314,
+            1_539_706_192_335,
+            1_539_706_193_588,
+            1_539_706_194_660,
+        ] {
+            let expected = DateTime::<chrono::Utc>::from_timestamp_millis(milliseconds)
+                .unwrap()
+                .with_timezone(&Local)
+                .format(DISPLAY_DATETIME_FORMAT)
+                .to_string();
+            let filename = format!("20181016_{milliseconds}.jpg");
+            assert_eq!(
+                extract_datetime_from_filename(Path::new(&filename)).as_deref(),
+                Some(expected.as_str()),
+                "failed to recognize {filename} as Unix milliseconds"
+            );
+        }
     }
 
     #[test]

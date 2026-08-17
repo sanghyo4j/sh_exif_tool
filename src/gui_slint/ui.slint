@@ -1,4 +1,4 @@
-import { Button, HorizontalBox, LineEdit, Palette } from "std-widgets.slint";
+import { Button, HorizontalBox, LineEdit, Palette, ScrollView } from "std-widgets.slint";
 import { FileEntry } from "types.slint";
 import { HDivider, StrongVDivider } from "components/dividers.slint";
 import { PathBar } from "components/path_bar.slint";
@@ -77,7 +77,13 @@ export component MainWindow inherits Window {
     in-out property <int> selected_recyclable_count: 0;
     in-out property <int> copied_file_count: 0;
     in-out property <string> selected_delete_message: "";
+    in-out property <int> delete_message_line_count: 0;
+    in-out property <string> delete_prompt_text: "";
+    in-out property <string> delete_names_text: "";
+    in-out property <string> delete_more_text: "";
     in-out property <int> item_count: 0;
+    in-out property <int> total_file_count: 0;
+    in-out property <int> unsupported_file_count: 0;
     in-out property <string> taken_date: "";
     in-out property <string> camera_make: "";
     in-out property <string> camera_model: "";
@@ -212,12 +218,16 @@ export component MainWindow inherits Window {
     in-out property <string> shift_media_date_seconds: "0";
     in-out property <string> shift_media_date_preview: "";
     in-out property <string> activity_text: "";
+    in-out property <string> scan_status: "";
+    in-out property <bool> log_visible: false;
+    in-out property <string> log_text: "";
     in-out property <bool> file_context_menu_visible: false;
     in-out property <bool> exif_context_menu_visible: false;
     in-out property <bool> exif_context_paste_enabled: false;
     in-out property <bool> exif_context_remove_enabled: false;
     in-out property <int> file_filter: 0;
     in-out property <bool> show_only_missing_media_date: false;
+    in-out property <bool> show_only_duplicate_media_date: false;
     in-out property <bool> backup_before_changes: false;
     in-out property <bool> show_extension_in_file_name: false;
     in-out property <bool> mark_file_date_mismatches: false;
@@ -272,6 +282,7 @@ export component MainWindow inherits Window {
     callback set_modified_date_from_created_date();
     callback set_file_dates_from_media_date();
     callback set_filename_from_media_date();
+    callback commit_inline_rename(int, string) -> bool;
     callback metadata_value_edited();
     callback taken_date_input_edited() -> int;
     callback png_creation_time_input_edited() -> int;
@@ -281,7 +292,8 @@ export component MainWindow inherits Window {
     callback table_visible_range_changed(int, int);
     callback select_all_table_rows();
     callback set_file_filter(int);
-    callback set_show_only_missing_media_date(bool);
+    callback toggle_show_only_missing_media_date();
+    callback toggle_show_only_duplicate_media_date();
     callback set_show_extension_in_file_name(bool);
     callback sort_file_list(int);
     callback find_file_by_prefix(string) -> int;
@@ -306,6 +318,7 @@ export component MainWindow inherits Window {
     callback request_shift_gps_date_time();
     callback update_shift_media_date_preview(string, string, string, string, bool) -> string;
     callback apply_shift_media_date(string, string, string, string, bool) -> bool;
+    callback font_size_changed(int);
 
     public function focus_file_list() {
         file_table.focus();
@@ -321,17 +334,21 @@ export component MainWindow inherits Window {
     }
 
     public function begin_rename_selected() {
-        if (root.selected_recyclable_count != 1 || root.selected_index < 0 || root.selected_index >= root.files.length) {
+        // Rename is an operation on the focused row, not on the media-only
+        // selected-file count. In particular, a folder has zero selected files
+        // even though it is a valid single rename target.
+        if (root.selected_index <= 0 || root.selected_index >= root.files.length) {
             return;
         }
         root.editing_path = false;
         root.file_context_menu_visible = false;
         root.exif_context_menu_visible = false;
-        if (!root.selected_name_dirty) {
-            root.selected_name = root.files[root.selected_index].name;
-            root.original_selected_name = root.selected_name;
-        }
-        rename_focus_timer.restart();
+        root.selected_name = root.files[root.selected_index].name;
+        root.original_selected_name = root.selected_name;
+        // Set this immediately. Deferring it through a timer could lose the
+        // rename request when a folder selection caused another UI refresh in
+        // the same event turn.
+        root.rename_edit_index = root.selected_index;
     }
 
     file_selection_reveal_timer := Timer {
@@ -340,15 +357,6 @@ export component MainWindow inherits Window {
         triggered => {
             self.running = false;
             file_table.reveal_selected_row();
-        }
-    }
-
-    rename_focus_timer := Timer {
-        interval: 1ms;
-        running: false;
-        triggered => {
-            self.running = false;
-            root.rename_edit_index = root.selected_index;
         }
     }
 
@@ -509,8 +517,15 @@ export component MainWindow inherits Window {
                 checkable: true;
                 checked: root.show_only_missing_media_date;
                 activated => {
-                    root.show_only_missing_media_date = !root.show_only_missing_media_date;
-                    root.set_show_only_missing_media_date(root.show_only_missing_media_date);
+                    root.toggle_show_only_missing_media_date();
+                }
+            }
+            MenuItem {
+                title: "Show Only Duplicated Files for Media Date";
+                checkable: true;
+                checked: root.show_only_duplicate_media_date;
+                activated => {
+                    root.toggle_show_only_duplicate_media_date();
                 }
             }
             MenuSeparator {}
@@ -557,6 +572,7 @@ export component MainWindow inherits Window {
                     root.file_context_menu_visible = false;
                     FontSettings.font_size_pt = min(15, FontSettings.font_size_pt + 1);
                     root.editing_path = false;
+                    root.font_size_changed(FontSettings.font_size_pt);
                 }
             }
             MenuItem {
@@ -566,6 +582,7 @@ export component MainWindow inherits Window {
                     root.file_context_menu_visible = false;
                     FontSettings.font_size_pt = max(6, FontSettings.font_size_pt - 1);
                     root.editing_path = false;
+                    root.font_size_changed(FontSettings.font_size_pt);
                 }
             }
             MenuItem {
@@ -574,6 +591,7 @@ export component MainWindow inherits Window {
                     root.file_context_menu_visible = false;
                     FontSettings.font_size_pt = 10;
                     root.editing_path = false;
+                    root.font_size_changed(FontSettings.font_size_pt);
                 }
             }
             MenuSeparator {}
@@ -696,7 +714,7 @@ export component MainWindow inherits Window {
     content_focus := FocusScope {
         y: 70px;
         width: 100%;
-        height: root.height - 96px;
+        height: root.height - 96px - (root.log_visible ? 116px : 0px);
 
         init => {
             self.focus();
@@ -867,16 +885,15 @@ export component MainWindow inherits Window {
                     root.begin_rename_selected();
                 }
                 rename_value_edited() => {
-                    root.metadata_value_edited();
+                    // Inline rename is committed directly with Enter and is
+                    // intentionally separate from staged metadata changes.
                 }
-                rename_finished() => {
-                    root.rename_edit_index = -1;
-                    file_table.focus();
+                rename_finished(index, name) => {
+                    return root.commit_inline_rename(index, name);
                 }
                 rename_cancelled() => {
                     root.selected_name = root.original_selected_name;
                     root.rename_edit_index = -1;
-                    root.metadata_value_edited();
                     file_table.focus();
                 }
                 reload_requested() => {
@@ -1803,14 +1820,21 @@ export component MainWindow inherits Window {
         }
 
         Rectangle {
+            property <length> delete_dialog_height: min(
+                root.height - 48px,
+                max(210px, 174px + root.delete_message_line_count * 20px)
+            );
             x: (root.width - self.width) / 2;
             y: (root.height - self.height) / 2;
-            width: min(540px, root.width - 48px);
-            height: 190px;
+            width: min(root.confirm_delete_visible ? 480px : 540px, root.width - 48px);
+            height: root.confirm_delete_visible ? self.delete_dialog_height : 190px;
             background: NativeColors.surface;
             border-width: 1px;
             border-color: NativeColors.border;
-            border-radius: 6px;
+            border-radius: 8px;
+            drop-shadow-color: #00000042;
+            drop-shadow-blur: 18px;
+            drop-shadow-offset-y: 6px;
 
             Text {
                 x: 20px;
@@ -1824,15 +1848,78 @@ export component MainWindow inherits Window {
                 vertical-alignment: center;
             }
 
-            Text {
+            if root.confirm_delete_visible: Rectangle {
+                x: 20px;
+                y: 61px;
+                width: 40px;
+                height: 40px;
+                background: NativeColors.danger_soft;
+                border-radius: 20px;
+
+                Image {
+                    x: 8px;
+                    y: 8px;
+                    width: 24px;
+                    height: 24px;
+                    source: @image-url("assets/delete-warning.svg");
+                    image-fit: contain;
+                }
+            }
+
+            if root.confirm_delete_visible: Text {
+                x: 76px;
+                y: 60px;
+                width: parent.width - 96px;
+                height: 26px;
+                text: root.delete_prompt_text;
+                color: NativeColors.text;
+                font-size: FontSettings.font_size_pt * 1pt;
+                vertical-alignment: center;
+            }
+
+            if root.confirm_delete_visible: Rectangle {
+                x: 76px;
+                y: 94px;
+                width: parent.width - 96px;
+                height: 16px + root.delete_message_line_count * 20px;
+                background: NativeColors.subtle_surface;
+                border-width: 1px;
+                border-color: NativeColors.divider;
+                border-radius: 3px;
+
+                Text {
+                    x: 10px;
+                    y: 7px;
+                    width: parent.width - 20px;
+                    height: parent.height - 14px;
+                    text: root.delete_names_text
+                        + (root.delete_more_text == "" ? "" : "\n" + root.delete_more_text);
+                    color: NativeColors.text;
+                    font-size: FontSettings.font_size_pt * 1pt;
+                    wrap: word-wrap;
+                    vertical-alignment: top;
+                }
+            }
+
+            if !root.confirm_delete_visible: Text {
                 x: 20px;
                 y: 56px;
                 width: parent.width - 40px;
-                height: 82px;
+                height: parent.height - 108px;
                 text: root.message_text;
                 color: NativeColors.text;
                 font-size: FontSettings.font_size_pt * 1pt;
                 wrap: word-wrap;
+            }
+
+            Rectangle {
+                y: parent.height - 56px;
+                width: 100%;
+                height: 56px;
+                background: NativeColors.subtle_surface;
+                border-radius: 7px;
+                Rectangle { width: 100%; height: 12px; background: NativeColors.subtle_surface; }
+                HDivider { y: 0px; }
             }
 
             if !confirm_delete_visible && !confirm_metadata_paste_visible && !confirm_trailing_rename_visible && !confirm_date_overwrite_visible: Rectangle {
@@ -1984,6 +2071,88 @@ export component MainWindow inherits Window {
         }
     }
 
+    if root.log_visible: Rectangle {
+        y: root.height - 142px;
+        width: 100%;
+        height: 116px;
+        background: NativeColors.surface;
+        border-width: 1px;
+        border-color: NativeColors.border;
+
+        log_scroll := ScrollView {
+            x: 5px;
+            y: 2px;
+            width: parent.width - 17px;
+            height: parent.height - 4px;
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            viewport-width: self.visible-width;
+            viewport-height: max(self.visible-height, log_input.preferred-height);
+
+            log_input := TextInput {
+                width: log_scroll.visible-width;
+                height: max(log_scroll.visible-height, self.preferred-height);
+                text: root.log_text;
+                read-only: true;
+                single-line: false;
+                wrap: word-wrap;
+                color: NativeColors.text;
+                selection-background-color: NativeColors.selection;
+                selection-foreground-color: NativeColors.text;
+                font-family: FontSettings.font_family;
+                font-size: FontSettings.font_size_pt * 1pt;
+            }
+        }
+
+        if log_scroll.viewport-height > log_scroll.visible-height: Rectangle {
+            x: parent.width - 12px;
+            y: 1px;
+            width: 11px;
+            height: parent.height - 2px;
+            background: #eef2f5;
+
+            log_scroll_area := TouchArea {
+                width: 100%;
+                height: 100%;
+
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                        log_scroll.viewport-y = -max(
+                            0px,
+                            min(
+                                log_scroll.viewport-height - log_scroll.visible-height,
+                                self.mouse-y * log_scroll.viewport-height / parent.height - log_scroll.visible-height / 2
+                            )
+                        );
+                    }
+                }
+
+                moved => {
+                    if (self.pressed) {
+                        log_scroll.viewport-y = -max(
+                            0px,
+                            min(
+                                log_scroll.viewport-height - log_scroll.visible-height,
+                                self.mouse-y * log_scroll.viewport-height / parent.height - log_scroll.visible-height / 2
+                            )
+                        );
+                    }
+                }
+            }
+
+            Rectangle {
+                x: 2px;
+                y: 3px + (-log_scroll.viewport-y)
+                    * (parent.height - 6px - self.height)
+                    / (log_scroll.viewport-height - log_scroll.visible-height);
+                width: 7px;
+                height: max(24px, (parent.height - 6px) * log_scroll.visible-height / log_scroll.viewport-height);
+                border-radius: 2px;
+                background: log_scroll_area.has-hover ? #7f8f9a : #9aa8b2;
+            }
+        }
+    }
+
     HDivider { y: root.height - 27px; }
 
     Rectangle {
@@ -1992,9 +2161,12 @@ export component MainWindow inherits Window {
         height: 26px;
         background: NativeColors.subtle_surface;
 
+        property <length> count_width: min(440px, max(280px, parent.width * 0.39));
+        property <length> right_width: min(250px, max(150px, parent.width * 0.22));
+
         Text {
             x: 10px;
-            width: max(0px, parent.width - file_count_status.width - font_size_status.width - 36px);
+            width: max(0px, parent.width - parent.count_width - parent.right_width - 32px);
             height: 100%;
             text: root.activity_text;
             font-size: FontSettings.font_size_pt * 1pt;
@@ -2004,12 +2176,16 @@ export component MainWindow inherits Window {
         }
 
         file_count_status := Text {
-            x: parent.width - font_size_status.width - self.width - 20px;
-            width: 220px;
+            x: parent.width - parent.count_width - parent.right_width - 12px;
+            width: parent.count_width;
             height: 100%;
-            text: root.selected_file_count > 0
-                ? root.selected_file_count + " selected / " + root.item_count + (root.item_count == 1 ? " file" : " files")
-                : root.item_count + (root.item_count == 1 ? " file" : " files");
+            text: root.selected_file_count + " selected | "
+                + (root.item_count != root.total_file_count
+                    ? root.item_count + " shown / " + root.total_file_count + " files"
+                    : root.total_file_count + " files")
+                + (root.unsupported_file_count > 0
+                    ? " (" + root.unsupported_file_count + " unsupported)"
+                    : "");
             font-size: FontSettings.font_size_pt * 1pt;
             color: NativeColors.secondary_text;
             horizontal-alignment: right;
@@ -2017,15 +2193,42 @@ export component MainWindow inherits Window {
             overflow: elide;
         }
 
-        font_size_status := Text {
-            x: parent.width - self.width - 10px;
-            width: 110px;
+        Rectangle { x: file_count_status.x - 6px; width: 1px; height: 100%; background: NativeColors.divider; }
+        Rectangle { x: parent.width - parent.right_width - 6px; width: 1px; height: 100%; background: NativeColors.divider; }
+
+        right_status := Text {
+            x: parent.width - parent.right_width;
+            width: parent.right_width - 58px;
             height: 100%;
-            text: "Font: " + FontSettings.font_size_pt + " pt";
+            text: root.scan_status != "" && root.metadata_dirty
+                ? root.scan_status + " | Unsaved"
+                : (root.scan_status != "" ? root.scan_status : (root.metadata_dirty ? "Unsaved" : ""));
             font-size: FontSettings.font_size_pt * 1pt;
             color: NativeColors.secondary_text;
             horizontal-alignment: right;
             vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Rectangle {
+            x: parent.width - 54px;
+            width: 54px;
+            height: 100%;
+            background: log_button_area.has-hover ? NativeColors.hover : #00000000;
+            Text {
+                width: 100%;
+                height: 100%;
+                text: root.log_visible ? "Log -" : "Log +";
+                font-size: FontSettings.font_size_pt * 1pt;
+                color: NativeColors.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            log_button_area := TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { root.log_visible = !root.log_visible; }
+            }
         }
     }
 

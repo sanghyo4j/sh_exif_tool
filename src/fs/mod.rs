@@ -1274,6 +1274,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rename_entry_renames_a_directory_immediately() {
+        let parent = std::env::temp_dir().join(format!(
+            "sh148-folder-rename-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let original = parent.join("2018.06");
+        std::fs::create_dir_all(&original).unwrap();
+
+        let renamed = rename_entry(&original, "2018.06 ok").unwrap();
+
+        assert_eq!(renamed, parent.join("2018.06 ok"));
+        assert!(!original.exists());
+        assert!(renamed.is_dir());
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
     fn atomic_write_replaces_existing_contents_without_leaving_a_temporary_file() {
         let directory = std::env::temp_dir().join(format!(
             "sh148-atomic-write-{}-{}",

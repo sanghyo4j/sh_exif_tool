@@ -1,4 +1,4 @@
-import { HorizontalBox, LineEdit } from "std-widgets.slint";
+import { HorizontalBox } from "std-widgets.slint";
 import { HDivider } from "dividers.slint";
 import { UpIcon } from "icons.slint";
 import { FontSettings, NativeColors } from "../theme.slint";
@@ -26,6 +26,7 @@ component IconButton inherits Rectangle {
 export component PathBar inherits Rectangle {
     in property <string> current_path;
     in-out property <bool> editing;
+    private property <string> edit_text: "";
 
     callback change_dir(string);
     callback go_parent();
@@ -34,6 +35,12 @@ export component PathBar inherits Rectangle {
     background: NativeColors.subtle_surface;
 
     property <string> hover_text: up_button.hovered ? "Up One Level" : "";
+
+    changed editing => {
+        if (root.editing) {
+            root.edit_text = root.current_path;
+        }
+    }
 
     HorizontalBox {
         width: 100%;
@@ -65,6 +72,7 @@ export component PathBar inherits Rectangle {
                 height: 100%;
 
                 clicked => {
+                    root.edit_text = root.current_path;
                     root.editing = true;
                 }
 
@@ -81,13 +89,16 @@ export component PathBar inherits Rectangle {
                 }
             }
 
-            if editing : LineEdit {
+            if editing : TextInput {
                 x: 4px;
                 y: 2px;
                 width: parent.width - 8px;
                 height: parent.height - 4px;
-                text: root.current_path;
+                text <=> root.edit_text;
+                single-line: true;
                 font-size: FontSettings.font_size_pt * 1pt;
+                color: NativeColors.text;
+                vertical-alignment: center;
 
                 init => {
                     self.focus();
@@ -100,9 +111,17 @@ export component PathBar inherits Rectangle {
                     }
                 }
 
-                accepted(new_path) => {
+                accepted => {
                     root.editing = false;
-                    root.change_dir(new_path);
+                    root.change_dir(root.edit_text);
+                }
+
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.editing = false;
+                        return accept;
+                    }
+                    reject
                 }
             }
         }

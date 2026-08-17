@@ -97,7 +97,7 @@ export component CustomFileTable inherits Rectangle {
     callback select_all_requested();
     callback rename_requested(int);
     callback rename_value_edited();
-    callback rename_finished();
+    callback rename_finished(int, string) -> bool;
     callback rename_cancelled();
     callback reload_requested();
     callback copy_requested();
@@ -262,7 +262,12 @@ export component CustomFileTable inherits Rectangle {
                                     self.select-all();
                                 }
                                 edited => { root.rename_value_edited(); }
-                                accepted => { root.rename_finished(); }
+                                accepted => {
+                                    if (root.rename_finished(i, root.rename_text)) {
+                                        root.rename_edit_index = -1;
+                                        root.focus();
+                                    }
+                                }
                                 key-pressed(event) => {
                                     if (event.text == Key.Escape) {
                                         root.rename_cancelled();
@@ -397,7 +402,7 @@ export component CustomFileTable inherits Rectangle {
         MenuRow { y: 1px; title: "Open (O)"; danger: false; enabled: root.selected_recyclable_count == 1; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count == 1) { root.row_activated(root.selected_index); } } }
         MenuRow { y: 29px; title: "Open in Explorer (X)"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.open_in_file_manager_requested(root.selected_index); } }
         MenuRow { y: 57px; title: "Refresh (E)"; danger: false; enabled: true; clicked => { root.context_menu_visible = false; root.reload_requested(); } }
-        MenuRow { y: 85px; title: "Rename (M)"; danger: false; enabled: root.selected_recyclable_count == 1; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count == 1) { root.rename_requested(root.selected_index); } } }
+        MenuRow { y: 85px; title: "Rename (M)"; danger: false; enabled: root.selected_index > 0 && root.selected_recyclable_count <= 1; clicked => { root.context_menu_visible = false; if (root.selected_index > 0 && root.selected_recyclable_count <= 1) { root.rename_requested(root.selected_index); } } }
         MenuRow { y: 113px; title: "Copy (C)"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.copy_requested(); } } }
         MenuRow { y: 141px; title: "Paste (P)"; danger: false; enabled: root.copied_file_count > 0; clicked => { root.context_menu_visible = false; if (root.copied_file_count > 0) { root.paste_requested(); } } }
         MenuRow { y: 169px; title: "Delete (D)"; danger: false; enabled: root.selected_recyclable_count > 0; clicked => { root.context_menu_visible = false; if (root.selected_recyclable_count > 0) { root.delete_requested(); } } }
@@ -433,7 +438,7 @@ export component CustomFileTable inherits Rectangle {
                 root.reload_requested();
                 return accept;
             }
-            if (root.context_menu_visible && (event.text == "M" || event.text == "m") && !event.modifiers.control && root.selected_recyclable_count == 1) {
+            if (root.context_menu_visible && (event.text == "M" || event.text == "m") && !event.modifiers.control && root.selected_index > 0 && root.selected_recyclable_count <= 1) {
                 root.context_menu_visible = false;
                 root.rename_requested(root.selected_index);
                 return accept;
@@ -497,7 +502,7 @@ export component CustomFileTable inherits Rectangle {
                 return accept;
             }
             if (event.text == Key.Return) { if (root.selected_index >= 0 && root.selected_index < root.files.length) { root.row_activated(root.selected_index); } return accept; }
-            if (event.text == Key.F2) { if (root.selected_recyclable_count == 1 && root.selected_index >= 0 && root.selected_index < root.files.length) { root.rename_requested(root.selected_index); } return accept; }
+            if (event.text == Key.F2) { if (root.selected_index > 0 && root.selected_index < root.files.length) { root.rename_requested(root.selected_index); } return accept; }
             if (event.text == Key.F5) { root.reload_requested(); return accept; }
             if ((event.text == "C" || event.text == "c") && event.modifiers.control) { root.copy_requested(); return accept; }
             if ((event.text == "V" || event.text == "v") && event.modifiers.control) { root.paste_requested(); return accept; }

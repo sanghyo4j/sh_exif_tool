@@ -34,7 +34,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -81,6 +81,7 @@ fn start_media_scan_worker(
     results: Arc<std::sync::Mutex<HashMap<PathBuf, CachedMediaScan>>>,
     results_dirty: Arc<AtomicBool>,
     scan_active: Arc<AtomicBool>,
+    scan_completed: Arc<AtomicUsize>,
     priority_paths: Arc<Mutex<Vec<PathBuf>>>,
 ) {
     std::thread::spawn(move || {
@@ -120,6 +121,7 @@ fn start_media_scan_worker(
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .insert(job.path, cached);
+                scan_completed.fetch_add(1, Ordering::Release);
                 results_dirty.store(true, Ordering::Release);
             }
             if current_epoch.load(Ordering::Acquire) == batch.epoch {
@@ -541,6 +543,8 @@ impl GuiRunner for SlintRunner {
         let date_overwrite_confirmed = Rc::new(Cell::new(false));
         let scan_results_dirty = Arc::new(AtomicBool::new(false));
         let scan_active = Arc::new(AtomicBool::new(false));
+        let scan_total = Arc::new(AtomicUsize::new(0));
+        let scan_completed = Arc::new(AtomicUsize::new(0));
         let scan_priority_paths = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
         let visible_scan_range = Rc::new(Cell::new((0i32, -1i32)));
         let (scan_batch_sender, scan_batch_receiver) = std::sync::mpsc::channel();
@@ -553,6 +557,7 @@ impl GuiRunner for SlintRunner {
                 app.scan_results.clone(),
                 scan_results_dirty.clone(),
                 scan_active.clone(),
+                scan_completed.clone(),
                 scan_priority_paths.clone(),
             );
         }
@@ -566,6 +571,8 @@ impl GuiRunner for SlintRunner {
             let app_handle = app.clone();
             let scan_results_dirty = scan_results_dirty.clone();
             let scan_active = scan_active.clone();
+            let scan_total = scan_total.clone();
+            let scan_completed = scan_completed.clone();
             let preview = preview_controller.clone();
             let timer_handle = Rc::downgrade(&scan_refresh_timer);
             scan_refresh_timer.start(
@@ -579,12 +586,20 @@ impl GuiRunner for SlintRunner {
                             if !scan_active.load(Ordering::Acquire) {
                                 app.complete_dynamic_sort();
                             }
-                            if app.show_only_missing_media_date {
+                            if app.show_only_missing_media_date
+                                || app.show_only_duplicate_media_date
+                            {
                                 // Rows can disappear as their Media Date is discovered. Numeric
                                 // selections would otherwise point at a different file.
                                 app.select_ui_index(-1, false, false);
                             }
-                            ui.set_item_count(app.file_count() as i32);
+                            set_file_counts(&ui, &app);
+                            update_scan_status(
+                                &ui,
+                                scan_active.load(Ordering::Acquire),
+                                scan_completed.load(Ordering::Acquire),
+                                scan_total.load(Ordering::Acquire),
+                            );
                             ui.set_sort_column(app.sort_column);
                             ui.set_sort_direction(app.sort_direction);
                             ui.set_files(app.get_ui_model());
@@ -612,18 +627,33 @@ impl GuiRunner for SlintRunner {
             let app_handle = app.clone();
             let scan_batch_sender = scan_batch_sender.clone();
             let scan_active = scan_active.clone();
+            let scan_total = scan_total.clone();
+            let scan_completed = scan_completed.clone();
             let scan_refresh_timer = scan_refresh_timer.clone();
+            let ui_handle = ui.as_weak();
             move || {
                 let mut app = app_handle.borrow_mut();
                 app.restart_scan();
                 let (epoch, jobs) = app.prepare_scan_jobs();
                 app.set_dynamic_sort_ready(jobs.is_empty());
                 drop(app);
+                scan_completed.store(0, Ordering::Release);
+                scan_total.store(jobs.len(), Ordering::Release);
                 scan_active.store(!jobs.is_empty(), Ordering::Release);
+                if let Some(ui) = ui_handle.upgrade() {
+                    update_scan_status(&ui, !jobs.is_empty(), 0, jobs.len());
+                }
                 let _ = scan_batch_sender.send(MediaScanBatch { epoch, jobs });
                 scan_refresh_timer.restart();
             }
         };
+
+        let ui_handle = ui.as_weak();
+        ui.on_font_size_changed(move |size| {
+            if let Some(ui) = ui_handle.upgrade() {
+                show_toast(&ui, &format!("Font size changed to {size} pt."));
+            }
+        });
 
         // UI 갱신 헬퍼 함수
         let refresh_ui = {
@@ -645,7 +675,7 @@ impl GuiRunner for SlintRunner {
                     }
                     ui.set_current_path(app.current_path.as_str().into());
                     ui.set_activity_text("".into());
-                    ui.set_item_count(app.file_count() as i32);
+                    set_file_counts(&ui, &app);
                     ui.set_sort_column(app.sort_column);
                     ui.set_sort_direction(app.sort_direction);
                     ui.set_files(app.get_ui_model());
@@ -657,6 +687,51 @@ impl GuiRunner for SlintRunner {
                 }
             }
         };
+
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_commit_inline_rename(move |index, requested_name| {
+            let Some(ui) = ui_handle.upgrade() else {
+                return false;
+            };
+            let current_path = {
+                let app = app_handle.borrow();
+                app.path_for_ui_index(index)
+            };
+            let Some(current_path) = current_path else {
+                show_message(&ui, "Rename Failed", "Selected item could not be resolved.");
+                return false;
+            };
+            let requested_name = requested_name.trim();
+            if requested_name.is_empty() {
+                show_message(&ui, "Rename Failed", "The name cannot be empty.");
+                return false;
+            }
+            let new_name = rename_name_preserving_extension(&current_path, requested_name);
+            if current_path
+                .file_name()
+                .is_some_and(|name| name == new_name.as_str())
+            {
+                return true;
+            }
+
+            let new_path = match rename_entry(&current_path, &new_name) {
+                Ok(path) => path,
+                Err(error) => {
+                    show_message(&ui, "Rename Failed", &error);
+                    return false;
+                }
+            };
+            append_rename_log(&ui, &[(current_path.clone(), new_path.clone())]);
+            {
+                let mut app = app_handle.borrow_mut();
+                app.reload_folder_after_changes(&[current_path, new_path.clone()]);
+            }
+            refresh(Some(new_path));
+            show_toast(&ui, "Renamed.");
+            true
+        });
 
         {
             let app_handle = app.clone();
@@ -738,11 +813,46 @@ impl GuiRunner for SlintRunner {
 
         let app_handle = app.clone();
         let refresh = refresh_ui.clone();
-        ui.on_set_show_only_missing_media_date(move |enabled| {
+        let ui_handle = ui.as_weak();
+        ui.on_toggle_show_only_missing_media_date(move || {
+            let enabled;
             {
                 let mut app = app_handle.borrow_mut();
+                enabled = !app.show_only_missing_media_date;
                 app.show_only_missing_media_date = enabled;
+                if enabled {
+                    app.show_only_duplicate_media_date = false;
+                }
                 app.selected_indices.clear();
+            }
+            if let Some(ui) = ui_handle.upgrade() {
+                ui.set_show_only_missing_media_date(enabled);
+                if enabled {
+                    ui.set_show_only_duplicate_media_date(false);
+                }
+            }
+            refresh(None);
+        });
+
+        let app_handle = app.clone();
+        let refresh = refresh_ui.clone();
+        let ui_handle = ui.as_weak();
+        ui.on_toggle_show_only_duplicate_media_date(move || {
+            let enabled;
+            {
+                let mut app = app_handle.borrow_mut();
+                enabled = !app.show_only_duplicate_media_date;
+                app.show_only_duplicate_media_date = enabled;
+                if enabled {
+                    app.show_only_missing_media_date = false;
+                }
+                app.selected_indices.clear();
+            }
+            if let Some(ui) = ui_handle.upgrade() {
+                ui.set_show_only_duplicate_media_date(enabled);
+                if enabled {
+                    ui.set_show_only_missing_media_date(false);
+                }
             }
             refresh(None);
         });
@@ -1041,26 +1151,20 @@ impl GuiRunner for SlintRunner {
         let ui_handle = ui.as_weak();
         ui.on_change_dir(move |new_path| {
             if let Some(ui) = ui_handle.upgrade() {
-                let requested_path = PathBuf::from(new_path.trim());
-                if !requested_path.is_dir() {
-                    let current_path = {
-                        let app = app_handle.borrow();
-                        app.current_path.clone()
-                    };
-                    ui.set_current_path(current_path.into());
-                    show_message(
-                        &ui,
-                        "Invalid Path",
-                        "The entered path is not a valid folder.",
-                    );
-                    return;
-                }
+                let requested_path = match validate_folder_path_input(new_path.as_str()) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        ui.set_activity_text(error.into());
+                        return;
+                    }
+                };
 
                 {
                     let mut app = app_handle.borrow_mut();
                     app.current_path = requested_path.to_string_lossy().to_string();
                     app.load_folder();
                 }
+                ui.set_activity_text("".into());
                 refresh(None);
             }
         });
@@ -1935,15 +2039,6 @@ impl GuiRunner for SlintRunner {
                         );
                         return;
                     }
-                    if !should_apply_taken_date_candidate(ui.get_taken_date().as_str(), &datetime) {
-                        show_message(
-                            &ui,
-                            &format!("{date_label} Ignored"),
-                            &format!("Filename timestamp is later than the existing {date_label}."),
-                        );
-                        return;
-                    }
-
                     pending_taken_dates.borrow_mut().clear();
                     stage_taken_date_in_ui(&ui, &datetime);
                     if ui.get_selected_media_kind().as_str() == "jpeg" && !ui.get_exif_available() {
@@ -1976,17 +2071,15 @@ impl GuiRunner for SlintRunner {
                         continue;
                     }
                     if let Some(datetime) = extract_datetime_from_filename(path) {
-                        let (existing_taken_date, needs_exif) = if is_mp4_path(path) || is_png_path(path) {
-                            (scan_media_file(path).media_date, false)
+                        let needs_exif = if is_mp4_path(path) || is_png_path(path) {
+                            false
                         } else {
                             let metadata = read_exif_metadata(path);
-                            (metadata.taken_date, !metadata.has_exif)
+                            !metadata.has_exif
                         };
-                        if should_apply_taken_date_candidate(&existing_taken_date, &datetime) {
-                            pending.insert(path.clone(), datetime);
-                            if needs_exif {
-                                new_exif_count += 1;
-                            }
+                        pending.insert(path.clone(), datetime);
+                        if needs_exif {
+                            new_exif_count += 1;
                         }
                     }
                 }
@@ -2549,7 +2642,7 @@ impl GuiRunner for SlintRunner {
                     let paths = selected_recyclable_paths(&app);
                     if paths.is_empty() {
                         show_message(&ui, "Delete Failed", "Selected file could not be resolved.");
-                        return Ok::<_, String>((None, 0, Vec::new()));
+                        return Ok::<_, String>((None, Vec::new(), Vec::new()));
                     }
 
                     let mut deleted = Vec::new();
@@ -2565,13 +2658,23 @@ impl GuiRunner for SlintRunner {
                     let next_path =
                         selection_index_after_deletion(selection_index, app.visible_entry_count())
                             .and_then(|next_index| app.path_for_ui_index(next_index));
-                    Ok::<_, String>((next_path, deleted.len(), failures))
+                    Ok::<_, String>((next_path, deleted, failures))
                 })();
 
                 match result {
-                    Ok((next_path, deleted_count, failures)) => {
+                    Ok((next_path, deleted, failures)) => {
+                        for path in &deleted {
+                            append_session_log(
+                                &ui,
+                                &format!("Deleted: {}", path.to_string_lossy()),
+                            );
+                        }
+                        let deleted_count = deleted.len();
                         refresh(next_path);
                         ui.invoke_focus_file_list();
+                        if deleted_count > 0 {
+                            show_toast(&ui, &format!("Deleted {deleted_count} item(s)."));
+                        }
                         if !failures.is_empty() {
                             show_message(
                                 &ui,
@@ -2926,8 +3029,10 @@ impl GuiRunner for SlintRunner {
                     selected_file_paths(&app)
                 };
                 let mut filename_changed = false;
+                let mut batch_rename_applied = false;
 
                 if !pending_renames.borrow().is_empty() {
+                    batch_rename_applied = true;
                     let plan = pending_renames.borrow().clone();
                     let renamed = match apply_filename_rename_plan(&plan) {
                         Ok(renamed) => renamed,
@@ -2937,6 +3042,7 @@ impl GuiRunner for SlintRunner {
                         }
                     };
                     let renamed_count = renamed.len();
+                    append_rename_log(&ui, &renamed);
                     remap_selected_paths(&mut selected_path, &mut selected_paths, &renamed);
                     remap_hash_map_paths(&mut pending_taken_dates.borrow_mut(), &renamed);
                     remap_hash_map_paths(&mut pending_gps_date_times_handle.borrow_mut(), &renamed);
@@ -2948,12 +3054,23 @@ impl GuiRunner for SlintRunner {
                         &renamed,
                     );
                     pending_renames.borrow_mut().clear();
+                    // A batch filename operation uses selected_name_dirty only
+                    // as a staged-change indicator. It must not fall through to
+                    // the single-file rename path with the blank multi-value
+                    // display, which would otherwise preserve only ".jpg".
+                    ui.set_original_selected_name(ui.get_selected_name());
+                    ui.set_selected_name_dirty(false);
+                    update_metadata_dirty_state(&ui);
                     show_toast(&ui, &format!("Renamed {renamed_count} file(s)."));
                     filename_changed = renamed_count > 0;
                 }
 
-                if ui.get_selected_name_dirty() {
+                if ui.get_selected_name_dirty() && !batch_rename_applied {
                     let requested_name = ui.get_selected_name().trim().to_string();
+                    if requested_name.is_empty() {
+                        show_message(&ui, "Rename Failed", "The name cannot be empty.");
+                        return;
+                    }
                     let Some(current_path) = selected_path.clone() else {
                         show_message(&ui, "Rename Failed", "Selected file could not be resolved.");
                         return;
@@ -2968,6 +3085,7 @@ impl GuiRunner for SlintRunner {
                         }
                     };
                     let renamed = vec![(current_path, new_path)];
+                    append_rename_log(&ui, &renamed);
                     remap_selected_paths(&mut selected_path, &mut selected_paths, &renamed);
                     remap_hash_map_paths(&mut pending_taken_dates.borrow_mut(), &renamed);
                     remap_hash_map_paths(&mut pending_gps_date_times_handle.borrow_mut(), &renamed);
@@ -3018,7 +3136,13 @@ impl GuiRunner for SlintRunner {
                             ensure_jpeg_change_backup(path, ui.get_backup_before_changes())
                                 .and_then(|()| write_gps_date_time(path, gps_date, gps_time));
                         match result {
-                            Ok(()) => saved_count += 1,
+                            Ok(()) => {
+                                saved_count += 1;
+                                append_session_log(
+                                    &ui,
+                                    &format!("Updated GPS Date/Time: {}", path.to_string_lossy()),
+                                );
+                            }
                             Err(error) => failures.push((path.clone(), error)),
                         }
                     }
@@ -3045,21 +3169,35 @@ impl GuiRunner for SlintRunner {
                     return;
                 }
 
-                let has_staged_png_overwrite = selected_paths.iter().any(|path| {
-                    if !is_png_path(path) {
-                        return false;
-                    }
-                    let sources = read_png_date_sources(path);
+                let has_staged_date_overwrite = selected_paths.iter().any(|path| {
                     let synchronized_change = pending_taken_dates.borrow().contains_key(path)
                         || (selected_paths.len() == 1 && ui.get_taken_date_dirty());
-                    (synchronized_change && sources.has_existing_date())
-                        || (selected_paths.len() == 1
-                            && ((ui.get_png_creation_time_dirty()
-                                && !sources.creation_time.is_empty())
-                                || (ui.get_png_exif_date_time_original_dirty()
-                                    && !sources.date_time_original.is_empty())))
+                    if is_png_path(path) {
+                        let sources = read_png_date_sources(path);
+                        return (synchronized_change && sources.has_existing_date())
+                            || (selected_paths.len() == 1
+                                && ((ui.get_png_creation_time_dirty()
+                                    && !sources.creation_time.is_empty())
+                                    || (ui.get_png_exif_date_time_original_dirty()
+                                        && !sources.date_time_original.is_empty())));
+                    }
+
+                    if !synchronized_change {
+                        return false;
+                    }
+
+                    let existing = if is_jpeg_path(path) {
+                        read_exif_metadata(path).taken_date
+                    } else if is_mp4_path(path) {
+                        scan_media_file(path).media_date
+                    } else {
+                        String::new()
+                    };
+                    !existing.trim().is_empty()
+                        && existing.trim() != "-"
+                        && existing.trim() != "N/A"
                 });
-                if has_staged_png_overwrite && !overwrite_confirmed.replace(false) {
+                if has_staged_date_overwrite && !overwrite_confirmed.replace(false) {
                     ui.set_message_title("Confirm Date Overwrite".into());
                     ui.set_message_text(
                         "Existing date metadata may be overwritten. Continue? (Y/N)".into(),
@@ -3122,7 +3260,13 @@ impl GuiRunner for SlintRunner {
                             Ok(())
                         })();
                         match result {
-                            Ok(()) => saved_count += 1,
+                            Ok(()) => {
+                                saved_count += 1;
+                                append_session_log(
+                                    &ui,
+                                    &format!("Updated metadata: {}", path.to_string_lossy()),
+                                );
+                            }
                             Err(error) => failures.push((path.clone(), error)),
                         }
                     }
@@ -3189,6 +3333,10 @@ impl GuiRunner for SlintRunner {
                                 app.reload_folder_after_changes(&changed_paths);
                             }
                             refresh(selected_path);
+                            append_session_log(
+                                &ui,
+                                &format!("Removed metadata tag(s): {}", path.to_string_lossy()),
+                            );
                             show_toast(&ui, "Metadata tag(s) removed.");
                             if filename_changed {
                                 ui.invoke_focus_file_list();
@@ -3217,6 +3365,10 @@ impl GuiRunner for SlintRunner {
                             app.reload_folder_after_changes(&changed_paths);
                         }
                         refresh(selected_path);
+                        append_session_log(
+                            &ui,
+                            &format!("Removed metadata: {}", path.to_string_lossy()),
+                        );
                         show_toast(&ui, "Metadata tags were removed.");
                         if filename_changed {
                             ui.invoke_focus_file_list();
@@ -3241,6 +3393,10 @@ impl GuiRunner for SlintRunner {
                         show_message(&ui, "Apply Failed", &err);
                         return;
                     }
+                    append_session_log(
+                        &ui,
+                        &format!("Updated metadata: {}", path.to_string_lossy()),
+                    );
                     ui.set_original_taken_date(ui.get_taken_date());
                     ui.set_taken_date_dirty(false);
                     update_metadata_dirty_state(&ui);
@@ -3281,6 +3437,10 @@ impl GuiRunner for SlintRunner {
                         show_message(&ui, "Apply Failed", &err);
                         return;
                     }
+                    append_session_log(
+                        &ui,
+                        &format!("Updated metadata: {}", path.to_string_lossy()),
+                    );
                     if ui.get_taken_date_dirty() {
                         let synchronized = ui.get_taken_date();
                         ui.set_png_creation_time(synchronized.clone());
@@ -3377,6 +3537,10 @@ impl GuiRunner for SlintRunner {
                             show_message(&ui, "Apply Failed", &err);
                             return;
                         }
+                        append_session_log(
+                            &ui,
+                            &format!("Updated metadata: {}", path.to_string_lossy()),
+                        );
 
                         if ui.get_selected_created_dirty() || ui.get_selected_modified_dirty() {
                             let created_time = if ui.get_selected_created_dirty() {
@@ -3444,8 +3608,17 @@ impl GuiRunner for SlintRunner {
                         pending_created_dates_arg,
                         pending_modified_dates_arg,
                     ) {
-                        Ok(Some(final_path)) => selected_path = Some(final_path),
-                        Ok(None) => {}
+                        Ok(Some(final_path)) => {
+                            append_session_log(
+                                &ui,
+                                &format!("Updated metadata: {}", final_path.to_string_lossy()),
+                            );
+                            selected_path = Some(final_path);
+                        }
+                        Ok(None) => append_session_log(
+                            &ui,
+                            &format!("Updated metadata: {}", path.to_string_lossy()),
+                        ),
                         Err(err) => {
                             show_message(&ui, "Apply Failed", &err);
                             return;
@@ -3598,9 +3771,6 @@ fn set_selected_file(ui: &MainWindow, app: &SlintApp, index: i32) {
     ui.set_selected_is_dir(entry.is_dir);
     ui.set_selected_file_count(if entry.is_dir { 0 } else { 1 });
     ui.set_selected_recyclable_count(if index > 0 { 1 } else { 0 });
-    ui.set_selected_delete_message(
-        delete_confirmation_message(ui.get_selected_recyclable_count()).into(),
-    );
     ui.set_selected_name_status(status_for_value(ui.get_selected_name().as_str()).into());
     ui.set_selected_created_status(status_for_value(ui.get_selected_created().as_str()).into());
     ui.set_selected_modified_status(status_for_value(ui.get_selected_modified().as_str()).into());
@@ -3716,6 +3886,7 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
 
     if indices.len() == 1 {
         set_selected_file(ui, app, indices[0]);
+        update_delete_confirmation_message(ui, indices);
         return;
     }
 
@@ -3737,7 +3908,7 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
         ui.set_selected_is_dir(has_dir);
         ui.set_selected_file_count(file_count as i32);
         ui.set_selected_recyclable_count(recyclable_count as i32);
-        ui.set_selected_delete_message(delete_confirmation_message(recyclable_count as i32).into());
+        update_delete_confirmation_message(ui, indices);
         // Determining the selected media kind only uses the already-loaded file
         // entries/extensions, so large selections can keep their tools available
         // without performing EXIF aggregation.
@@ -3820,9 +3991,7 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
     ui.set_selected_is_dir(has_dir);
     ui.set_selected_file_count(file_count as i32);
     ui.set_selected_recyclable_count(recyclable_count as i32);
-    ui.set_selected_delete_message(
-        delete_confirmation_message(ui.get_selected_recyclable_count()).into(),
-    );
+    update_delete_confirmation_message(ui, indices);
     set_selected_media_details_from_entries(ui, &selected_entries);
 
     set_loaded_exif_metadata(ui, join_metadata(&metadata_values));
@@ -3848,6 +4017,10 @@ fn clear_selected_file(ui: &MainWindow) {
     ui.set_selected_file_count(0);
     ui.set_selected_recyclable_count(0);
     ui.set_selected_delete_message(String::new().into());
+    ui.set_delete_message_line_count(0);
+    ui.set_delete_prompt_text(String::new().into());
+    ui.set_delete_names_text(String::new().into());
+    ui.set_delete_more_text(String::new().into());
     ui.set_selected_time_interpretation("".into());
     set_media_details(ui, "", "", "", "");
     ui.set_metadata_dirty(false);
@@ -4665,6 +4838,56 @@ fn show_message(ui: &MainWindow, title: &str, message: &str) {
     ui.set_message_title(title.into());
     ui.set_message_text(message.into());
     ui.set_message_visible(true);
+    append_session_log(ui, &format!("{title}: {message}"));
+}
+
+fn set_file_counts(ui: &MainWindow, app: &SlintApp) {
+    let (total, _supported, unsupported) = app.folder_file_counts();
+    ui.set_item_count(i32::try_from(app.file_count()).unwrap_or(i32::MAX));
+    ui.set_total_file_count(i32::try_from(total).unwrap_or(i32::MAX));
+    ui.set_unsupported_file_count(i32::try_from(unsupported).unwrap_or(i32::MAX));
+}
+
+fn update_scan_status(ui: &MainWindow, active: bool, completed: usize, total: usize) {
+    if active && total > 0 {
+        ui.set_scan_status(format!("Scanning {completed}/{total}").into());
+    } else {
+        ui.set_scan_status("".into());
+    }
+}
+
+fn append_session_log(ui: &MainWindow, message: &str) {
+    const MAX_LOG_LINES: usize = 500;
+    let timestamp = Local::now().format("%y-%m-%d %H:%M:%S");
+    let message = message.trim();
+    if message.is_empty() {
+        return;
+    }
+
+    let entry = format!("[{timestamp}] {message}");
+    let current = ui.get_log_text();
+    let combined = if current.is_empty() {
+        entry
+    } else {
+        format!("{entry}\n{current}")
+    };
+    let lines: Vec<_> = combined.lines().collect();
+    let retained = lines.len().min(MAX_LOG_LINES);
+    ui.set_log_text(lines[..retained].join("\n").into());
+}
+
+fn append_rename_log(ui: &MainWindow, renamed: &[(PathBuf, PathBuf)]) {
+    for (source, destination) in renamed {
+        let source_name = source
+            .file_name()
+            .unwrap_or(source.as_os_str())
+            .to_string_lossy();
+        let destination_name = destination
+            .file_name()
+            .unwrap_or(destination.as_os_str())
+            .to_string_lossy();
+        append_session_log(ui, &format!("{source_name} -> {destination_name}"));
+    }
 }
 
 fn display_file_name(
@@ -4687,6 +4910,10 @@ fn rename_name_preserving_extension(
     current_path: &std::path::Path,
     requested_name: &str,
 ) -> String {
+    let requested_name = requested_name.trim();
+    if requested_name.is_empty() {
+        return String::new();
+    }
     if !current_path.is_file() {
         return requested_name.to_string();
     }
@@ -4840,14 +5067,77 @@ fn selected_recyclable_paths(app: &SlintApp) -> Vec<PathBuf> {
         .collect()
 }
 
-fn delete_confirmation_message(count: i32) -> String {
-    match count {
-        1 => "1 file/folder is selected. Send it to the Recycle Bin?".to_string(),
-        count if count > 1 => {
-            format!("{count} files/folders are selected. Send them to the Recycle Bin?")
-        }
-        _ => String::new(),
+fn update_delete_confirmation_message(ui: &MainWindow, indices: &[i32]) {
+    let model = ui.get_files();
+    let names: Vec<String> = indices
+        .iter()
+        .filter(|index| **index > 0)
+        .filter_map(|index| usize::try_from(*index).ok())
+        .filter_map(|index| model.row_data(index))
+        .map(|row| row.name.to_string().replace(['\r', '\n'], " "))
+        .collect();
+    const MAX_DISPLAYED_NAMES: usize = 5;
+    let displayed_names = names
+        .iter()
+        .take(MAX_DISPLAYED_NAMES)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let more_text = if names.len() > MAX_DISPLAYED_NAMES {
+        format!("...and {} more", names.len() - MAX_DISPLAYED_NAMES)
+    } else {
+        String::new()
+    };
+    let prompt = if names.len() == 1 {
+        "Send this item to the Recycle Bin?".to_string()
+    } else {
+        format!("Send these {} items to the Recycle Bin?", names.len())
+    };
+    let list_lines =
+        estimated_wrapped_line_count(&displayed_names, 48) + usize::from(!more_text.is_empty());
+    let message = delete_confirmation_message_with_names(&names);
+    ui.set_delete_message_line_count(i32::try_from(list_lines).unwrap_or(i32::MAX));
+    ui.set_delete_prompt_text(prompt.into());
+    ui.set_delete_names_text(displayed_names.into());
+    ui.set_delete_more_text(more_text.into());
+    ui.set_selected_delete_message(message.into());
+}
+
+fn estimated_wrapped_line_count(message: &str, characters_per_line: usize) -> usize {
+    if message.is_empty() || characters_per_line == 0 {
+        return 0;
     }
+    message
+        .split('\n')
+        .map(|line| line.chars().count().max(1).div_ceil(characters_per_line))
+        .sum()
+}
+
+fn delete_confirmation_message_with_names(names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+
+    const MAX_DISPLAYED_NAMES: usize = 5;
+    let mut message = if names.len() == 1 {
+        "Send the following item to the Recycle Bin?\n\n".to_string()
+    } else {
+        format!(
+            "Send the following {} items to the Recycle Bin?\n\n",
+            names.len()
+        )
+    };
+    for name in names.iter().take(MAX_DISPLAYED_NAMES) {
+        message.push_str(name);
+        message.push('\n');
+    }
+    if names.len() > MAX_DISPLAYED_NAMES {
+        message.push_str(&format!(
+            "...and {} more\n",
+            names.len() - MAX_DISPLAYED_NAMES
+        ));
+    }
+    message
 }
 
 fn format_operation_failures(
@@ -4882,6 +5172,26 @@ fn is_type_ahead_text(value: &str) -> bool {
                 && !(('\u{e000}'..='\u{f8ff}').contains(&character))
                 && character != '\u{7f}'
         })
+}
+
+fn validate_folder_path_input(value: &str) -> Result<PathBuf, String> {
+    if value.contains(['\r', '\n']) {
+        return Err("Wrong path: multiple lines are not allowed.".to_string());
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("Wrong path: the folder path is empty.".to_string());
+    }
+
+    let path = PathBuf::from(value);
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_dir() => Ok(path),
+        Ok(_) => Err(format!("Wrong path: not a folder: {value}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(format!("Wrong path: folder does not exist: {value}"))
+        }
+        Err(error) => Err(format!("Wrong path: cannot access {value}: {error}")),
+    }
 }
 
 fn apply_metadata_changes_to_path(
@@ -6284,11 +6594,13 @@ mod tests {
     use super::{
         adjust_datetime_segment, adjust_nonnegative_shift_value, apply_filename_rename_plan,
         auto_format_date_edit, auto_format_date_input, combined_gps_date_time,
-        earliest_available_timestamp, filename_from_media_date,
+        delete_confirmation_message_with_names, earliest_available_timestamp,
+        estimated_wrapped_line_count, filename_from_media_date,
         filename_from_media_date_with_reserved, gps_date_time_for_shift, gps_utc_to_kst_display,
         large_selection_exif_available, parse_combined_gps_date_time, parse_media_date_shift,
-        preview_info_text, preview_media_kind, selection_index_after_deletion, selection_summary,
-        shift_display_datetime, should_mirror_png_date_source, FilenameCollisionResolver,
+        preview_info_text, preview_media_kind, rename_name_preserving_extension,
+        selection_index_after_deletion, selection_summary, shift_display_datetime,
+        should_mirror_png_date_source, validate_folder_path_input, FilenameCollisionResolver,
         PreviewMediaKind, PreviewResult,
     };
     use std::collections::HashMap;
@@ -6299,6 +6611,44 @@ mod tests {
         assert_eq!(selection_index_after_deletion(3, 5), Some(3));
         assert_eq!(selection_index_after_deletion(5, 4), Some(4));
         assert_eq!(selection_index_after_deletion(1, 0), None);
+    }
+
+    #[test]
+    fn delete_confirmation_lists_names_and_limits_large_selections() {
+        let names = vec!["first.jpg".to_string(), "second folder".to_string()];
+        let message = delete_confirmation_message_with_names(&names);
+        assert!(message.contains("first.jpg"));
+        assert!(message.contains("second folder"));
+        assert!(message.contains("2 items"));
+
+        let many: Vec<_> = (1..=8).map(|index| format!("file-{index}.jpg")).collect();
+        let message = delete_confirmation_message_with_names(&many);
+        assert!(message.contains("file-5.jpg"));
+        assert!(!message.contains("file-6.jpg"));
+        assert!(message.contains("...and 3 more"));
+
+        assert_eq!(estimated_wrapped_line_count("one\n\nthree", 62), 3);
+        assert_eq!(estimated_wrapped_line_count(&"x".repeat(125), 62), 3);
+    }
+
+    #[test]
+    fn folder_path_input_rejects_multiple_lines_and_non_folders() {
+        assert_eq!(
+            validate_folder_path_input("C:\\Photos\nD:\\Videos").unwrap_err(),
+            "Wrong path: multiple lines are not allowed."
+        );
+        assert_eq!(
+            validate_folder_path_input("   ").unwrap_err(),
+            "Wrong path: the folder path is empty."
+        );
+
+        let file =
+            std::env::temp_dir().join(format!("sh148-path-input-file-{}", std::process::id()));
+        std::fs::write(&file, b"file").unwrap();
+        assert!(validate_folder_path_input(file.to_string_lossy().as_ref())
+            .unwrap_err()
+            .contains("not a folder"));
+        std::fs::remove_file(file).unwrap();
     }
 
     #[test]
@@ -6550,6 +6900,20 @@ mod tests {
         let _ = std::fs::remove_file(collision);
         let _ = std::fs::remove_dir(dir);
         assert_eq!(result, "20120815_023000_dup001.jpg");
+    }
+
+    #[test]
+    fn empty_filename_never_collapses_to_extension_only() {
+        let path =
+            std::env::temp_dir().join(format!("sh148-empty-rename-{}.jpg", std::process::id()));
+        std::fs::write(&path, []).unwrap();
+        assert_eq!(rename_name_preserving_extension(&path, ""), "");
+        assert_eq!(rename_name_preserving_extension(&path, "   "), "");
+        assert_eq!(
+            rename_name_preserving_extension(&path, "holiday"),
+            "holiday.jpg"
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

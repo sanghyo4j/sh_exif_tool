@@ -42,6 +42,7 @@ pub struct SlintApp {
     pub selected_indices: Vec<i32>,
     pub file_filter: i32,
     pub show_only_missing_media_date: bool,
+    pub show_only_duplicate_media_date: bool,
     pub sort_column: i32,
     pub sort_direction: i32,
     pub scan_results: Arc<Mutex<HashMap<PathBuf, CachedMediaScan>>>,
@@ -63,6 +64,7 @@ impl SlintApp {
             selected_indices: Vec::new(),
             file_filter: 0,
             show_only_missing_media_date: false,
+            show_only_duplicate_media_date: false,
             sort_column: 0,
             sort_direction: 0,
             scan_results: Arc::new(Mutex::new(HashMap::new())),
@@ -339,6 +341,16 @@ impl SlintApp {
             .iter()
             .filter(|entry| !entry.is_dir)
             .count()
+    }
+
+    pub fn folder_file_counts(&self) -> (usize, usize, usize) {
+        let total = self.files.iter().filter(|entry| !entry.is_dir).count();
+        let supported = self
+            .files
+            .iter()
+            .filter(|entry| !entry.is_dir && matches_file_filter(0, &entry.path))
+            .count();
+        (total, supported, total.saturating_sub(supported))
     }
 
     pub fn visible_entry_count(&self) -> usize {
@@ -648,7 +660,17 @@ impl SlintApp {
             .iter()
             .filter_map(|index| self.path_for_ui_index(*index))
             .collect();
-        let visible_files = self.visible_files();
+        // Dynamic date filters must not prevent their own background scan.
+        // The duplicate-only view hides uncached rows, but every matching file
+        // still has to be inspected before duplicate groups can be known.
+        let visible_files: Vec<_> = if self.show_only_duplicate_media_date {
+            self.files
+                .iter()
+                .filter(|entry| !entry.is_dir && matches_file_filter(self.file_filter, &entry.path))
+                .collect()
+        } else {
+            self.visible_files()
+        };
         let cache = self
             .scan_results
             .lock()
@@ -796,6 +818,31 @@ impl SlintApp {
                 media_date_is_missing(scan.as_ref())
             })
             .collect();
+
+        if self.show_only_duplicate_media_date && !self.show_only_missing_media_date {
+            let mut date_counts = HashMap::<String, usize>::new();
+            for entry in visible.iter().filter(|entry| !entry.is_dir) {
+                let Some(scan) = scan_result_from_cache(&cache, entry) else {
+                    continue;
+                };
+                let date = scan.media_date.trim();
+                if !media_date_value_is_present(date) {
+                    continue;
+                }
+                *date_counts.entry(date.to_string()).or_default() += 1;
+            }
+            visible.retain(|entry| {
+                if entry.is_dir {
+                    return true;
+                }
+                let Some(scan) = scan_result_from_cache(&cache, entry) else {
+                    return false;
+                };
+                let date = scan.media_date.trim();
+                media_date_value_is_present(date)
+                    && date_counts.get(date).is_some_and(|count| *count > 1)
+            });
+        }
 
         let dynamic_sort_allowed = self.dynamic_sort_ready || !matches!(self.sort_column, 4 | 5);
         if self.sort_direction != 0 && dynamic_sort_allowed {
@@ -1001,6 +1048,10 @@ fn media_date_is_missing(scan: Option<&MediaScanResult>) -> bool {
     })
 }
 
+fn media_date_value_is_present(value: &str) -> bool {
+    !value.is_empty() && !matches!(value, "-" | "N/A" | "Scanning...")
+}
+
 fn format_time(t: SystemTime) -> String {
     use chrono::{DateTime, Local};
     let dt: DateTime<Local> = t.into();
@@ -1052,6 +1103,7 @@ mod tests {
             selected_indices: vec![1],
             file_filter: 0,
             show_only_missing_media_date: false,
+            show_only_duplicate_media_date: false,
             sort_column: 0,
             sort_direction: 0,
             scan_results: Arc::new(Mutex::new(HashMap::new())),
@@ -1156,12 +1208,78 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_media_date_filter_keeps_only_known_duplicates() {
+        let mut app = sortable_app();
+        app.files.push(FileSystemEntry {
+            path: PathBuf::from("IMG_3.jpg"),
+            size: 0,
+            modified: None,
+            created: None,
+            is_dir: false,
+        });
+        app.files.push(FileSystemEntry {
+            path: PathBuf::from("IMG_4.jpg"),
+            size: 0,
+            modified: None,
+            created: None,
+            is_dir: false,
+        });
+        {
+            let mut cache = app.scan_results.lock().unwrap();
+            for (path, media_date) in [
+                ("IMG_10.jpg", "2017-09-01 12:00:00"),
+                ("IMG_2.jpg", "2017-09-01 12:00:00"),
+                ("IMG_3.jpg", "2017-09-02 12:00:00"),
+            ] {
+                cache.insert(
+                    PathBuf::from(path),
+                    CachedMediaScan {
+                        size: 0,
+                        modified: None,
+                        result: MediaScanResult {
+                            media_date: media_date.to_string(),
+                            ..MediaScanResult::default()
+                        },
+                    },
+                );
+            }
+        }
+        app.show_only_duplicate_media_date = true;
+
+        let model = app.get_ui_model();
+        let names: Vec<_> = (1..model.row_count())
+            .filter_map(|index| model.row_data(index))
+            .map(|row| row.name.to_string())
+            .collect();
+        assert_eq!(names, vec!["IMG_10.jpg", "IMG_2.jpg"]);
+    }
+
+    #[test]
     fn image_subfilters_separate_jpeg_and_png_files() {
         assert!(matches_file_filter(4, Path::new("photo.jpg")));
         assert!(matches_file_filter(4, Path::new("photo.JPEG")));
         assert!(!matches_file_filter(4, Path::new("image.png")));
         assert!(matches_file_filter(5, Path::new("image.PNG")));
         assert!(!matches_file_filter(5, Path::new("photo.jpeg")));
+    }
+
+    #[test]
+    fn folder_counts_separate_visible_supported_and_unsupported_files() {
+        let mut app = sortable_app();
+        app.files.push(FileSystemEntry {
+            path: PathBuf::from("notes.txt"),
+            size: 0,
+            modified: None,
+            created: None,
+            is_dir: false,
+        });
+        app.file_filter = 4;
+
+        let (total, supported, unsupported) = app.folder_file_counts();
+        assert_eq!(total, 3);
+        assert_eq!(supported, 2);
+        assert_eq!(unsupported, 1);
+        assert_eq!(app.file_count(), 2);
     }
 
     #[test]
