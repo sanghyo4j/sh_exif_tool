@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
 
 use crate::exif::{
     create_date_only_exif_tiff, exif_backup_path, read_exif_tiff_metadata,
@@ -22,6 +22,7 @@ pub(crate) struct PngDateSources {
     pub date_time_original: String,
     pub date_time_digitized: String,
     pub image_date_time: String,
+    pub recorded_offset_minutes: Option<i32>,
 }
 
 impl PngDateSources {
@@ -48,6 +49,17 @@ impl PngDateSources {
         .into_iter()
         .any(|value| !value.is_empty())
     }
+
+    pub(crate) fn effective_media_date_utc(&self) -> Option<i64> {
+        let minutes = self.recorded_offset_minutes?;
+        let datetime =
+            NaiveDateTime::parse_from_str(&self.effective_media_date(), DISPLAY_DATETIME_FORMAT)
+                .ok()?;
+        FixedOffset::east_opt(minutes * 60)?
+            .from_local_datetime(&datetime)
+            .single()
+            .map(|value| value.timestamp())
+    }
 }
 
 pub(super) fn has_png_signature(bytes: &[u8]) -> bool {
@@ -65,7 +77,10 @@ pub(super) fn scan(path: &Path) -> MediaScanResult {
     MediaScanResult {
         media_kind: "png".to_string(),
         media_type: "PNG image".to_string(),
+        recorded_media_date: media_date.clone(),
         media_date,
+        media_date_utc: sources.effective_media_date_utc(),
+        recorded_offset_minutes: sources.recorded_offset_minutes,
         metadata_status: metadata_status.to_string(),
         time_interpretation: String::new(),
         exif_metadata: None,
@@ -80,17 +95,29 @@ pub(crate) fn read_date_sources(path: &Path) -> PngDateSources {
 }
 
 fn read_date_sources_from_bytes(bytes: &[u8]) -> PngDateSources {
-    let creation_time = find_text_chunk(bytes, CREATION_TIME_KEYWORD)
-        .and_then(|value| creation_time_to_display(&value))
+    let creation_value = find_text_chunk(bytes, CREATION_TIME_KEYWORD);
+    let creation_time = creation_value
+        .as_deref()
+        .and_then(creation_time_to_display)
         .unwrap_or_default();
     let exif = find_chunk(bytes, b"eXIf")
         .map(read_exif_tiff_metadata)
         .unwrap_or_default();
+    let recorded_offset_minutes = if !exif.date_time_original.is_empty() {
+        parse_offset_minutes(&exif.offset_time_original)
+    } else if !creation_time.is_empty() {
+        creation_value.as_deref().and_then(rfc3339_offset_minutes)
+    } else if !exif.date_time_digitized.is_empty() {
+        parse_offset_minutes(&exif.offset_time_digitized)
+    } else {
+        parse_offset_minutes(&exif.offset_time)
+    };
     PngDateSources {
         creation_time,
         date_time_original: exif.date_time_original,
         date_time_digitized: exif.date_time_digitized,
         image_date_time: exif.image_date_time,
+        recorded_offset_minutes,
     }
 }
 
@@ -592,7 +619,7 @@ fn creation_time_to_display(value: &str) -> Option<String> {
     if let Ok(datetime) = chrono::DateTime::parse_from_rfc3339(value.trim()) {
         return Some(
             datetime
-                .naive_utc()
+                .naive_local()
                 .format(DISPLAY_DATETIME_FORMAT)
                 .to_string(),
         );
@@ -600,7 +627,7 @@ fn creation_time_to_display(value: &str) -> Option<String> {
     if let Ok(datetime) = chrono::DateTime::parse_from_rfc2822(value.trim()) {
         return Some(
             datetime
-                .naive_utc()
+                .naive_local()
                 .format(DISPLAY_DATETIME_FORMAT)
                 .to_string(),
         );
@@ -608,6 +635,33 @@ fn creation_time_to_display(value: &str) -> Option<String> {
     NaiveDateTime::parse_from_str(value.trim(), DISPLAY_DATETIME_FORMAT)
         .ok()
         .map(|datetime| datetime.format(DISPLAY_DATETIME_FORMAT).to_string())
+}
+
+fn rfc3339_offset_minutes(value: &str) -> Option<i32> {
+    chrono::DateTime::parse_from_rfc3339(value.trim())
+        .or_else(|_| chrono::DateTime::parse_from_rfc2822(value.trim()))
+        .ok()
+        .map(|value| value.offset().local_minus_utc() / 60)
+}
+
+fn parse_offset_minutes(value: &str) -> Option<i32> {
+    let bytes = value.trim().as_bytes();
+    if bytes.len() != 6 || !matches!(bytes[0], b'+' | b'-') || bytes[3] != b':' {
+        return None;
+    }
+    let hours = std::str::from_utf8(&bytes[1..3])
+        .ok()?
+        .parse::<i32>()
+        .ok()?;
+    let minutes = std::str::from_utf8(&bytes[4..6])
+        .ok()?
+        .parse::<i32>()
+        .ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    let total = hours * 60 + minutes;
+    Some(if bytes[0] == b'-' { -total } else { total })
 }
 
 fn write_chunk(output: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) -> Result<(), String> {

@@ -88,6 +88,8 @@ export component EditableInfoRow inherits Rectangle {
     in property <bool> dirty: false;
     in property <string> status: "";
     in property <bool> date_input: false;
+    in property <string> suffix: "";
+    in property <bool> suffix_double_click_enabled: false;
     property <bool> date_spinner_visible: root.date_input && root.status != "Mixed" && root.value != "";
     // Keep the last segment chosen inside the text field. Clicking a spinner
     // button moves focus away from TextInput, so reading its live cursor from
@@ -99,6 +101,7 @@ export component EditableInfoRow inherits Rectangle {
     callback date_value_adjusted(string, int, int) -> string;
     callback shortcut_requested(string);
     callback metadata_right_clicked(string, string);
+    callback suffix_double_clicked();
 
     public function focus_input() {
         input.focus();
@@ -176,7 +179,7 @@ export component EditableInfoRow inherits Rectangle {
 
         input := TextInput {
             x: 8px;
-            width: parent.width - 16px - (root.date_spinner_visible ? 18px : 0px);
+            width: parent.width - 16px - (root.date_spinner_visible ? 18px : 0px) - (root.suffix != "" ? 72px : 0px);
             height: 100%;
             text <=> root.value;
             font-family: FontSettings.details_font_family;
@@ -241,6 +244,31 @@ export component EditableInfoRow inherits Rectangle {
                 }
 
                 reject
+            }
+        }
+
+        if root.suffix != "": Text {
+            x: parent.width - (root.date_spinner_visible ? 90px : 72px);
+            width: 66px;
+            height: 100%;
+            text: root.suffix;
+            font-family: FontSettings.details_font_family;
+            font-size: max(8pt, (FontSettings.font_size_pt - 1) * 1pt);
+            color: root.suffix == "Local?" ? NativeColors.warning : NativeColors.secondary_text;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        if root.suffix != "": TouchArea {
+            x: parent.width - (root.date_spinner_visible ? 90px : 72px);
+            width: 66px;
+            height: 100%;
+            mouse-cursor: root.suffix == "Local?" && root.suffix_double_click_enabled ? pointer : default;
+            double-clicked => {
+                if (root.suffix == "Local?" && root.suffix_double_click_enabled) {
+                    root.suffix_double_clicked();
+                }
             }
         }
 

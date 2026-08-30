@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::exif::read_exif_metadata_for_scan;
+use chrono::{FixedOffset, NaiveDateTime, TimeZone};
 
 use super::MediaScanResult;
 
@@ -15,14 +16,53 @@ pub(super) fn scan(path: &Path) -> MediaScanResult {
     } else {
         metadata.taken_date.clone()
     };
+    let offset = if !metadata.date_time_original.is_empty() {
+        &metadata.offset_time_original
+    } else if !metadata.date_time_digitized.is_empty() {
+        &metadata.offset_time_digitized
+    } else {
+        &metadata.offset_time
+    };
+    let recorded_offset_minutes = parse_exif_offset_minutes(offset);
+    let media_date_utc = recorded_offset_minutes.and_then(|minutes| {
+        let datetime = NaiveDateTime::parse_from_str(&media_date, "%Y-%m-%d %H:%M:%S").ok()?;
+        let offset = FixedOffset::east_opt(minutes * 60)?;
+        offset
+            .from_local_datetime(&datetime)
+            .single()
+            .map(|value| value.timestamp())
+    });
     MediaScanResult {
         media_kind: "jpeg".to_string(),
         media_type: "JPEG image".to_string(),
+        recorded_media_date: media_date.clone(),
         media_date,
+        media_date_utc,
+        recorded_offset_minutes,
         metadata_status: if metadata.has_exif { "O" } else { "X" }.to_string(),
         time_interpretation: String::new(),
         exif_metadata: Some(metadata),
     }
+}
+
+fn parse_exif_offset_minutes(value: &str) -> Option<i32> {
+    let bytes = value.trim().as_bytes();
+    if bytes.len() != 6 || !matches!(bytes[0], b'+' | b'-') || bytes[3] != b':' {
+        return None;
+    }
+    let hours = std::str::from_utf8(&bytes[1..3])
+        .ok()?
+        .parse::<i32>()
+        .ok()?;
+    let minutes = std::str::from_utf8(&bytes[4..6])
+        .ok()?
+        .parse::<i32>()
+        .ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    let total = hours * 60 + minutes;
+    Some(if bytes[0] == b'-' { -total } else { total })
 }
 
 #[cfg(test)]

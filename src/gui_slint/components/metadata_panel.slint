@@ -211,6 +211,7 @@ export component MetadataPanel inherits Rectangle {
     callback fill_taken_date_from_filename();
     callback fill_taken_date_from_created_date();
     callback shift_media_date();
+    callback set_time_zone_offset();
     callback shift_gps_date_time();
     callback fill_taken_date_from_gps();
     callback set_modified_date_from_created_date();
@@ -357,8 +358,7 @@ export component MetadataPanel inherits Rectangle {
 
                     if root.selected_media_kind == "mp4": SectionHeader { title: "VIDEO"; }
                     if root.selected_media_kind == "mp4": ReadOnlyInfoRow { label: "Media Type"; value: root.selected_media_type; }
-                    if root.selected_media_kind == "mp4": EditableInfoRow { label: "Media Date"; metadata_key: "media_date"; date_input: true; value <=> root.taken_date; status <=> root.taken_date_status; dirty <=> root.taken_date_dirty; date_value_edited() => { root.taken_date_edited() } date_value_adjusted(value, cursor, delta) => { root.date_value_adjusted(value, cursor, delta) } value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.selected_media_kind == "mp4": ReadOnlyInfoRow { label: "Time Interpretation"; value: root.selected_time_interpretation == "" ? "-" : root.selected_time_interpretation; }
+                    if root.selected_media_kind == "mp4": EditableInfoRow { label: "Media Date"; metadata_key: "media_date"; date_input: true; suffix: root.selected_time_interpretation; value <=> root.taken_date; status <=> root.taken_date_status; dirty <=> root.taken_date_dirty; date_value_edited() => { root.taken_date_edited() } date_value_adjusted(value, cursor, delta) => { root.date_value_adjusted(value, cursor, delta) } value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
 
                     if root.selected_media_kind == "mts": SectionHeader { title: "VIDEO"; }
                     if root.selected_media_kind == "mts": ReadOnlyInfoRow { label: "Media Type"; value: root.selected_media_type; }
@@ -382,7 +382,7 @@ export component MetadataPanel inherits Rectangle {
                     }
 
                     if root.selected_media_kind == "jpeg" && root.exif_available: SectionHeader { title: "CAMERA"; metadata_section: "camera"; section_right_clicked(section) => { root.exif_section_right_clicked(section); } }
-                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Taken Date"; metadata_key: "taken_date"; date_input: true; value <=> root.taken_date; status <=> root.taken_date_status; dirty <=> root.taken_date_dirty; date_value_edited() => { root.taken_date_edited() } date_value_adjusted(value, cursor, delta) => { root.date_value_adjusted(value, cursor, delta) } value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Taken Date"; metadata_key: "taken_date"; date_input: true; suffix: root.selected_time_interpretation; suffix_double_click_enabled: true; value <=> root.taken_date; status <=> root.taken_date_status; dirty <=> root.taken_date_dirty; date_value_edited() => { root.taken_date_edited() } date_value_adjusted(value, cursor, delta) => { root.date_value_adjusted(value, cursor, delta) } value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } suffix_double_clicked => { root.set_time_zone_offset(); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Camera Make"; metadata_key: "camera_make"; value <=> root.camera_make; status <=> root.camera_make_status; dirty <=> root.camera_make_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Camera Model"; metadata_key: "camera_model"; value <=> root.camera_model; status <=> root.camera_model_status; dirty <=> root.camera_model_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Lens Model"; metadata_key: "lens_model"; value <=> root.lens_model; status <=> root.lens_model_status; dirty <=> root.lens_model_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
@@ -533,7 +533,7 @@ export component MetadataPanel inherits Rectangle {
         x: parent.width - 292px;
         y: 30px;
         width: 280px;
-        height: root.selected_media_kind == "jpeg" ? 170px : (root.selected_media_kind == "png" ? 114px : (root.selected_media_kind == "mts" ? 30px : 86px));
+        height: root.selected_media_kind == "jpeg" ? 198px : (root.selected_media_kind == "png" ? 114px : (root.selected_media_kind == "mts" ? 30px : 86px));
         background: NativeColors.menu_bg;
         border-width: 1px;
         border-color: #a0a0a0;
@@ -542,9 +542,10 @@ export component MetadataPanel inherits Rectangle {
         MenuRow { y: 1px; title: root.selected_media_kind == "mts" ? "Set File Dates from Filename" : "Set Media Date from Filename"; clicked => { root.metadata_tools_menu_visible = false; root.fill_taken_date_from_filename(); } }
         if root.selected_media_kind != "mts": MenuRow { y: 29px; title: "Set Media Date from File Timestamp"; clicked => { root.metadata_tools_menu_visible = false; root.fill_taken_date_from_created_date(); } }
         if root.selected_media_kind != "mts": MenuRow { y: 57px; title: "Shift Media Date..."; clicked => { root.metadata_tools_menu_visible = false; root.shift_media_date(); } }
-        if root.selected_media_kind == "jpeg": MenuRow { y: 85px; title: "Shift GPS Date/Time..."; clicked => { root.metadata_tools_menu_visible = false; root.shift_gps_date_time(); } }
-        if root.selected_media_kind == "jpeg": MenuRow { y: 113px; title: "Set Media Date from GPS Date/Time"; clicked => { root.metadata_tools_menu_visible = false; root.fill_taken_date_from_gps(); } }
-        if root.selected_media_kind == "jpeg": MenuRow { y: 141px; title: "Remove Metadata Tags"; danger: true; clicked => { root.metadata_tools_menu_visible = false; root.remove_exif_tags(); } }
+        if root.selected_media_kind == "jpeg": MenuRow { y: 85px; title: "Set Time Zone Offset..."; clicked => { root.metadata_tools_menu_visible = false; root.set_time_zone_offset(); } }
+        if root.selected_media_kind == "jpeg": MenuRow { y: 113px; title: "Shift GPS Date/Time..."; clicked => { root.metadata_tools_menu_visible = false; root.shift_gps_date_time(); } }
+        if root.selected_media_kind == "jpeg": MenuRow { y: 141px; title: "Set Media Date from GPS Date/Time"; clicked => { root.metadata_tools_menu_visible = false; root.fill_taken_date_from_gps(); } }
+        if root.selected_media_kind == "jpeg": MenuRow { y: 169px; title: "Remove Metadata Tags"; danger: true; clicked => { root.metadata_tools_menu_visible = false; root.remove_exif_tags(); } }
         if root.selected_media_kind == "png": MenuRow { y: 85px; title: "Remove Metadata Tags"; danger: true; clicked => { root.metadata_tools_menu_visible = false; root.remove_exif_tags(); } }
     }
 }

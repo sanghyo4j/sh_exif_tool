@@ -17,6 +17,9 @@ pub struct ExifMetadata {
     pub date_time_original: String,
     pub date_time_digitized: String,
     pub image_date_time: String,
+    pub offset_time: String,
+    pub offset_time_original: String,
+    pub offset_time_digitized: String,
     pub camera_make: String,
     pub camera_model: String,
     pub lens_model: String,
@@ -53,6 +56,9 @@ impl Default for ExifMetadata {
             date_time_original: empty_value(),
             date_time_digitized: empty_value(),
             image_date_time: empty_value(),
+            offset_time: empty_value(),
+            offset_time_original: empty_value(),
+            offset_time_digitized: empty_value(),
             camera_make: empty_value(),
             camera_model: empty_value(),
             lens_model: empty_value(),
@@ -504,6 +510,64 @@ pub fn write_taken_date_preserving_exif(
         let _ = atomic_write_file(path, &bytes);
         let _ = crate::fs::set_file_times(path, original_created, original_modified);
         return Err(err);
+    }
+    Ok(())
+}
+
+/// Assigns a time-zone offset to the existing EXIF date fields without changing
+/// their recorded wall-clock values. Missing OffsetTime tags are created while
+/// unrelated EXIF entries are preserved.
+pub fn write_time_zone_offset_preserving_exif(
+    path: &Path,
+    offset: &str,
+    backup_before_changes: bool,
+) -> Result<(), String> {
+    validate_time_zone_offset(offset)?;
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let tiff = find_exif_tiff(&bytes).ok_or_else(|| "EXIF data was not found.".to_string())?;
+    let original_file_metadata = fs::metadata(path).map_err(|err| err.to_string())?;
+    let original_created = original_file_metadata.created().ok();
+    let original_modified = original_file_metadata.modified().ok();
+    let updated_tiff = rewrite_exif_tiff_time_zone_offset(tiff, offset)?;
+    let segment = build_exif_app1_from_tiff(&updated_tiff)?;
+    let updated = replace_or_insert_exif_app1(&bytes, &segment)?;
+
+    if backup_before_changes {
+        let backup_path = exif_backup_path(path);
+        if !backup_path.exists() {
+            fs::copy(path, &backup_path).map_err(|err| err.to_string())?;
+        }
+    }
+
+    atomic_write_file(path, &updated)?;
+    if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
+        let _ = atomic_write_file(path, &bytes);
+        let _ = crate::fs::set_file_times(path, original_created, original_modified);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn validate_time_zone_offset(value: &str) -> Result<(), String> {
+    let bytes = value.trim().as_bytes();
+    if bytes.len() != 6
+        || !matches!(bytes[0], b'+' | b'-')
+        || bytes[3] != b':'
+        || !bytes[1..3].iter().all(u8::is_ascii_digit)
+        || !bytes[4..6].iter().all(u8::is_ascii_digit)
+    {
+        return Err("Expected time-zone offset format: +HH:MM or -HH:MM".to_string());
+    }
+    let hours = std::str::from_utf8(&bytes[1..3])
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(u8::MAX);
+    let minutes = std::str::from_utf8(&bytes[4..6])
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(u8::MAX);
+    if hours > 14 || minutes > 59 || (hours == 14 && minutes != 0) {
+        return Err("Time-zone offset must be between -14:00 and +14:00.".to_string());
     }
     Ok(())
 }
@@ -1192,6 +1256,15 @@ fn build_basic_tiff(metadata: &ExifMetadata) -> Result<Vec<u8>, String> {
         exif_ifd.add_ascii_value(0x9003, datetime.clone());
         exif_ifd.add_ascii_value(0x9004, datetime);
     }
+    if !is_empty_metadata_value(&metadata.offset_time) {
+        exif_ifd.add_ascii_value(0x9010, metadata.offset_time.trim().to_string());
+    }
+    if !is_empty_metadata_value(&metadata.offset_time_original) {
+        exif_ifd.add_ascii_value(0x9011, metadata.offset_time_original.trim().to_string());
+    }
+    if !is_empty_metadata_value(&metadata.offset_time_digitized) {
+        exif_ifd.add_ascii_value(0x9012, metadata.offset_time_digitized.trim().to_string());
+    }
     ifd0.add_writable_ascii(0x013b, &metadata.artist, DEFAULT_WRITABLE_ASCII_LEN);
 
     if let Some((num, den)) = parse_optional_rational_value(&metadata.shutter_speed)? {
@@ -1861,6 +1934,217 @@ fn rewrite_exif_tiff_date_tags(
     Ok(output)
 }
 
+fn rewrite_exif_tiff_time_zone_offset(tiff: &[u8], offset: &str) -> Result<Vec<u8>, String> {
+    validate_time_zone_offset(offset)?;
+    let mut offset_bytes = offset.trim().as_bytes().to_vec();
+    offset_bytes.push(0);
+
+    let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid EXIF TIFF header.".to_string())?;
+    if read_u16(tiff, 2, endian) != Some(42) {
+        return Err("Invalid EXIF TIFF marker.".to_string());
+    }
+    let old_ifd0_offset = read_u32(tiff, 4, endian)
+        .map(|value| value as usize)
+        .ok_or_else(|| "Invalid EXIF IFD0 offset.".to_string())?;
+    let old_ifd0 = raw_ifd_entries(tiff, old_ifd0_offset, endian)?;
+    let old_next_ifd = raw_ifd_next_offset(tiff, old_ifd0_offset, old_ifd0.len(), endian)?;
+    let old_exif_offset = read_ifd_entries(tiff, old_ifd0_offset, endian).and_then(|entries| {
+        entries
+            .into_iter()
+            .find(|entry| entry.tag == 0x8769)
+            .and_then(|entry| entry.as_long())
+            .map(|value| value as usize)
+    });
+    let old_exif_offset =
+        old_exif_offset.ok_or_else(|| "EXIF date metadata was not found.".to_string())?;
+    let old_exif = raw_ifd_entries(tiff, old_exif_offset, endian)?;
+    let old_exif_next = raw_ifd_next_offset(tiff, old_exif_offset, old_exif.len(), endian)?;
+
+    let has_image_date = old_ifd0.iter().any(|(tag, _)| *tag == 0x0132);
+    let has_original_date = old_exif.iter().any(|(tag, _)| *tag == 0x9003);
+    let has_digitized_date = old_exif.iter().any(|(tag, _)| *tag == 0x9004);
+    if !has_image_date && !has_original_date && !has_digitized_date {
+        return Err("No EXIF date tag is available to receive a time-zone offset.".to_string());
+    }
+
+    let mut ifd0_entries: Vec<_> = old_ifd0
+        .into_iter()
+        .filter(|(tag, _)| *tag != 0x8769)
+        .collect();
+    let mut exif_entries: Vec<_> = old_exif
+        .into_iter()
+        .filter(|(tag, _)| !matches!(*tag, 0x9010..=0x9012))
+        .collect();
+
+    let compact_len = compact_trailing_tiff_padding_len(tiff, endian);
+    let mut output = tiff[..compact_len].to_vec();
+    if !output.len().is_multiple_of(2) {
+        output.push(0);
+    }
+    let new_ifd0_offset = output.len();
+    let ifd0_count = ifd0_entries
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| "EXIF contains too many IFD0 entries.".to_string())?;
+    let ifd0_table_len = 2usize
+        .checked_add(
+            ifd0_count
+                .checked_mul(12)
+                .ok_or_else(|| "EXIF IFD0 is too large.".to_string())?,
+        )
+        .and_then(|value| value.checked_add(4))
+        .ok_or_else(|| "EXIF IFD0 is too large.".to_string())?;
+    let new_exif_offset = new_ifd0_offset
+        .checked_add(ifd0_table_len)
+        .map(|value| (value + 1) & !1)
+        .ok_or_else(|| "EXIF is too large.".to_string())?;
+    ifd0_entries.push((
+        0x8769,
+        make_tiff_entry(0x8769, 4, 1, new_exif_offset as u32, endian),
+    ));
+    ifd0_entries.sort_by_key(|(tag, _)| *tag);
+
+    let offset_tag_count = usize::from(has_image_date)
+        + usize::from(has_original_date)
+        + usize::from(has_digitized_date);
+    let exif_count = exif_entries
+        .len()
+        .checked_add(offset_tag_count)
+        .ok_or_else(|| "EXIF contains too many Exif IFD entries.".to_string())?;
+    let exif_table_len = 2usize
+        .checked_add(
+            exif_count
+                .checked_mul(12)
+                .ok_or_else(|| "EXIF IFD is too large.".to_string())?,
+        )
+        .and_then(|value| value.checked_add(4))
+        .ok_or_else(|| "EXIF IFD is too large.".to_string())?;
+    let value_offset = new_exif_offset
+        .checked_add(exif_table_len)
+        .ok_or_else(|| "EXIF is too large.".to_string())?;
+
+    for (tag, present) in [
+        (0x9010, has_image_date),
+        (0x9011, has_original_date),
+        (0x9012, has_digitized_date),
+    ] {
+        if present {
+            exif_entries.push((
+                tag,
+                make_tiff_entry(
+                    tag,
+                    2,
+                    offset_bytes.len() as u32,
+                    value_offset as u32,
+                    endian,
+                ),
+            ));
+        }
+    }
+    exif_entries.sort_by_key(|(tag, _)| *tag);
+
+    append_raw_ifd(
+        &mut output,
+        new_ifd0_offset,
+        &ifd0_entries,
+        old_next_ifd,
+        endian,
+    )?;
+    while output.len() < new_exif_offset {
+        output.push(0);
+    }
+    append_raw_ifd(
+        &mut output,
+        new_exif_offset,
+        &exif_entries,
+        old_exif_next,
+        endian,
+    )?;
+    output.extend_from_slice(&offset_bytes);
+    write_u32_at(&mut output, 4, new_ifd0_offset as u32, endian)?;
+    Ok(output)
+}
+
+/// Some cameras emit a maximum-sized APP1 segment followed by tens of
+/// kilobytes of zero padding. Preserve every reachable IFD/value and every
+/// non-zero byte, but reclaim that unreferenced tail before adding new tags.
+fn compact_trailing_tiff_padding_len(tiff: &[u8], endian: Endian) -> usize {
+    let Some(ifd0_offset) = read_u32(tiff, 4, endian).map(|value| value as usize) else {
+        return tiff.len();
+    };
+    let Some(referenced_end) = referenced_tiff_end(tiff, ifd0_offset, endian) else {
+        return tiff.len();
+    };
+    let non_zero_end = tiff
+        .iter()
+        .rposition(|byte| *byte != 0)
+        .map_or(0, |index| index + 1);
+    let compact_len = referenced_end.max(non_zero_end).min(tiff.len());
+    if tiff[compact_len..].iter().all(|byte| *byte == 0) {
+        compact_len
+    } else {
+        tiff.len()
+    }
+}
+
+fn referenced_tiff_end(tiff: &[u8], ifd0_offset: usize, endian: Endian) -> Option<usize> {
+    let mut pending = vec![ifd0_offset];
+    let mut visited = Vec::new();
+    let mut referenced_end = 8usize;
+
+    while let Some(ifd_offset) = pending.pop() {
+        if ifd_offset == 0 || visited.contains(&ifd_offset) {
+            continue;
+        }
+        visited.push(ifd_offset);
+        let entries = read_ifd_entries(tiff, ifd_offset, endian)?;
+        let table_end = ifd_offset
+            .checked_add(2)?
+            .checked_add(entries.len().checked_mul(12)?)?
+            .checked_add(4)?;
+        if table_end > tiff.len() {
+            return None;
+        }
+        referenced_end = referenced_end.max(table_end);
+
+        for entry in &entries {
+            if let Some((start, len)) = entry_storage_range(entry) {
+                referenced_end = referenced_end.max(start.checked_add(len)?);
+            }
+            if matches!(entry.tag, 0x8769 | 0x8825 | 0xa005) {
+                if let Some(offset) = entry.as_long().map(|value| value as usize) {
+                    pending.push(offset);
+                }
+            }
+        }
+
+        for (offset_tag, length_tag) in [(0x0201, 0x0202), (0x0111, 0x0117), (0x0144, 0x0145)] {
+            let offset = entries
+                .iter()
+                .find(|entry| entry.tag == offset_tag)
+                .and_then(Entry::as_long)
+                .map(|value| value as usize);
+            let length = entries
+                .iter()
+                .find(|entry| entry.tag == length_tag)
+                .and_then(Entry::as_long)
+                .map(|value| value as usize);
+            if let (Some(offset), Some(length)) = (offset, length) {
+                referenced_end = referenced_end.max(offset.checked_add(length)?);
+            }
+        }
+
+        let next_position = ifd_offset
+            .checked_add(2)?
+            .checked_add(entries.len().checked_mul(12)?)?;
+        if let Some(next) = read_u32(tiff, next_position, endian).filter(|value| *value != 0) {
+            pending.push(next as usize);
+        }
+    }
+
+    Some(referenced_end.min(tiff.len()))
+}
+
 fn rewrite_exif_tiff_software(tiff: &[u8], value: &str) -> Result<Vec<u8>, String> {
     let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid EXIF TIFF header.".to_string())?;
     if read_u16(tiff, 2, endian) != Some(42) {
@@ -2296,6 +2580,9 @@ fn parse_exif_ifd(data: &[u8], offset: usize, endian: Endian, meta: &mut ExifMet
                     .map(|value| exif_datetime_to_display(&value))
                     .unwrap_or_else(empty_value);
             }
+            0x9010 => meta.offset_time = entry.as_ascii().unwrap_or_else(empty_value),
+            0x9011 => meta.offset_time_original = entry.as_ascii().unwrap_or_else(empty_value),
+            0x9012 => meta.offset_time_digitized = entry.as_ascii().unwrap_or_else(empty_value),
             0x9000 => meta.exif_version = entry.as_version_string().unwrap_or_else(empty_value),
             0x9207 => {
                 meta.metering_mode = entry
@@ -3424,6 +3711,9 @@ mod tests {
             date_time_original: String::new(),
             date_time_digitized: String::new(),
             image_date_time: String::new(),
+            offset_time: String::new(),
+            offset_time_original: String::new(),
+            offset_time_digitized: String::new(),
             camera_make: "Sony".to_string(),
             camera_model: "A7C".to_string(),
             lens_model: "FE 35mm F1.8".to_string(),
@@ -3534,6 +3824,52 @@ mod tests {
         assert_eq!(written.image_date_time, "2015-07-11 14:31:13");
         assert!(!backup_path.exists());
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn adds_and_overwrites_time_zone_offset_without_shifting_taken_date() {
+        let path = std::env::temp_dir().join(format!(
+            "sh148_add_time_zone_offset_{}.jpg",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            minimal_jpeg_with_datetime_original("2018:09:06 00:15:53"),
+        )
+        .unwrap();
+
+        write_time_zone_offset_preserving_exif(&path, "+09:00", false).unwrap();
+        let first = read_exif_metadata(&path);
+        assert_eq!(first.date_time_original, "2018-09-06 00:15:53");
+        assert_eq!(first.offset_time_original, "+09:00");
+
+        write_time_zone_offset_preserving_exif(&path, "-07:00", false).unwrap();
+        let second = read_exif_metadata(&path);
+        assert_eq!(second.date_time_original, "2018-09-06 00:15:53");
+        assert_eq!(second.offset_time_original, "-07:00");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn adds_time_zone_offset_to_a_maximum_app1_with_trailing_padding() {
+        let path =
+            std::env::temp_dir().join(format!("sh148_full_app1_offset_{}.jpg", std::process::id()));
+        let mut jpeg = minimal_jpeg_with_datetime_original("2019:04:01 00:40:33");
+        let (segment_start, segment_end) = find_exif_app1_range(&jpeg).unwrap();
+        let maximum_segment_bytes = 2 + u16::MAX as usize;
+        let padding = maximum_segment_bytes - (segment_end - segment_start);
+        jpeg.splice(segment_end..segment_end, std::iter::repeat_n(0, padding));
+        jpeg[segment_start + 2..segment_start + 4].copy_from_slice(&u16::MAX.to_be_bytes());
+        std::fs::write(&path, jpeg).unwrap();
+
+        write_time_zone_offset_preserving_exif(&path, "+09:00", false).unwrap();
+
+        let written = read_exif_metadata(&path);
+        assert_eq!(written.date_time_original, "2019-04-01 00:40:33");
+        assert_eq!(written.offset_time_original, "+09:00");
         let _ = std::fs::remove_file(path);
     }
 

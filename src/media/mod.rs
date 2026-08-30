@@ -16,6 +16,12 @@ pub struct MediaScanResult {
     pub media_kind: String,
     pub media_type: String,
     pub media_date: String,
+    /// Wall-clock value as it was recorded by the media container.
+    pub recorded_media_date: String,
+    /// Absolute capture instant when the file supplies enough information.
+    pub media_date_utc: Option<i64>,
+    /// Offset attached to the recorded wall-clock value, when present.
+    pub recorded_offset_minutes: Option<i32>,
     pub metadata_status: String,
     pub time_interpretation: String,
     pub exif_metadata: Option<ExifMetadata>,
@@ -131,6 +137,9 @@ pub fn scan_media_file(path: &Path) -> MediaScanResult {
         media_kind: media_kind.to_string(),
         media_type: media_type.to_string(),
         media_date: "-".to_string(),
+        recorded_media_date: "-".to_string(),
+        media_date_utc: None,
+        recorded_offset_minutes: None,
         metadata_status: if expected_supported { "!" } else { "-" }.to_string(),
         time_interpretation: String::new(),
         exif_metadata: None,
@@ -202,6 +211,9 @@ fn failed_result(media_kind: &str, media_type: &str) -> MediaScanResult {
         media_kind: media_kind.to_string(),
         media_type: media_type.to_string(),
         media_date: "-".to_string(),
+        recorded_media_date: "-".to_string(),
+        media_date_utc: None,
+        recorded_offset_minutes: None,
         metadata_status: "!".to_string(),
         time_interpretation: String::new(),
         exif_metadata: None,

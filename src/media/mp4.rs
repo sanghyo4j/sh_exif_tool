@@ -30,6 +30,11 @@ pub(super) fn scan(
         media_kind: "mp4".to_string(),
         media_type: "MPEG-4 media".to_string(),
         media_date: summary.media_date.unwrap_or_else(|| "-".to_string()),
+        recorded_media_date: summary
+            .recorded_media_date
+            .unwrap_or_else(|| "-".to_string()),
+        media_date_utc: summary.media_date_utc,
+        recorded_offset_minutes: summary.recorded_offset_minutes,
         metadata_status: if summary.has_metadata { "O" } else { "X" }.to_string(),
         time_interpretation: summary.time_interpretation,
         exif_metadata: None,
@@ -125,6 +130,9 @@ fn parse_display_datetime_or_date(value: &str) -> Option<NaiveDateTime> {
 #[derive(Default)]
 struct Mp4Summary {
     media_date: Option<String>,
+    recorded_media_date: Option<String>,
+    media_date_utc: Option<i64>,
+    recorded_offset_minutes: Option<i32>,
     has_metadata: bool,
     time_interpretation: String,
     fallback_creation_seconds: Option<u64>,
@@ -184,6 +192,25 @@ fn scan_atoms(file: &mut File, allow_quicktime_without_ftyp: bool) -> Result<Mp4
         );
         summary.media_date = media_date;
         summary.time_interpretation = interpretation;
+        let unix_seconds = i64::try_from(seconds)
+            .ok()
+            .and_then(|value| value.checked_sub(QUICKTIME_UNIX_EPOCH_OFFSET));
+        if summary.time_interpretation == "UTC (standard)" {
+            summary.media_date_utc = unix_seconds;
+            summary.recorded_offset_minutes = Some(0);
+            summary.recorded_media_date = unix_seconds
+                .and_then(|value| DateTime::<Utc>::from_timestamp(value, 0))
+                .map(|value| value.format(DISPLAY_DATETIME_FORMAT).to_string());
+        } else if summary.time_interpretation == "UTC (Unix epoch, non-standard)" {
+            summary.media_date_utc = i64::try_from(seconds).ok();
+            summary.recorded_offset_minutes = Some(0);
+            summary.recorded_media_date = summary
+                .media_date_utc
+                .and_then(|value| DateTime::<Utc>::from_timestamp(value, 0))
+                .map(|value| value.format(DISPLAY_DATETIME_FORMAT).to_string());
+        } else {
+            summary.recorded_media_date = summary.media_date.clone();
+        }
     }
     Ok(summary)
 }
