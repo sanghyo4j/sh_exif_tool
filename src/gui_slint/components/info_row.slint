@@ -1,9 +1,11 @@
 import { HorizontalBox } from "std-widgets.slint";
+import { LineEdit } from "std-widgets.slint";
 import { HDivider } from "dividers.slint";
 import { FontSettings, MetadataContextMenuState, NativeColors } from "../theme.slint";
 
 export component SectionHeader inherits Rectangle {
     in property <string> title;
+    in property <string> secondary_text: "";
     in property <string> metadata_section: "";
     in property <string> action_title: "";
     in property <bool> action_enabled: true;
@@ -39,13 +41,28 @@ export component SectionHeader inherits Rectangle {
 
     Text {
         x: 18px;
-        width: root.action_title == "" ? parent.width - 30px : parent.width - 124px;
+        width: root.action_title != "" ? parent.width - 124px
+            : root.secondary_text != "" ? max(48px, parent.width - 178px)
+            : parent.width - 30px;
         height: 100%;
         text: title;
         font-family: FontSettings.details_font_family;
         font-size: max(9pt, (FontSettings.font_size_pt - 1) * 1pt);
         font-weight: 600;
         color: NativeColors.text;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    if root.secondary_text != "" && root.action_title == "": Text {
+        x: max(82px, parent.width - 152px);
+        width: min(140px, parent.width - 94px);
+        height: 100%;
+        text: root.secondary_text;
+        font-family: FontSettings.details_font_family;
+        font-size: max(8pt, (FontSettings.font_size_pt - 2) * 1pt);
+        color: NativeColors.secondary_text;
+        horizontal-alignment: right;
         vertical-alignment: center;
         overflow: elide;
     }
@@ -80,6 +97,200 @@ export component SectionHeader inherits Rectangle {
             clicked => { root.action_clicked(); }
         }
     }
+}
+
+export component ActionValueRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 30px;
+    background: NativeColors.surface;
+
+    Text {
+        x: 14px;
+        width: 126px;
+        height: 100%;
+        text: root.label;
+        font-family: FontSettings.details_font_family;
+        color: NativeColors.secondary_text;
+        font-size: FontSettings.font_size_pt * 1pt;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Rectangle {
+        x: 154px;
+        y: 3px;
+        width: max(40px, parent.width - 168px);
+        height: 24px;
+        background: !root.enabled ? NativeColors.subtle_surface
+            : value_area.has-hover ? NativeColors.hover
+            : NativeColors.surface;
+        border-width: 1px;
+        border-color: value_area.has-hover && root.enabled ? NativeColors.accent : NativeColors.border;
+        border-radius: 3px;
+
+        Text {
+            x: 8px;
+            width: parent.width - 30px;
+            height: 100%;
+            text: root.value;
+            font-family: FontSettings.details_font_family;
+            font-size: FontSettings.font_size_pt * 1pt;
+            color: root.value == "Not set" ? NativeColors.warning
+                : root.enabled ? NativeColors.text
+                : NativeColors.disabled_text;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            x: parent.width - 22px;
+            width: 14px;
+            height: 100%;
+            text: "v";
+            font-family: FontSettings.details_font_family;
+            font-size: max(8pt, (FontSettings.font_size_pt - 2) * 1pt);
+            color: root.enabled ? NativeColors.secondary_text : NativeColors.disabled_text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        value_area := TouchArea {
+            enabled: root.enabled;
+            width: 100%;
+            height: 100%;
+            mouse-cursor: root.enabled ? pointer : default;
+            clicked => { root.clicked(); }
+        }
+    }
+
+    HDivider {
+        y: parent.height - 1px;
+        background: NativeColors.divider;
+    }
+}
+
+export component UtcOffsetInfoRow inherits Rectangle {
+    in property <string> value: "Not set";
+    in property <bool> multiple: false;
+    in-out property <bool> only_missing: true;
+    callback offset_selected(string, bool) -> bool;
+    property <bool> custom_visible: false;
+    property <string> custom_value: "+09:00";
+    property <[string]> choices: [
+        "PST · United States / Canada · UTC-08:00",
+        "PDT · United States / Canada · UTC-07:00",
+        "UTC · International · UTC+00:00",
+        "CET · Germany / France / etc. · UTC+01:00",
+        "CEST · Germany / France / etc. · UTC+02:00",
+        "KST · South Korea · UTC+09:00",
+        "Custom UTC offset..."
+    ];
+
+    height: 30px + (root.custom_visible ? 32px : 0px) + (root.multiple ? 26px : 0px);
+    background: NativeColors.surface;
+
+    Text {
+        x: 14px; y: 0px; width: 126px; height: 30px;
+        text: "UTC Offset";
+        font-family: FontSettings.details_font_family;
+        color: NativeColors.secondary_text;
+        font-size: FontSettings.font_size_pt * 1pt;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    offset_combo := Rectangle {
+        x: 154px; y: 3px; width: max(40px, parent.width - 168px); height: 24px;
+        background: offset_area.has-hover ? NativeColors.hover : NativeColors.surface;
+        border-width: 1px; border-color: NativeColors.border; border-radius: 3px;
+        Text {
+            x: 8px; width: parent.width - 28px; height: 100%;
+            text: root.value;
+            font-family: FontSettings.details_font_family;
+            font-size: max(8pt, (FontSettings.font_size_pt - 2) * 1pt);
+            color: root.value == "Not set" ? NativeColors.warning : NativeColors.text;
+            vertical-alignment: center; overflow: elide;
+        }
+        Text {
+            x: parent.width - 22px; width: 14px; height: 100%; text: "v";
+            font-size: 8pt; color: NativeColors.secondary_text;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+        offset_area := TouchArea { width: 100%; height: 100%; clicked => { offset_popup.show(); } }
+    }
+
+    offset_popup := PopupWindow {
+        x: 154px; y: 29px; width: max(220px, root.width - 168px); height: root.choices.length * 27px + 2px;
+        Rectangle {
+            width: 100%; height: 100%;
+            background: NativeColors.menu_bg; border-width: 1px; border-color: NativeColors.border;
+            for choice[index] in root.choices: Rectangle {
+                x: 1px; y: 1px + index * 27px; width: parent.width - 2px; height: 27px;
+                background: choice_area.has-hover ? NativeColors.hover : NativeColors.menu_bg;
+                Text {
+                    x: 8px; width: parent.width - 16px; height: 100%; text: choice;
+                    font-family: FontSettings.details_font_family;
+                    font-size: max(8pt, (FontSettings.font_size_pt - 2) * 1pt);
+                    color: NativeColors.text; vertical-alignment: center; overflow: elide;
+                }
+                choice_area := TouchArea { width: 100%; height: 100%; clicked => {
+                    offset_popup.close();
+                    if (choice == "Custom UTC offset...") {
+                        root.custom_visible = true;
+                    } else {
+                        root.custom_visible = false;
+                        root.offset_selected(choice, root.only_missing);
+                    }
+                } }
+            }
+        }
+    }
+
+    if root.custom_visible: LineEdit {
+        x: 154px; y: 33px; width: max(40px, parent.width - 238px); height: 26px;
+        text <=> root.custom_value;
+        placeholder-text: "+09:00";
+    }
+    if root.custom_visible: Rectangle {
+        x: parent.width - 76px; y: 34px; width: 62px; height: 24px;
+        background: custom_stage_area.has-hover ? NativeColors.hover : NativeColors.surface;
+        border-width: 1px; border-color: NativeColors.border; border-radius: 3px;
+        Text {
+            width: 100%; height: 100%; text: "Stage";
+            font-family: FontSettings.details_font_family;
+            color: NativeColors.text;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+        custom_stage_area := TouchArea { width: 100%; height: 100%; clicked => {
+            if (root.offset_selected(root.custom_value, root.only_missing)) { root.custom_visible = false; }
+        } }
+        }
+
+    if root.multiple: Rectangle {
+        x: 154px; y: root.custom_visible ? 66px : 34px; width: 16px; height: 16px;
+        background: NativeColors.surface;
+        border-width: 1px;
+        border-color: NativeColors.border;
+        border-radius: 2px;
+        Text { width: 100%; height: 100%; text: root.only_missing ? "✓" : ""; color: NativeColors.accent; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+        TouchArea { width: 100%; height: 100%; clicked => { root.only_missing = !root.only_missing; } }
+    }
+    if root.multiple: Text {
+        x: 178px; y: root.custom_visible ? 62px : 30px;
+        width: max(40px, parent.width - 192px); height: 24px;
+        text: "Only set missing offsets";
+        font-family: FontSettings.details_font_family;
+        color: NativeColors.secondary_text;
+        font-size: max(8pt, (FontSettings.font_size_pt - 1) * 1pt);
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    HDivider { y: parent.height - 1px; background: NativeColors.divider; }
 }
 
 export component EditableInfoRow inherits Rectangle {

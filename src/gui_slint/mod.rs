@@ -1688,81 +1688,17 @@ impl GuiRunner for SlintRunner {
         });
 
         let app_handle = app.clone();
-        let ui_handle = ui.as_weak();
-        ui.on_request_set_time_zone_offset(move || {
-            let Some(ui) = ui_handle.upgrade() else {
-                return;
-            };
-            if ui.get_metadata_dirty() {
-                show_message(
-                    &ui,
-                    "Pending Changes",
-                    "Save or revert the current changes before assigning a time-zone offset.",
-                );
-                return;
-            }
-            let selected_paths = {
-                let app = app_handle.borrow();
-                selected_file_paths(&app)
-            };
-            if !selected_paths.iter().any(|path| is_jpeg_path(path)) {
-                show_message(
-                    &ui,
-                    "Unable to Set Time Zone Offset",
-                    "Select one or more JPEG files first.",
-                );
-                return;
-            }
-            let default_offset = if ui.get_time_display_mode() == 1 {
-                "+00:00"
-            } else {
-                "+09:00"
-            };
-            ui.set_time_zone_offset_value(default_offset.into());
-            ui.set_time_zone_offset_only_missing(true);
-            ui.set_time_zone_offset_preview(
-                build_time_zone_offset_preview(
-                    &selected_paths,
-                    default_offset,
-                    true,
-                    ui.get_time_display_mode(),
-                )
-                .into(),
-            );
-            ui.set_time_zone_offset_visible(true);
-        });
-
-        let app_handle = app.clone();
-        let ui_handle = ui.as_weak();
-        ui.on_update_time_zone_offset_preview(move |offset, only_missing| {
-            let display_mode = ui_handle
-                .upgrade()
-                .map(|ui| ui.get_time_display_mode())
-                .unwrap_or(2);
-            let selected_paths = {
-                let app = app_handle.borrow();
-                selected_file_paths(&app)
-            };
-            build_time_zone_offset_preview(
-                &selected_paths,
-                offset.as_str(),
-                only_missing,
-                display_mode,
-            )
-            .into()
-        });
-
-        let app_handle = app.clone();
         let pending_offsets = pending_time_zone_offsets.clone();
         let ui_handle = ui.as_weak();
         ui.on_stage_time_zone_offset(move |offset, only_missing| {
             let Some(ui) = ui_handle.upgrade() else {
                 return false;
             };
-            let normalized = match normalize_time_zone_offset(offset.as_str()) {
+            let offset_value = numeric_offset_from_choice(offset.as_str());
+            let normalized = match normalize_time_zone_offset(offset_value) {
                 Ok(value) => value,
                 Err(err) => {
-                    ui.set_time_zone_offset_preview(err.into());
+                    show_message(&ui, "Invalid UTC Offset", &err);
                     return false;
                 }
             };
@@ -1792,17 +1728,36 @@ impl GuiRunner for SlintRunner {
             }
             drop(pending);
             if staged_count == 0 {
-                ui.set_time_zone_offset_preview(
-                    "No selected JPEG needs a time-zone offset.".into(),
-                );
+                show_toast(&ui, "No selected JPEG needs a UTC offset.");
                 return false;
             }
             ui.set_metadata_dirty(true);
+            ui.set_selected_utc_offset(
+                if skipped_count == 0 {
+                    format_utc_offset_choice(&normalized)
+                } else {
+                    "Multiple values".to_string()
+                }
+                .into(),
+            );
+            if ui.get_selected_file_count() == 1 {
+                if let Some((displayed, basis)) = display_time_with_offset(
+                    ui.get_taken_date().as_str(),
+                    &normalized,
+                    ui.get_time_display_mode(),
+                ) {
+                    ui.set_selected_media_date(displayed.into());
+                    ui.set_selected_time_interpretation(basis.into());
+                }
+            } else {
+                ui.set_selected_media_date("Multiple values".into());
+                ui.set_selected_time_interpretation(String::new().into());
+            }
             let message = if skipped_count == 0 {
-                format!("Staged time-zone offset for {staged_count} file(s). Ctrl+S to save.")
+                format!("Staged UTC offset for {staged_count} file(s). Ctrl+S to save.")
             } else {
                 format!(
-                    "Staged time-zone offset for {staged_count} file(s); skipped {skipped_count}. Ctrl+S to save."
+                    "Staged UTC offset for {staged_count} file(s); skipped {skipped_count}. Ctrl+S to save."
                 )
             };
             show_toast(&ui, &message);
@@ -2132,7 +2087,7 @@ impl GuiRunner for SlintRunner {
                 } else if matches!(ui.get_selected_media_kind().as_str(), "mp4" | "png") {
                     "Media Date"
                 } else {
-                    "Taken Date"
+                    "Date Taken"
                 };
                 let unable_title = format!("Unable to Set {date_label}");
                 if ui.get_selected_file_count() == 0 {
@@ -2333,7 +2288,7 @@ impl GuiRunner for SlintRunner {
 
                 if pending.is_empty() {
                     let message = if later_count > 0 {
-                        "The earlier file timestamp is later than the existing Taken Date."
+                        "The earlier file timestamp is later than the existing Date Taken."
                     } else {
                         "Created and Modified timestamps could not be read from the selected media files."
                     };
@@ -3280,6 +3235,13 @@ impl GuiRunner for SlintRunner {
 
                 let pending_offset_snapshot = pending_time_zone_offsets_handle.borrow().clone();
                 if !pending_offset_snapshot.is_empty() {
+                    let has_other_changes = !pending_taken_dates.borrow().is_empty()
+                        || !pending_gps_date_times_handle.borrow().is_empty()
+                        || !pending_created_dates_handle.borrow().is_empty()
+                        || !pending_modified_dates_handle.borrow().is_empty()
+                        || !pending_exif_removals_handle.borrow().is_empty()
+                        || !pending_exif_tag_removals_handle.borrow().is_empty()
+                        || has_non_gps_metadata_changes(&ui);
                     let mut saved_count = 0usize;
                     let mut failures = Vec::new();
                     for path in &selected_paths {
@@ -3296,7 +3258,7 @@ impl GuiRunner for SlintRunner {
                                 append_session_log(
                                     &ui,
                                     &format!(
-                                        "Assigned time-zone offset {offset}: {}",
+                                        "Assigned UTC offset {offset}: {}",
                                         path.to_string_lossy()
                                     ),
                                 );
@@ -3304,19 +3266,11 @@ impl GuiRunner for SlintRunner {
                             Err(error) => failures.push((path.clone(), error)),
                         }
                     }
-                    pending_time_zone_offsets_handle.borrow_mut().clear();
-                    ui.set_metadata_dirty(false);
-                    {
-                        let mut app = app_handle.borrow_mut();
-                        app.reload_folder_after_changes(&selected_paths);
-                    }
-                    refresh(selected_path.clone());
-                    if saved_count > 0 {
-                        show_toast(
-                            &ui,
-                            &format!("Saved time-zone offset for {saved_count} file(s)."),
-                        );
-                    }
+                    let failed_paths: HashSet<PathBuf> =
+                        failures.iter().map(|(path, _)| path.clone()).collect();
+                    pending_time_zone_offsets_handle
+                        .borrow_mut()
+                        .retain(|path, _| failed_paths.contains(path));
                     if !failures.is_empty() {
                         show_message(
                             &ui,
@@ -3327,11 +3281,24 @@ impl GuiRunner for SlintRunner {
                             },
                             &format_operation_failures("updated", saved_count, &failures),
                         );
+                        return;
                     }
-                    if filename_changed {
-                        ui.invoke_focus_file_list();
+                    if !has_other_changes {
+                        ui.set_metadata_dirty(false);
+                        {
+                            let mut app = app_handle.borrow_mut();
+                            app.reload_folder_after_changes(&selected_paths);
+                        }
+                        refresh(selected_path.clone());
+                        show_toast(
+                            &ui,
+                            &format!("Saved UTC offset for {saved_count} file(s)."),
+                        );
+                        if filename_changed {
+                            ui.invoke_focus_file_list();
+                        }
+                        return;
                     }
-                    return;
                 }
 
                 let pending_gps_snapshot = pending_gps_date_times_handle.borrow().clone();
@@ -3927,6 +3894,21 @@ impl GuiRunner for SlintRunner {
             let current = ui.get_taken_date().to_string();
             let formatted = auto_format_date_edit(&previous_input.borrow(), &current);
             *previous_input.borrow_mut() = formatted.clone();
+            if ui.get_selected_file_count() == 1 {
+                let offset = ui.get_selected_utc_offset();
+                if let Ok(offset) =
+                    normalize_time_zone_offset(numeric_offset_from_choice(offset.as_str()))
+                {
+                    if let Some((displayed, basis)) = display_time_with_offset(
+                        &formatted,
+                        &offset,
+                        ui.get_time_display_mode(),
+                    ) {
+                        ui.set_selected_media_date(displayed.into());
+                        ui.set_selected_time_interpretation(basis.into());
+                    }
+                }
+            }
             if formatted != current {
                 let formatted_cursor_position = i32::try_from(formatted.len()).unwrap_or(i32::MAX);
                 ui.set_taken_date(formatted.into());
@@ -4060,8 +4042,11 @@ fn set_selected_file(ui: &MainWindow, app: &SlintApp, index: i32) {
         // catches up; do not synchronously reopen the file during navigation.
         metadata.has_exif = true;
     }
+    let recorded_jpeg_date = metadata.taken_date.clone();
     set_loaded_exif_metadata(ui, metadata);
-    if matches!(entry.media_kind.as_str(), "jpeg" | "mp4") {
+    if entry.media_kind == "jpeg" {
+        set_loaded_media_date(ui, recorded_jpeg_date);
+    } else if entry.media_kind == "mp4" {
         set_loaded_media_date(ui, entry.media_date.clone());
     }
     if entry.media_kind == "png" {
@@ -4245,7 +4230,12 @@ fn set_selected_files(ui: &MainWindow, app: &SlintApp) {
     let size_display = selection_display(sizes);
     let created_display = selection_display(created_values);
     let modified_display = selection_display(modified_values);
-    ui.set_selected_name(name_display.value.into());
+    let selected_name = if name_display.status == "Mixed" {
+        format!("{} items selected", selected_entries.len())
+    } else {
+        name_display.value
+    };
+    ui.set_selected_name(selected_name.into());
     ui.set_selected_size(if size_display.status == "Mixed" {
         "<Multiple values>".into()
     } else {
@@ -4552,6 +4542,7 @@ fn set_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
 
 fn set_loaded_exif_metadata(ui: &MainWindow, metadata: ExifMetadata) {
     let gps_date_time = combined_gps_date_time(&metadata.gps_date_stamp, &metadata.gps_time_stamp);
+    ui.set_selected_utc_offset(display_exif_utc_offset(&metadata).into());
     set_exif_metadata(ui, metadata.clone());
     set_metadata_statuses(ui, &metadata);
     ui.set_original_taken_date(metadata.taken_date.into());
@@ -4612,6 +4603,22 @@ fn set_metadata_statuses(ui: &MainWindow, metadata: &ExifMetadata) {
 }
 
 fn set_joined_metadata_statuses(ui: &MainWindow, values: &[ExifMetadata]) {
+    let offsets = selection_display(
+        values
+            .iter()
+            .map(|metadata| exif_time_zone_offset(metadata).unwrap_or("").to_string())
+            .collect(),
+    );
+    ui.set_selected_utc_offset(
+        if offsets.status == "Mixed" {
+            "Multiple values".to_string()
+        } else if offsets.value.is_empty() {
+            "Not set".to_string()
+        } else {
+            format_utc_offset_choice(&offsets.value)
+        }
+        .into(),
+    );
     ui.set_taken_date_status(
         selection_display(
             values
@@ -4837,6 +4844,7 @@ fn set_joined_metadata_statuses(ui: &MainWindow, values: &[ExifMetadata]) {
 }
 
 fn set_large_selection_metadata_statuses(ui: &MainWindow) {
+    ui.set_selected_utc_offset("Multiple values".into());
     ui.set_taken_date_status("Mixed".into());
     ui.set_camera_make_status("Mixed".into());
     ui.set_camera_model_status("Mixed".into());
@@ -5546,11 +5554,15 @@ fn apply_metadata_changes_to_path(
         && pending_taken_dates.is_none()
         && ui.get_taken_date_dirty()
     {
-        Some(media_date_for_storage(
-            path,
-            ui.get_taken_date().as_str(),
-            ui.get_time_display_mode(),
-        )?)
+        Some(if is_jpeg_path(path) {
+            ui.get_taken_date().trim().to_string()
+        } else {
+            media_date_for_storage(
+                path,
+                ui.get_taken_date().as_str(),
+                ui.get_time_display_mode(),
+            )?
+        })
     } else {
         None
     };
@@ -5995,12 +6007,12 @@ fn normalize_time_zone_offset(value: &str) -> Result<String, String> {
         || !bytes[1..3].iter().all(u8::is_ascii_digit)
         || !bytes[4..6].iter().all(u8::is_ascii_digit)
     {
-        return Err("Expected time-zone offset format: +HH:MM or -HH:MM".to_string());
+        return Err("Expected UTC offset format: +HH:MM or -HH:MM".to_string());
     }
     let hours = trimmed[1..3].parse::<u8>().unwrap_or(u8::MAX);
     let minutes = trimmed[4..6].parse::<u8>().unwrap_or(u8::MAX);
     if hours > 14 || minutes > 59 || (hours == 14 && minutes != 0) {
-        return Err("Time-zone offset must be between -14:00 and +14:00.".to_string());
+        return Err("UTC offset must be between -14:00 and +14:00.".to_string());
     }
     Ok(trimmed.to_string())
 }
@@ -6016,97 +6028,74 @@ fn exif_time_zone_offset(metadata: &ExifMetadata) -> Option<&str> {
     (!value.trim().is_empty()).then_some(value.as_str())
 }
 
-fn build_time_zone_offset_preview(
-    paths: &[PathBuf],
-    offset: &str,
-    only_missing: bool,
-    time_display_mode: i32,
-) -> String {
-    let normalized = match normalize_time_zone_offset(offset) {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-    let sign = if normalized.starts_with('-') { -1 } else { 1 };
-    let hours = normalized[1..3].parse::<i32>().unwrap_or(0);
-    let minutes = normalized[4..6].parse::<i32>().unwrap_or(0);
-    let offset_seconds = sign * (hours * 60 + minutes) * 60;
-    let fixed_offset = FixedOffset::east_opt(offset_seconds);
-    let mut applicable = 0usize;
-    let mut existing = 0usize;
-    let mut skipped = 0usize;
-    let mut example = None;
-
-    for path in paths {
-        if !is_jpeg_path(path) {
-            skipped += 1;
-            continue;
-        }
-        let metadata = read_exif_metadata(path);
-        if !metadata.has_exif || metadata.taken_date.trim().is_empty() {
-            skipped += 1;
-            continue;
-        }
-        if exif_time_zone_offset(&metadata).is_some() {
-            existing += 1;
-            if only_missing {
-                continue;
-            }
-        }
-        applicable += 1;
-        if example.is_none() {
-            if let (Some(zone), Ok(recorded)) = (
-                fixed_offset,
-                NaiveDateTime::parse_from_str(&metadata.taken_date, DISPLAY_DATETIME_FORMAT),
-            ) {
-                if let Some(zoned) = zone.from_local_datetime(&recorded).single() {
-                    let utc = zoned.with_timezone(&Utc);
-                    let (display_label, displayed) = if time_display_mode == 1 {
-                        (
-                            "UTC (+00:00)",
-                            utc.format(DISPLAY_DATETIME_FORMAT).to_string(),
-                        )
-                    } else {
-                        let kst = FixedOffset::east_opt(9 * 60 * 60).unwrap();
-                        (
-                            "KST (+09:00)",
-                            utc.with_timezone(&kst)
-                                .format(DISPLAY_DATETIME_FORMAT)
-                                .to_string(),
-                        )
-                    };
-                    example = Some(format!(
-                        "Recorded date/time stays: {}\nAssign offset: {}\nMedia Date shown as {}: {}\nUTC equivalent: {}",
-                        metadata.taken_date,
-                        time_zone_offset_name(&normalized),
-                        display_label,
-                        displayed,
-                        utc.format(DISPLAY_DATETIME_FORMAT)
-                    ));
-                }
-            }
-        }
+fn format_utc_offset_label(offset: &str) -> String {
+    match normalize_time_zone_offset(offset) {
+        Ok(normalized) => format!("UTC{normalized}"),
+        Err(_) if offset.trim().is_empty() => "Not set".to_string(),
+        Err(_) => "Invalid offset".to_string(),
     }
-
-    let overwrite = if !only_missing && existing > 0 {
-        format!(" Existing offsets to overwrite: {existing}.")
-    } else {
-        String::new()
-    };
-    let example = example.unwrap_or_else(|| "No applicable JPEG date was found.".to_string());
-    format!(
-        "Will stage {applicable} file(s); skip {skipped}.{}\n{example}",
-        overwrite
-    )
 }
 
-fn time_zone_offset_name(offset: &str) -> String {
-    match offset {
-        "+09:00" => "KST (UTC+09:00)".to_string(),
-        "+00:00" | "-00:00" => "UTC (+00:00)".to_string(),
-        "+01:00" => "UTC+01:00 (for example CET in winter)".to_string(),
-        "-07:00" => "UTC-07:00 (for example PDT in summer)".to_string(),
-        "-08:00" => "UTC-08:00 (for example PST in winter)".to_string(),
-        value => format!("UTC offset {value}"),
+fn display_exif_utc_offset(metadata: &ExifMetadata) -> String {
+    exif_time_zone_offset(metadata)
+        .map(format_utc_offset_choice)
+        .unwrap_or_else(|| "Not set".to_string())
+}
+
+fn numeric_offset_from_choice(choice: &str) -> &str {
+    choice
+        .rfind("UTC")
+        .and_then(|index| choice.get(index + 3..index + 9))
+        .unwrap_or(choice)
+}
+
+fn format_utc_offset_choice(offset: &str) -> String {
+    let Ok(normalized) = normalize_time_zone_offset(offset) else {
+        return format_utc_offset_label(offset);
+    };
+    match normalized.as_str() {
+        "-08:00" => "PST · United States / Canada · UTC-08:00".to_string(),
+        "-07:00" => "PDT · United States / Canada · UTC-07:00".to_string(),
+        "+00:00" | "-00:00" => "UTC · International · UTC+00:00".to_string(),
+        "+01:00" => "CET · Germany / France / etc. · UTC+01:00".to_string(),
+        "+02:00" => "CEST · Germany / France / etc. · UTC+02:00".to_string(),
+        "+09:00" => "KST · South Korea · UTC+09:00".to_string(),
+        _ => format!("Custom · UTC{normalized}"),
+    }
+}
+
+fn fixed_offset_from_exif(offset: &str) -> Option<FixedOffset> {
+    let sign = if offset.starts_with('-') { -1 } else { 1 };
+    let hours = offset.get(1..3)?.parse::<i32>().ok()?;
+    let minutes = offset.get(4..6)?.parse::<i32>().ok()?;
+    FixedOffset::east_opt(sign * (hours * 60 + minutes) * 60)
+}
+
+fn display_time_with_offset(
+    recorded: &str,
+    source_offset: &str,
+    time_display_mode: i32,
+) -> Option<(String, &'static str)> {
+    let recorded = NaiveDateTime::parse_from_str(recorded.trim(), DISPLAY_DATETIME_FORMAT).ok()?;
+    let source_offset = fixed_offset_from_exif(source_offset)?;
+    let recorded = source_offset.from_local_datetime(&recorded).single()?;
+    if time_display_mode == 1 {
+        Some((
+            recorded
+                .with_timezone(&Utc)
+                .format(DISPLAY_DATETIME_FORMAT)
+                .to_string(),
+            "UTC",
+        ))
+    } else {
+        let kst = FixedOffset::east_opt(9 * 60 * 60)?;
+        Some((
+            recorded
+                .with_timezone(&kst)
+                .format(DISPLAY_DATETIME_FORMAT)
+                .to_string(),
+            "KST",
+        ))
     }
 }
 
@@ -6905,12 +6894,12 @@ fn is_writable_metadata_key(ui: &MainWindow, key: &str) -> bool {
 
 fn exif_key_label(key: &str) -> &'static str {
     match key {
-        "taken_date" => "Taken Date",
-        "media_date" => "Media Date",
+        "taken_date" => "Date Taken",
+        "media_date" => "Media Creation Time",
         "png_creation_time" => "Creation Time",
-        "date_time_original" => "DateTime Original",
-        "date_time_digitized" => "DateTime Digitized",
-        "image_date_time" => "Image Modified DateTime",
+        "date_time_original" => "Date/Time Original",
+        "date_time_digitized" => "Date/Time Digitized",
+        "image_date_time" => "Image Date/Time",
         "camera_make" => "Camera Make",
         "camera_model" => "Camera Model",
         "lens_model" => "Lens Model",
@@ -6918,15 +6907,15 @@ fn exif_key_label(key: &str) -> &'static str {
         "artist" => "Artist",
         "image_description" => "Image Description",
         "copyright" => "Copyright",
-        "exif_version" => "EXIF Version",
+        "exif_version" => "Exif Version",
         "exposure_program" => "Exposure Program",
         "white_balance" => "White Balance",
-        "focal_length_35mm" => "35mm Focal Length",
-        "shutter_speed" => "Shutter Speed",
-        "aperture" => "Aperture",
-        "iso_speed" => "ISO Speed",
+        "focal_length_35mm" => "35 mm Equivalent",
+        "shutter_speed" => "Exposure Time",
+        "aperture" => "F-number",
+        "iso_speed" => "ISO",
         "focal_length" => "Focal Length",
-        "flash_fired" => "Flash Fired",
+        "flash_fired" => "Flash",
         "metering_mode" => "Metering Mode",
         "orientation" => "Orientation",
         "color_space" => "Color Space",
@@ -7058,11 +7047,12 @@ mod tests {
     use super::{
         adjust_datetime_segment, adjust_nonnegative_shift_value, apply_filename_rename_plan,
         auto_format_date_edit, auto_format_date_input, combined_gps_date_time,
-        delete_confirmation_message_with_names, displayed_media_date_to_storage,
+        delete_confirmation_message_with_names, display_time_with_offset,
+        displayed_media_date_to_storage,
         earliest_available_timestamp, estimated_wrapped_line_count, filename_from_media_date,
         filename_from_media_date_with_reserved, gps_date_time_for_shift, gps_utc_to_kst_display,
         large_selection_exif_available, media_date_for_storage, parse_combined_gps_date_time,
-        parse_media_date_shift, preview_info_text, preview_media_kind,
+        numeric_offset_from_choice, parse_media_date_shift, preview_info_text, preview_media_kind,
         rename_name_preserving_extension, selection_index_after_deletion, selection_summary,
         shift_display_datetime, should_mirror_png_date_source, validate_folder_path_input,
         FilenameCollisionResolver, PreviewMediaKind, PreviewResult,
@@ -7070,6 +7060,19 @@ mod tests {
     use chrono::{Local, NaiveDateTime, Utc};
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn inline_time_zone_choice_extracts_offset_and_updates_display_time() {
+        assert_eq!(
+            numeric_offset_from_choice("KST · South Korea · UTC+09:00"),
+            "+09:00"
+        );
+        assert_eq!(numeric_offset_from_choice("+05:30"), "+05:30");
+        assert_eq!(
+            display_time_with_offset("2025-01-19 17:45:59", "-07:00", 2),
+            Some(("2025-01-20 09:45:59".to_string(), "KST"))
+        );
+    }
 
     #[test]
     fn converted_jpeg_display_date_is_restored_to_its_recorded_offset_before_write() {

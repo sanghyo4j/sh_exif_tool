@@ -605,7 +605,7 @@ impl SlintApp {
                     exact_size: if entry.is_dir {
                         "-".to_string()
                     } else {
-                        format!("{} Byte", format_number_with_commas(entry.size))
+                        format!("{} bytes", format_number_with_commas(entry.size))
                     },
                     created: entry
                         .created
