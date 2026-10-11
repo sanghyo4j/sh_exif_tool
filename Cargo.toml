@@ -8,13 +8,28 @@ chrono = "0.4"
 filetime = "0.2"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 slint = { version = "1.9", optional = true }
+windows-sys = { version = "0.61.2", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
-slint-build = "1"
+slint-build = { version = "1", optional = true }
 
 [features]
-default = ["gui-slint"]
-gui-slint = ["dep:slint"]
+default = ["gui-win32"]
+gui-win32 = ["dep:windows-sys"]
+gui-slint = ["dep:slint", "dep:slint-build"]
 
 [package.metadata.slint]
 include-path = ["src/gui_slint"]

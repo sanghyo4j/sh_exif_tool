@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use std::fs;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -115,6 +115,40 @@ pub fn read_exif_metadata(path: &Path) -> ExifMetadata {
     };
 
     parse_tiff(tiff).unwrap_or_default()
+}
+
+/// Copies the complete raw JPEG EXIF APP1 segment from `source` to `target`.
+/// Unknown/vendor tags are preserved because the TIFF payload is not rebuilt.
+pub fn copy_exif_metadata(
+    source: &Path,
+    target: &Path,
+    backup_before_changes: bool,
+) -> Result<(), String> {
+    let source_bytes = fs::read(source).map_err(|err| err.to_string())?;
+    let (source_start, source_end) = find_exif_app1_range(&source_bytes)
+        .ok_or_else(|| "The source JPEG does not contain EXIF metadata.".to_string())?;
+    let source_exif = source_bytes
+        .get(source_start..source_end)
+        .ok_or_else(|| "The source EXIF segment is truncated.".to_string())?;
+    let target_bytes = fs::read(target).map_err(|err| err.to_string())?;
+    let original_file_metadata = fs::metadata(target).map_err(|err| err.to_string())?;
+    let original_created = original_file_metadata.created().ok();
+    let original_modified = original_file_metadata.modified().ok();
+    let updated = replace_or_insert_exif_app1(&target_bytes, source_exif)?;
+
+    if backup_before_changes {
+        let backup_path = exif_backup_path(target);
+        if !backup_path.exists() {
+            fs::copy(target, &backup_path).map_err(|err| err.to_string())?;
+        }
+    }
+    atomic_write_file(target, &updated)?;
+    if let Err(error) = crate::fs::set_file_times(target, original_created, original_modified) {
+        let _ = atomic_write_file(target, &target_bytes);
+        let _ = crate::fs::set_file_times(target, original_created, original_modified);
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub fn extract_embedded_thumbnail(path: &Path) -> Result<PathBuf, String> {
@@ -1230,7 +1264,10 @@ fn build_basic_exif_app1(metadata: &ExifMetadata) -> Result<Vec<u8>, String> {
         .checked_add(8)
         .ok_or_else(|| "EXIF segment is too large.".to_string())?;
     if segment_len > u16::MAX as usize {
-        return Err("EXIF segment is too large for JPEG APP1.".to_string());
+        return Err(format!(
+            "EXIF segment is too large for JPEG APP1 ({segment_len} bytes; maximum {}).",
+            u16::MAX
+        ));
     }
 
     let mut segment = Vec::with_capacity(segment_len + 2);
@@ -1565,6 +1602,14 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
         return Some(format_datetime_for_display(datetime));
     }
 
+    // Timestamp-based camera and messenger names also commonly consist only
+    // of Unix milliseconds (for example, `1561860731719.jpg`). Treat a
+    // bounded 13-digit token as an absolute instant and show it in the local
+    // time basis used by the filename-date workflow.
+    if let Some(datetime) = parse_unix_milliseconds_token(filename) {
+        return Some(format_datetime_for_display(datetime));
+    }
+
     let chars: Vec<char> = filename.chars().collect();
     let mut candidates = Vec::new();
 
@@ -1650,6 +1695,30 @@ pub fn extract_datetime_from_filename(path: &Path) -> Option<String> {
 
     let earliest = candidates.into_iter().min()?;
     Some(format_datetime_for_display(earliest))
+}
+
+fn parse_unix_milliseconds_token(filename: &str) -> Option<NaiveDateTime> {
+    let token = filename.get(..13)?;
+    if !token.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+
+    let suffix = filename.get(13..)?;
+    if !suffix.is_empty() {
+        let suffix_digits = suffix
+            .strip_prefix('-')
+            .or_else(|| suffix.strip_prefix('_'))?;
+        if suffix_digits.is_empty() || !suffix_digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+    }
+
+    let milliseconds = token.parse::<i64>().ok()?;
+    let utc = DateTime::<chrono::Utc>::from_timestamp_millis(milliseconds)?;
+    if !(2000..=2099).contains(&utc.year()) {
+        return None;
+    }
+    Some(utc.with_timezone(&Local).naive_local())
 }
 
 fn parse_prefixed_unix_milliseconds(filename: &str) -> Option<NaiveDateTime> {
@@ -2062,6 +2131,112 @@ fn rewrite_exif_tiff_time_zone_offset(tiff: &[u8], offset: &str) -> Result<Vec<u
     )?;
     output.extend_from_slice(&offset_bytes);
     write_u32_at(&mut output, 4, new_ifd0_offset as u32, endian)?;
+    if output.len().saturating_add(8) <= u16::MAX as usize {
+        return Ok(output);
+    }
+
+    // A nearly-full APP1 may not have enough room to duplicate both IFD0 and
+    // Exif IFD. Keep IFD0 in place, append only the rebuilt Exif IFD, and patch
+    // its existing pointer. This preserves thumbnails and vendor data while
+    // avoiding hundreds of bytes of unnecessary table duplication.
+    rewrite_exif_tiff_time_zone_offset_compact(tiff, offset)
+}
+
+fn rewrite_exif_tiff_time_zone_offset_compact(
+    tiff: &[u8],
+    offset: &str,
+) -> Result<Vec<u8>, String> {
+    let endian = read_tiff_endian(tiff).ok_or_else(|| "Invalid EXIF TIFF header.".to_string())?;
+    let ifd0_offset = read_u32(tiff, 4, endian)
+        .map(|value| value as usize)
+        .ok_or_else(|| "Invalid EXIF IFD0 offset.".to_string())?;
+    let ifd0 = raw_ifd_entries(tiff, ifd0_offset, endian)?;
+    let (exif_pointer_index, exif_pointer_entry) = ifd0
+        .iter()
+        .enumerate()
+        .find(|(_, (tag, _))| *tag == 0x8769)
+        .ok_or_else(|| "EXIF date metadata was not found.".to_string())?;
+    let old_exif_offset = read_u32(&exif_pointer_entry.1, 8, endian)
+        .map(|value| value as usize)
+        .ok_or_else(|| "Invalid Exif IFD pointer.".to_string())?;
+    let old_exif = raw_ifd_entries(tiff, old_exif_offset, endian)?;
+    let old_exif_next = raw_ifd_next_offset(tiff, old_exif_offset, old_exif.len(), endian)?;
+
+    let has_image_date = ifd0.iter().any(|(tag, _)| *tag == 0x0132);
+    let has_original_date = old_exif.iter().any(|(tag, _)| *tag == 0x9003);
+    let has_digitized_date = old_exif.iter().any(|(tag, _)| *tag == 0x9004);
+    if !has_image_date && !has_original_date && !has_digitized_date {
+        return Err("No EXIF date tag is available to receive a time-zone offset.".to_string());
+    }
+
+    let mut entries: Vec<_> = old_exif
+        .into_iter()
+        .filter(|(tag, _)| !matches!(*tag, 0x9010..=0x9012))
+        .collect();
+    let offset_tag_count = usize::from(has_image_date)
+        + usize::from(has_original_date)
+        + usize::from(has_digitized_date);
+    let table_len = 2usize
+        .checked_add(
+            entries
+                .len()
+                .checked_add(offset_tag_count)
+                .and_then(|count| count.checked_mul(12))
+                .ok_or_else(|| "EXIF IFD is too large.".to_string())?,
+        )
+        .and_then(|value| value.checked_add(4))
+        .ok_or_else(|| "EXIF IFD is too large.".to_string())?;
+
+    let compact_len = compact_trailing_tiff_padding_len(tiff, endian);
+    let mut output = tiff[..compact_len].to_vec();
+    if !output.len().is_multiple_of(2) {
+        output.push(0);
+    }
+    let new_exif_offset = output.len();
+    let value_offset = new_exif_offset
+        .checked_add(table_len)
+        .ok_or_else(|| "EXIF is too large.".to_string())?;
+    let mut offset_bytes = offset.trim().as_bytes().to_vec();
+    offset_bytes.push(0);
+    for (tag, present) in [
+        (0x9010, has_image_date),
+        (0x9011, has_original_date),
+        (0x9012, has_digitized_date),
+    ] {
+        if present {
+            entries.push((
+                tag,
+                make_tiff_entry(
+                    tag,
+                    2,
+                    offset_bytes.len() as u32,
+                    value_offset as u32,
+                    endian,
+                ),
+            ));
+        }
+    }
+    entries.sort_by_key(|(tag, _)| *tag);
+    append_raw_ifd(
+        &mut output,
+        new_exif_offset,
+        &entries,
+        old_exif_next,
+        endian,
+    )?;
+    output.extend_from_slice(&offset_bytes);
+
+    let pointer_value_offset = ifd0_offset
+        .checked_add(2)
+        .and_then(|value| value.checked_add(exif_pointer_index.checked_mul(12)?))
+        .and_then(|value| value.checked_add(8))
+        .ok_or_else(|| "Invalid Exif IFD pointer offset.".to_string())?;
+    write_u32_at(
+        &mut output,
+        pointer_value_offset,
+        u32::try_from(new_exif_offset).map_err(|_| "EXIF data is too large.".to_string())?,
+        endian,
+    )?;
     Ok(output)
 }
 
@@ -2321,7 +2496,10 @@ fn build_exif_app1_from_tiff(tiff: &[u8]) -> Result<Vec<u8>, String> {
         .checked_add(8)
         .ok_or_else(|| "EXIF segment is too large.".to_string())?;
     if segment_len > u16::MAX as usize {
-        return Err("EXIF segment is too large for JPEG APP1.".to_string());
+        return Err(format!(
+            "EXIF segment is too large for JPEG APP1 ({segment_len} bytes; maximum {}).",
+            u16::MAX
+        ));
     }
     let mut segment = Vec::with_capacity(segment_len + 2);
     segment.extend_from_slice(&[0xff, 0xe1]);
@@ -3506,6 +3684,41 @@ mod tests {
     }
 
     #[test]
+    fn extracts_standalone_unix_milliseconds_from_filename() {
+        let milliseconds = 1_561_860_731_719;
+        let expected = DateTime::<chrono::Utc>::from_timestamp_millis(milliseconds)
+            .unwrap()
+            .with_timezone(&Local)
+            .format(DISPLAY_DATETIME_FORMAT)
+            .to_string();
+        assert_eq!(
+            extract_datetime_from_filename(Path::new("1561860731719.jpg")).as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn extracts_unix_milliseconds_with_sequence_suffix() {
+        let milliseconds = 1_568_646_135_026;
+        let expected = DateTime::<chrono::Utc>::from_timestamp_millis(milliseconds)
+            .unwrap()
+            .with_timezone(&Local)
+            .format(DISPLAY_DATETIME_FORMAT)
+            .to_string();
+        for filename in [
+            "1568646135026-0.jpg",
+            "1568646135026-10.jpg",
+            "1568646135026_14.jpg",
+        ] {
+            assert_eq!(
+                extract_datetime_from_filename(Path::new(filename)).as_deref(),
+                Some(expected.as_str()),
+                "failed to recognize {filename}"
+            );
+        }
+    }
+
+    #[test]
     fn extracts_date_only_from_filename() {
         assert_eq!(
             extract_datetime_from_filename(Path::new("20171212_IMG_5582.jpg")).as_deref(),
@@ -3874,6 +4087,36 @@ mod tests {
     }
 
     #[test]
+    fn adds_offset_to_nearly_full_app1_without_discarding_nonzero_tail_data() {
+        let path = std::env::temp_dir().join(format!(
+            "sh148_nearly_full_app1_offset_{}.jpg",
+            std::process::id()
+        ));
+        let mut jpeg = minimal_jpeg_with_datetime_original("2019:03:05 23:28:42");
+        let (segment_start, segment_end) = find_exif_app1_range(&jpeg).unwrap();
+        let target_segment_bytes = 65_130usize;
+        let padding = target_segment_bytes - (segment_end - segment_start);
+        jpeg.splice(segment_end..segment_end, std::iter::repeat_n(0xa5, padding));
+        jpeg[segment_start + 2..segment_start + 4].copy_from_slice(
+            &u16::try_from(target_segment_bytes - 2)
+                .unwrap()
+                .to_be_bytes(),
+        );
+        std::fs::write(&path, jpeg).unwrap();
+
+        write_time_zone_offset_preserving_exif(&path, "+09:00", false).unwrap();
+
+        let written = read_exif_metadata(&path);
+        assert_eq!(written.date_time_original, "2019-03-05 23:28:42");
+        assert_eq!(written.offset_time_original, "+09:00");
+        assert!(std::fs::read(&path)
+            .unwrap()
+            .windows(16)
+            .any(|window| window.iter().all(|byte| *byte == 0xa5)));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn individual_tag_removal_preserves_other_raw_exif_entries() {
         let path = std::env::temp_dir().join(format!(
             "sh148_exif_file_tool_remove_one_tag_test_{}.jpg",
@@ -4055,6 +4298,23 @@ mod tests {
         assert!(!read_exif_metadata(&path).has_exif);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn copies_complete_exif_block_between_jpegs() {
+        let base = std::env::temp_dir();
+        let source = base.join(format!("sh148_exif_copy_source_{}.jpg", std::process::id()));
+        let target = base.join(format!("sh148_exif_copy_target_{}.jpg", std::process::id()));
+        let _ = std::fs::remove_file(&source);
+        let _ = std::fs::remove_file(&target);
+        std::fs::write(&source, minimal_jpeg_with_camera_make("Canon")).unwrap();
+        std::fs::write(&target, minimal_jpeg_with_camera_make("Sony")).unwrap();
+
+        copy_exif_metadata(&source, &target, false).unwrap();
+
+        assert_eq!(read_exif_metadata(&target).camera_make, "Canon");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(target);
     }
 
     fn minimal_jpeg_with_datetime_original(value: &str) -> Vec<u8> {

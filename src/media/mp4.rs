@@ -2,7 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
 use super::MediaScanResult;
 
@@ -112,6 +112,84 @@ pub(super) fn write_media_date(path: &Path, display_value: &str) -> Result<(), S
     if let Err(err) = crate::fs::set_file_times(path, original_created, original_modified) {
         let _ = rollback_creation_time_values(path, &targets, original_created, original_modified);
         return Err(err);
+    }
+    Ok(())
+}
+
+pub(super) fn write_media_date_with_offset(
+    path: &Path,
+    wall_clock_value: &str,
+    offset_minutes: i32,
+) -> Result<(), String> {
+    let datetime = parse_display_datetime_or_date(wall_clock_value).ok_or_else(|| {
+        "Media Date must be formatted as YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.".to_string()
+    })?;
+    let offset = FixedOffset::east_opt(offset_minutes * 60)
+        .ok_or_else(|| "Invalid MP4 time-basis offset.".to_string())?;
+    let absolute = offset
+        .from_local_datetime(&datetime)
+        .single()
+        .ok_or_else(|| {
+            "Media Date is ambiguous or invalid for the selected time basis.".to_string()
+        })?;
+    let expected_utc = absolute.with_timezone(&Utc).timestamp();
+    let quicktime_seconds = expected_utc
+        .checked_add(QUICKTIME_UNIX_EPOCH_OFFSET)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "Media Date is outside the QuickTime time range.".to_string())?
+        as u64;
+
+    let original_metadata = path.metadata().map_err(|err| err.to_string())?;
+    let original_len = original_metadata.len();
+    let original_created = original_metadata.created().ok();
+    let original_modified = original_metadata.modified().ok();
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|err| err.to_string())?;
+    let allow_quicktime_without_ftyp = is_mov_path(path);
+    let targets = find_creation_time_fields(&mut file, allow_quicktime_without_ftyp)?;
+    if targets.is_empty() {
+        return Err("No writable ISO media creation time field was found.".to_string());
+    }
+    if targets
+        .iter()
+        .any(|field| field.width == 4 && quicktime_seconds > u32::MAX as u64)
+    {
+        return Err(
+            "Media Date is outside the range of an existing version 0 date field.".to_string(),
+        );
+    }
+    for field in &targets {
+        if let Err(error) = write_creation_time_value(&mut file, field, quicktime_seconds) {
+            drop(file);
+            let _ =
+                rollback_creation_time_values(path, &targets, original_created, original_modified);
+            return Err(error);
+        }
+    }
+    if let Err(error) = file.flush() {
+        drop(file);
+        let _ = rollback_creation_time_values(path, &targets, original_created, original_modified);
+        return Err(error.to_string());
+    }
+    drop(file);
+    if path.metadata().map_err(|err| err.to_string())?.len() != original_len {
+        let _ = rollback_creation_time_values(path, &targets, original_created, original_modified);
+        return Err("File size changed unexpectedly while writing Media Date.".to_string());
+    }
+    let mut verification_file = File::open(path).map_err(|err| err.to_string())?;
+    let written = scan(&mut verification_file, allow_quicktime_without_ftyp)?;
+    if written.media_date_utc != Some(expected_utc) {
+        drop(verification_file);
+        let _ = rollback_creation_time_values(path, &targets, original_created, original_modified);
+        return Err("MP4 Time Basis verification failed.".to_string());
+    }
+    drop(verification_file);
+    if let Err(error) = crate::fs::set_file_times(path, original_created, original_modified) {
+        let _ = rollback_creation_time_values(path, &targets, original_created, original_modified);
+        return Err(error);
     }
     Ok(())
 }
@@ -760,6 +838,29 @@ mod tests {
             .to_string();
         assert_eq!(result.media_date, expected);
         assert_eq!(result.metadata_status, "O");
+    }
+
+    #[test]
+    fn writes_mp4_wall_clock_using_an_explicit_time_basis() {
+        let initial_unix = 1_344_992_400u32;
+        let initial_quicktime = initial_unix + QUICKTIME_UNIX_EPOCH_OFFSET as u32;
+        let mvhd = atom(b"mvhd", &version_zero_date_payload(initial_quicktime));
+        let moov = atom(b"moov", &mvhd);
+        let ftyp = atom(b"ftyp", b"isom\0\0\0\0isom");
+        let path = std::env::temp_dir().join(format!(
+            "sh148_mp4_explicit_basis_{}.mp4",
+            std::process::id()
+        ));
+        std::fs::write(&path, [ftyp, moov].concat()).unwrap();
+
+        write_media_date_with_offset(&path, "2025-01-19 17:46:00", -7 * 60).unwrap();
+        let result = scan_media_file(&path);
+        let expected = DateTime::parse_from_rfc3339("2025-01-19T17:46:00-07:00")
+            .unwrap()
+            .timestamp();
+        assert_eq!(result.media_date_utc, Some(expected));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

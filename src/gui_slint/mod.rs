@@ -22,7 +22,8 @@ use crate::fs::{
 use crate::media::{
     is_jpeg_path, is_mp4_path, is_mpeg_ts_path, is_png_path, is_video_path, read_png_date_sources,
     remove_png_date_metadata, remove_png_date_source, scan_media_file, write_mp4_media_date,
-    write_png_date_sources, write_png_media_date, MediaScanJob, PngDateSources,
+    write_mp4_media_date_with_offset, write_png_date_sources, write_png_media_date, MediaScanJob,
+    PngDateSources,
 };
 use crate::GuiRunner;
 use chrono::{
@@ -225,11 +226,15 @@ impl PreviewController {
 
     fn update(&self, ui: &MainWindow, app: &SlintApp) {
         let started_at = Instant::now();
-        let selected = selected_file_paths(app);
-        let Some(path) = selected
+        if app.selected_indices().len() != 1 {
+            self.clear(ui);
+            return;
+        }
+        let Some(path) = app
+            .selected_paths()
             .into_iter()
             .next()
-            .filter(|_| app.selected_indices().len() == 1)
+            .filter(|path| path.is_file())
         else {
             self.clear(ui);
             return;
@@ -335,12 +340,17 @@ fn start_preview_worker(
             let started_at = Instant::now();
             let kind = preview_media_kind(&request.path);
             let initial_dimensions = preview_dimensions(&request.path);
-            let result =
-                kind.and_then(|kind| decode_preview(&request.path, kind, initial_dimensions));
+            let result = match kind {
+                Some(kind) => decode_preview(&request.path, kind, initial_dimensions),
+                None => Err(
+                    "Preview format detection failed: the file signature is not JPEG or PNG."
+                        .to_string(),
+                ),
+            };
             if current_generation.load(Ordering::Acquire) != request.generation {
                 continue;
             }
-            if let Some(value) = result.as_ref() {
+            if let Ok(value) = result.as_ref() {
                 cache
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -358,13 +368,13 @@ fn start_preview_worker(
                     return;
                 };
                 match result {
-                    Some(value) => {
+                    Ok(value) => {
                         apply_preview_result(&ui, &value);
                         ui.set_preview_info(preview_info_text(&value, started_at.elapsed()).into());
                     }
-                    None => {
+                    Err(error) => {
                         ui.set_preview_ready(false);
-                        ui.set_preview_status("Image could not be decoded".into());
+                        ui.set_preview_status(error.into());
                         ui.set_preview_info(
                             format!(
                                 "Preview unavailable (failed in {} ms)",
@@ -417,26 +427,30 @@ fn decode_preview(
     path: &std::path::Path,
     kind: PreviewMediaKind,
     source_dimensions: Option<(u32, u32)>,
-) -> Option<PreviewResult> {
+) -> Result<PreviewResult, String> {
     match decode_preview_image(path) {
-        Ok(image) => Some(preview_result_from_image(
+        Ok(image) => Ok(preview_result_from_image(
             image,
             String::new(),
             source_dimensions,
         )),
-        Err(_) if kind == PreviewMediaKind::Jpeg => {
-            let thumbnail = read_embedded_thumbnail(path).ok()?;
-            let mut image = image::load_from_memory(&thumbnail).ok()?;
+        Err(full_error) if kind == PreviewMediaKind::Jpeg => {
+            let thumbnail = read_embedded_thumbnail(path).map_err(|thumbnail_error| {
+                format!("JPEG decoder: {full_error}. EXIF thumbnail fallback: {thumbnail_error}")
+            })?;
+            let mut image = image::load_from_memory(&thumbnail).map_err(|thumbnail_error| {
+                format!("JPEG decoder: {full_error}. EXIF thumbnail decoder: {thumbnail_error}")
+            })?;
             if let Some(orientation) = jpeg_orientation(path) {
                 image.apply_orientation(orientation);
             }
-            Some(preview_result_from_image(
+            Ok(preview_result_from_image(
                 image,
                 "EXIF Thumbnail — full image could not be decoded".to_string(),
                 source_dimensions,
             ))
         }
-        Err(_) => None,
+        Err(error) => Err(format!("Image decoder: {error}")),
     }
 }
 
@@ -523,6 +537,7 @@ fn selection_index_after_deletion(selection_index: i32, remaining_count: usize) 
 impl GuiRunner for SlintRunner {
     fn run() -> Result<(), Box<dyn std::error::Error>> {
         let ui = MainWindow::new()?;
+        ui.set_app_title(crate::APP_TITLE.into());
         ui.global::<Palette>().set_color_scheme(ColorScheme::Light);
         let app = Rc::new(RefCell::new(SlintApp::new()));
         let preview_controller = PreviewController::new();
@@ -578,6 +593,8 @@ impl GuiRunner for SlintRunner {
             let scan_total = scan_total.clone();
             let scan_completed = scan_completed.clone();
             let preview = preview_controller.clone();
+            let pending_offsets = pending_time_zone_offsets.clone();
+            let pending_media_dates = pending_filename_taken_dates.clone();
             let timer_handle = Rc::downgrade(&scan_refresh_timer);
             scan_refresh_timer.start(
                 slint::TimerMode::Repeated,
@@ -590,14 +607,10 @@ impl GuiRunner for SlintRunner {
                             if !scan_active.load(Ordering::Acquire) {
                                 app.complete_dynamic_sort();
                             }
-                            if app.show_only_missing_media_date
-                                || app.show_only_missing_time_zone_offset
-                                || app.show_only_duplicate_media_date
-                            {
-                                // Rows can disappear as their Media Date is discovered. Numeric
-                                // selections would otherwise point at a different file.
-                                app.select_ui_index(-1, false, false);
-                            }
+                            // A metadata filter can insert/remove rows on every scan batch.
+                            // Re-resolve the selection from its stable paths before replacing
+                            // the UI model, rather than clearing it or trusting stale indices.
+                            app.reconcile_selection_with_visible_files();
                             set_file_counts(&ui, &app);
                             update_scan_status(
                                 &ui,
@@ -609,6 +622,8 @@ impl GuiRunner for SlintRunner {
                             ui.set_sort_direction(app.sort_direction);
                             ui.set_files(app.get_ui_model());
                             set_selected_files(&ui, &app);
+                            reapply_staged_media_date(&ui, &app, &pending_media_dates.borrow());
+                            reapply_staged_time_zone_offset(&ui, &app, &pending_offsets.borrow());
                             if !scan_active.load(Ordering::Acquire) {
                                 ui.invoke_report_file_visible_range();
                             }
@@ -759,7 +774,7 @@ impl GuiRunner for SlintRunner {
             {
                 let mut app = app_handle.borrow_mut();
                 app.file_filter = filter;
-                app.selected_indices.clear();
+                app.clear_selection();
             }
             refresh(None);
         });
@@ -826,7 +841,7 @@ impl GuiRunner for SlintRunner {
                 let mut app = app_handle.borrow_mut();
                 enabled = !app.show_only_missing_media_date;
                 app.show_only_missing_media_date = enabled;
-                app.selected_indices.clear();
+                app.reconcile_selection_with_visible_files();
             }
             if let Some(ui) = ui_handle.upgrade() {
                 ui.set_show_only_missing_media_date(enabled);
@@ -843,7 +858,7 @@ impl GuiRunner for SlintRunner {
                 let mut app = app_handle.borrow_mut();
                 enabled = !app.show_only_missing_time_zone_offset;
                 app.show_only_missing_time_zone_offset = enabled;
-                app.selected_indices.clear();
+                app.reconcile_selection_with_visible_files();
             }
             if let Some(ui) = ui_handle.upgrade() {
                 ui.set_show_only_missing_time_zone_offset(enabled);
@@ -860,7 +875,7 @@ impl GuiRunner for SlintRunner {
                 let mut app = app_handle.borrow_mut();
                 enabled = !app.show_only_duplicate_media_date;
                 app.show_only_duplicate_media_date = enabled;
-                app.selected_indices.clear();
+                app.reconcile_selection_with_visible_files();
             }
             if let Some(ui) = ui_handle.upgrade() {
                 ui.set_show_only_duplicate_media_date(enabled);
@@ -1423,9 +1438,7 @@ impl GuiRunner for SlintRunner {
             let Some(ui) = ui_handle.upgrade() else {
                 return false;
             };
-            let has_unsaved_edits = ui.get_metadata_dirty()
-                || ui.get_selected_name_dirty()
-                || !pending_renames.borrow().is_empty()
+            let has_staged_edits = !pending_renames.borrow().is_empty()
                 || !pending_taken_dates.borrow().is_empty()
                 || !pending_gps_date_times_handle.borrow().is_empty()
                 || !pending_time_zone_offsets_handle.borrow().is_empty()
@@ -1433,7 +1446,14 @@ impl GuiRunner for SlintRunner {
                 || !pending_modified_dates_handle.borrow().is_empty()
                 || !pending_exif_removals_handle.borrow().is_empty()
                 || !pending_exif_tag_removals_handle.borrow().is_empty();
-            if has_unsaved_edits {
+            // A directly edited Details value still lives only in the current
+            // controls. Batch operations, however, are already stored by path
+            // in the pending maps and must not lock file navigation.
+            if selection_is_blocked_by_unmapped_edit(
+                ui.get_metadata_dirty(),
+                ui.get_selected_name_dirty(),
+                has_staged_edits,
+            ) {
                 show_toast(
                     &ui,
                     "Save with Ctrl+S or Revert before changing the selection.",
@@ -1461,6 +1481,18 @@ impl GuiRunner for SlintRunner {
             }
             set_selected_files(&ui, &app);
             sync_file_row_media_fields(&ui, &app, index);
+            reapply_staged_media_date(&ui, &app, &pending_taken_dates.borrow());
+            reapply_staged_time_zone_offset(&ui, &app, &pending_time_zone_offsets_handle.borrow());
+            if let Some(path) = app.path_for_ui_index(index) {
+                if let Some(name) = pending_renames.borrow().get(&path) {
+                    ui.set_selected_name(name.as_str().into());
+                    ui.set_selected_name_status("Modified".into());
+                    ui.set_selected_name_dirty(true);
+                }
+            }
+            if has_staged_edits {
+                ui.set_metadata_dirty(true);
+            }
             update_scan_priority_paths(&app, &priority_paths, visible_range.get());
             preview.update(&ui, &app);
             true
@@ -1656,6 +1688,9 @@ impl GuiRunner for SlintRunner {
         let ui_handle = ui.as_weak();
         ui.on_request_shift_media_date(move || {
             if let Some(ui) = ui_handle.upgrade() {
+                // This dialog is shared with GPS shifting. Always reset the mode so a
+                // previous GPS operation cannot redirect a Media Date shift.
+                ui.set_shift_gps_date_time_mode(false);
                 let selected_paths = {
                     let app = app_handle.borrow();
                     selected_file_paths(&app)
@@ -1702,19 +1737,45 @@ impl GuiRunner for SlintRunner {
                     return false;
                 }
             };
-            let selected_paths = {
+            let selected_entries = {
                 let app = app_handle.borrow();
-                selected_file_paths(&app)
+                app.selected_entry_details()
             };
             let mut staged_count = 0usize;
             let mut skipped_count = 0usize;
+            let mut scanning_count = 0usize;
+            let mut first_mp4_preview = None;
             let mut pending = pending_offsets.borrow_mut();
-            for path in selected_paths {
+            for entry in selected_entries {
+                let Some(path) = entry.path else {
+                    skipped_count += 1;
+                    continue;
+                };
+                if is_mp4_path(&path) {
+                    let recorded = entry.recorded_media_date.as_str();
+                    if recorded.is_empty() || recorded == "Scanning..." {
+                        scanning_count += 1;
+                        continue;
+                    }
+                    if recorded == "-" || recorded.trim().is_empty() {
+                        skipped_count += 1;
+                        continue;
+                    }
+                    if first_mp4_preview.is_none() {
+                        first_mp4_preview = mp4_utc_storage_preview(recorded, &normalized).ok();
+                    }
+                    pending.insert(path, normalized.clone());
+                    staged_count += 1;
+                    continue;
+                }
                 if !is_jpeg_path(&path) {
                     skipped_count += 1;
                     continue;
                 }
-                let metadata = read_exif_metadata(&path);
+                let Some(metadata) = entry.exif_metadata else {
+                    scanning_count += 1;
+                    continue;
+                };
                 if !metadata.has_exif || metadata.taken_date.trim().is_empty() {
                     skipped_count += 1;
                     continue;
@@ -1728,7 +1789,14 @@ impl GuiRunner for SlintRunner {
             }
             drop(pending);
             if staged_count == 0 {
-                show_toast(&ui, "No selected JPEG needs a UTC offset.");
+                let message = if scanning_count > 0 {
+                    format!(
+                        "No file was staged; {scanning_count} selected file(s) are still scanning."
+                    )
+                } else {
+                    "No selected JPEG or MP4 file can use that time basis.".to_string()
+                };
+                show_toast(&ui, &message);
                 return false;
             }
             ui.set_metadata_dirty(true);
@@ -1741,23 +1809,27 @@ impl GuiRunner for SlintRunner {
                 .into(),
             );
             if ui.get_selected_file_count() == 1 {
-                if let Some((displayed, basis)) = display_time_with_offset(
-                    ui.get_taken_date().as_str(),
-                    &normalized,
-                    ui.get_time_display_mode(),
-                ) {
-                    ui.set_selected_media_date(displayed.into());
-                    ui.set_selected_time_interpretation(basis.into());
-                }
+                // A basis describes the existing wall-clock value; staging it must not make
+                // the editor appear to move before save.
+                ui.set_selected_media_date(ui.get_taken_date());
+                ui.set_selected_time_interpretation(
+                    if ui.get_selected_media_kind().as_str() == "mp4" {
+                        first_mp4_preview
+                            .unwrap_or_else(|| format!("Staged time basis: UTC{normalized}"))
+                    } else {
+                        format!("Recorded local time (UTC{normalized})")
+                    }
+                    .into(),
+                );
             } else {
                 ui.set_selected_media_date("Multiple values".into());
                 ui.set_selected_time_interpretation(String::new().into());
             }
-            let message = if skipped_count == 0 {
-                format!("Staged UTC offset for {staged_count} file(s). Ctrl+S to save.")
+            let message = if skipped_count == 0 && scanning_count == 0 {
+                format!("Staged time basis for {staged_count} file(s). Ctrl+S to save.")
             } else {
                 format!(
-                    "Staged UTC offset for {staged_count} file(s); skipped {skipped_count}. Ctrl+S to save."
+                    "Staged time basis for {staged_count} file(s); skipped {skipped_count}, still scanning {scanning_count}. Ctrl+S to save."
                 )
             };
             show_toast(&ui, &message);
@@ -3235,30 +3307,51 @@ impl GuiRunner for SlintRunner {
 
                 let pending_offset_snapshot = pending_time_zone_offsets_handle.borrow().clone();
                 if !pending_offset_snapshot.is_empty() {
-                    let has_other_changes = !pending_taken_dates.borrow().is_empty()
-                        || !pending_gps_date_times_handle.borrow().is_empty()
-                        || !pending_created_dates_handle.borrow().is_empty()
-                        || !pending_modified_dates_handle.borrow().is_empty()
-                        || !pending_exif_removals_handle.borrow().is_empty()
-                        || !pending_exif_tag_removals_handle.borrow().is_empty()
-                        || has_non_gps_metadata_changes(&ui);
                     let mut saved_count = 0usize;
                     let mut failures = Vec::new();
                     for path in &selected_paths {
                         let Some(offset) = pending_offset_snapshot.get(path) else {
                             continue;
                         };
-                        match write_time_zone_offset_preserving_exif(
-                            path,
-                            offset,
-                            ui.get_backup_before_changes(),
-                        ) {
+                        let result = if is_mp4_path(path) {
+                            let scan = scan_media_file(path);
+                            let staged_date = pending_taken_dates.borrow().get(path).cloned();
+                            let edited_date = (selected_paths.len() == 1
+                                && ui.get_taken_date_dirty())
+                            .then(|| ui.get_taken_date().trim().to_string());
+                            let recorded = if let Some(value) = staged_date.or(edited_date) {
+                                value
+                            } else if scan.recorded_media_date.trim().is_empty() {
+                                scan.media_date.clone()
+                            } else {
+                                scan.recorded_media_date.clone()
+                            };
+                            numeric_offset_minutes(offset).and_then(|minutes| {
+                                write_mp4_media_date_with_offset(path, &recorded, minutes)
+                            })
+                        } else {
+                            write_time_zone_offset_preserving_exif(
+                                path,
+                                offset,
+                                ui.get_backup_before_changes(),
+                            )
+                        };
+                        match result {
                             Ok(()) => {
                                 saved_count += 1;
+                                if is_mp4_path(path) {
+                                    // The MP4 writer has already applied both the edited wall
+                                    // clock and its interpretation basis in one UTC write. Do
+                                    // not let the generic Media Date writer overwrite it later.
+                                    pending_taken_dates.borrow_mut().remove(path);
+                                    if selected_paths.len() == 1 {
+                                        ui.set_taken_date_dirty(false);
+                                    }
+                                }
                                 append_session_log(
                                     &ui,
                                     &format!(
-                                        "Assigned UTC offset {offset}: {}",
+                                        "Assigned time basis UTC{offset}: {}",
                                         path.to_string_lossy()
                                     ),
                                 );
@@ -3266,6 +3359,13 @@ impl GuiRunner for SlintRunner {
                             Err(error) => failures.push((path.clone(), error)),
                         }
                     }
+                    let has_other_changes = !pending_taken_dates.borrow().is_empty()
+                        || !pending_gps_date_times_handle.borrow().is_empty()
+                        || !pending_created_dates_handle.borrow().is_empty()
+                        || !pending_modified_dates_handle.borrow().is_empty()
+                        || !pending_exif_removals_handle.borrow().is_empty()
+                        || !pending_exif_tag_removals_handle.borrow().is_empty()
+                        || has_non_gps_metadata_changes(&ui);
                     let failed_paths: HashSet<PathBuf> =
                         failures.iter().map(|(path, _)| path.clone()).collect();
                     pending_time_zone_offsets_handle
@@ -3290,10 +3390,7 @@ impl GuiRunner for SlintRunner {
                             app.reload_folder_after_changes(&selected_paths);
                         }
                         refresh(selected_path.clone());
-                        show_toast(
-                            &ui,
-                            &format!("Saved UTC offset for {saved_count} file(s)."),
-                        );
+                        show_toast(&ui, &format!("Saved time basis for {saved_count} file(s)."));
                         if filename_changed {
                             ui.invoke_focus_file_list();
                         }
@@ -3899,11 +3996,9 @@ impl GuiRunner for SlintRunner {
                 if let Ok(offset) =
                     normalize_time_zone_offset(numeric_offset_from_choice(offset.as_str()))
                 {
-                    if let Some((displayed, basis)) = display_time_with_offset(
-                        &formatted,
-                        &offset,
-                        ui.get_time_display_mode(),
-                    ) {
+                    if let Some((displayed, basis)) =
+                        display_time_with_offset(&formatted, &offset, ui.get_time_display_mode())
+                    {
                         ui.set_selected_media_date(displayed.into());
                         ui.set_selected_time_interpretation(basis.into());
                     }
@@ -3923,7 +4018,7 @@ impl GuiRunner for SlintRunner {
         });
 
         ui.on_adjust_shift_value(move |value, delta| {
-            adjust_nonnegative_shift_value(value.as_str(), delta).into()
+            adjust_signed_shift_value(value.as_str(), delta).into()
         });
 
         let previous_input = previous_png_creation_time_input.clone();
@@ -4048,6 +4143,14 @@ fn set_selected_file(ui: &MainWindow, app: &SlintApp, index: i32) {
         set_loaded_media_date(ui, recorded_jpeg_date);
     } else if entry.media_kind == "mp4" {
         set_loaded_media_date(ui, entry.media_date.clone());
+        ui.set_selected_utc_offset(
+            entry
+                .recorded_offset_minutes
+                .map(format_minutes_offset)
+                .map(|offset| format_utc_offset_choice(&offset))
+                .unwrap_or_else(|| "Not set".to_string())
+                .into(),
+        );
     }
     if entry.media_kind == "png" {
         set_loaded_media_date(ui, entry.media_date);
@@ -5132,10 +5235,26 @@ fn join_metadata(values: &[ExifMetadata]) -> ExifMetadata {
 }
 
 fn show_message(ui: &MainWindow, title: &str, message: &str) {
+    // Replace any operation modal instead of stacking an error dialog over it.
+    // Otherwise dismissing the error can reveal an invisible/forgotten input
+    // blocker and make the file table appear frozen.
+    ui.set_shift_media_date_visible(false);
+    ui.set_confirm_delete_visible(false);
+    ui.set_confirm_metadata_paste_visible(false);
+    ui.set_confirm_trailing_rename_visible(false);
+    ui.set_confirm_date_overwrite_visible(false);
     ui.set_message_title(title.into());
     ui.set_message_text(message.into());
     ui.set_message_visible(true);
     append_session_log(ui, &format!("{title}: {message}"));
+}
+
+fn selection_is_blocked_by_unmapped_edit(
+    metadata_dirty: bool,
+    name_dirty: bool,
+    has_path_staged_edits: bool,
+) -> bool {
+    (metadata_dirty || name_dirty) && !has_path_staged_edits
 }
 
 fn set_file_counts(ui: &MainWindow, app: &SlintApp) {
@@ -5335,9 +5454,8 @@ fn remap_hash_set_paths(values: &mut HashSet<PathBuf>, renames: &[(PathBuf, Path
 }
 
 fn selected_file_paths(app: &SlintApp) -> Vec<PathBuf> {
-    app.selected_indices()
-        .iter()
-        .filter_map(|index| app.path_for_ui_index(*index))
+    app.selected_paths()
+        .into_iter()
         .filter(|path| path.is_file())
         .collect()
 }
@@ -5356,43 +5474,39 @@ fn remove_supported_metadata(
 }
 
 fn selected_recyclable_paths(app: &SlintApp) -> Vec<PathBuf> {
-    app.selected_indices()
-        .iter()
-        .filter(|index| **index > 0)
-        .filter_map(|index| app.path_for_ui_index(*index))
+    app.selected_paths()
+        .into_iter()
         .filter(|path| path.exists())
         .collect()
 }
 
 fn update_delete_confirmation_message(ui: &MainWindow, indices: &[i32]) {
     let model = ui.get_files();
-    let names: Vec<String> = indices
+    const MAX_DISPLAYED_NAMES: usize = 5;
+    let displayed_name_values: Vec<String> = indices
         .iter()
         .filter(|index| **index > 0)
+        .take(MAX_DISPLAYED_NAMES)
         .filter_map(|index| usize::try_from(*index).ok())
         .filter_map(|index| model.row_data(index))
         .map(|row| row.name.to_string().replace(['\r', '\n'], " "))
         .collect();
-    const MAX_DISPLAYED_NAMES: usize = 5;
-    let displayed_names = names
-        .iter()
-        .take(MAX_DISPLAYED_NAMES)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
-    let more_text = if names.len() > MAX_DISPLAYED_NAMES {
-        format!("...and {} more", names.len() - MAX_DISPLAYED_NAMES)
+    let selected_count = indices.iter().filter(|index| **index > 0).count();
+    let displayed_names = displayed_name_values.join("\n");
+    let more_text = if selected_count > MAX_DISPLAYED_NAMES {
+        format!("...and {} more", selected_count - MAX_DISPLAYED_NAMES)
     } else {
         String::new()
     };
-    let prompt = if names.len() == 1 {
+    let prompt = if selected_count == 1 {
         "Send this item to the Recycle Bin?".to_string()
     } else {
-        format!("Send these {} items to the Recycle Bin?", names.len())
+        format!("Send these {selected_count} items to the Recycle Bin?")
     };
     let list_lines =
         estimated_wrapped_line_count(&displayed_names, 48) + usize::from(!more_text.is_empty());
-    let message = delete_confirmation_message_with_names(&names);
+    let message =
+        delete_confirmation_message_with_displayed_names(selected_count, &displayed_name_values);
     ui.set_delete_message_line_count(i32::try_from(list_lines).unwrap_or(i32::MAX));
     ui.set_delete_prompt_text(prompt.into());
     ui.set_delete_names_text(displayed_names.into());
@@ -5410,28 +5524,36 @@ fn estimated_wrapped_line_count(message: &str, characters_per_line: usize) -> us
         .sum()
 }
 
+#[cfg(test)]
 fn delete_confirmation_message_with_names(names: &[String]) -> String {
-    if names.is_empty() {
+    delete_confirmation_message_with_displayed_names(names.len(), names)
+}
+
+fn delete_confirmation_message_with_displayed_names(
+    selected_count: usize,
+    displayed_names: &[String],
+) -> String {
+    if selected_count == 0 {
         return String::new();
     }
 
     const MAX_DISPLAYED_NAMES: usize = 5;
-    let mut message = if names.len() == 1 {
+    let mut message = if selected_count == 1 {
         "Send the following item to the Recycle Bin?\n\n".to_string()
     } else {
         format!(
             "Send the following {} items to the Recycle Bin?\n\n",
-            names.len()
+            selected_count
         )
     };
-    for name in names.iter().take(MAX_DISPLAYED_NAMES) {
+    for name in displayed_names.iter().take(MAX_DISPLAYED_NAMES) {
         message.push_str(name);
         message.push('\n');
     }
-    if names.len() > MAX_DISPLAYED_NAMES {
+    if selected_count > MAX_DISPLAYED_NAMES {
         message.push_str(&format!(
             "...and {} more\n",
-            names.len() - MAX_DISPLAYED_NAMES
+            selected_count - MAX_DISPLAYED_NAMES
         ));
     }
     message
@@ -5458,6 +5580,8 @@ fn format_operation_failures(
     }
     if completed_count > 0 {
         message.push_str("\nCompleted files were not rolled back.");
+    } else {
+        message.push_str("\nThe failed files were not changed and remain staged for retry.");
     }
     message
 }
@@ -5515,7 +5639,12 @@ fn displayed_media_date_to_storage(
     }
     let naive = NaiveDateTime::parse_from_str(displayed.trim(), "%Y-%m-%d %H:%M:%S")
         .map_err(|_| "Expected date format: YYYY-MM-DD HH:MM:SS".to_string())?;
-    let display_offset_minutes = if mode == 2 { 9 * 60 } else { 0 };
+    let display_offset_minutes = match mode {
+        2 => 9 * 60,
+        3 => -7 * 60,
+        4 => -8 * 60,
+        _ => 0,
+    };
     let display_offset = FixedOffset::east_opt(display_offset_minutes * 60)
         .ok_or_else(|| "Invalid display time-zone offset.".to_string())?;
     let absolute = display_offset
@@ -6017,6 +6146,44 @@ fn normalize_time_zone_offset(value: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+fn numeric_offset_minutes(value: &str) -> Result<i32, String> {
+    let normalized = normalize_time_zone_offset(value)?;
+    let hours = normalized[1..3]
+        .parse::<i32>()
+        .map_err(|_| "Invalid UTC offset hour.".to_string())?;
+    let minutes = normalized[4..6]
+        .parse::<i32>()
+        .map_err(|_| "Invalid UTC offset minute.".to_string())?;
+    let total = hours * 60 + minutes;
+    Ok(if normalized.starts_with('-') {
+        -total
+    } else {
+        total
+    })
+}
+
+fn mp4_utc_storage_preview(recorded: &str, offset: &str) -> Result<String, String> {
+    let wall_clock = NaiveDateTime::parse_from_str(recorded.trim(), DISPLAY_DATETIME_FORMAT)
+        .map_err(|_| "Expected date format: YYYY-MM-DD HH:MM:SS".to_string())?;
+    let minutes = numeric_offset_minutes(offset)?;
+    let basis =
+        FixedOffset::east_opt(minutes * 60).ok_or_else(|| "Invalid MP4 time basis.".to_string())?;
+    let absolute = basis
+        .from_local_datetime(&wall_clock)
+        .single()
+        .ok_or_else(|| "The time is invalid for the selected basis.".to_string())?;
+    Ok(format!(
+        "{} UTC",
+        absolute.with_timezone(&Utc).format(DISPLAY_DATETIME_FORMAT)
+    ))
+}
+
+fn format_minutes_offset(minutes: i32) -> String {
+    let sign = if minutes < 0 { '-' } else { '+' };
+    let absolute = minutes.abs();
+    format!("{sign}{:02}:{:02}", absolute / 60, absolute % 60)
+}
+
 fn exif_time_zone_offset(metadata: &ExifMetadata) -> Option<&str> {
     let value = if !metadata.date_time_original.trim().is_empty() {
         &metadata.offset_time_original
@@ -6040,6 +6207,72 @@ fn display_exif_utc_offset(metadata: &ExifMetadata) -> String {
     exif_time_zone_offset(metadata)
         .map(format_utc_offset_choice)
         .unwrap_or_else(|| "Not set".to_string())
+}
+
+fn reapply_staged_media_date(ui: &MainWindow, app: &SlintApp, pending: &HashMap<PathBuf, String>) {
+    if pending.is_empty() {
+        return;
+    }
+    let selected = selected_file_paths(app);
+    let staged: Vec<_> = selected
+        .iter()
+        .filter_map(|path| pending.get(path))
+        .collect();
+    if staged.is_empty() {
+        return;
+    }
+
+    if selected.len() == 1 && staged.len() == 1 {
+        stage_taken_date_in_ui(ui, staged[0]);
+        ui.set_selected_media_date(staged[0].as_str().into());
+        ui.set_taken_date_status("Modified".into());
+    } else {
+        ui.set_taken_date(String::new().into());
+        ui.set_selected_media_date("Multiple values".into());
+        ui.set_taken_date_status("Mixed".into());
+    }
+    ui.set_taken_date_dirty(true);
+    ui.set_metadata_dirty(true);
+}
+
+fn reapply_staged_time_zone_offset(
+    ui: &MainWindow,
+    app: &SlintApp,
+    pending: &HashMap<PathBuf, String>,
+) {
+    let selected = selected_file_paths(app);
+    let staged: Vec<_> = selected
+        .iter()
+        .filter_map(|path| pending.get(path))
+        .collect();
+    if staged.is_empty() {
+        return;
+    }
+    let first = staged[0];
+    let all_selected_staged = staged.len() == selected.len();
+    let all_equal = staged.iter().all(|value| *value == first);
+    if all_selected_staged && all_equal {
+        ui.set_selected_utc_offset(format_utc_offset_choice(first).into());
+        if selected.len() == 1 {
+            ui.set_selected_media_date(ui.get_taken_date());
+            let interpretation = if is_mp4_path(&selected[0]) {
+                let scan = scan_media_file(&selected[0]);
+                let recorded = if scan.recorded_media_date.trim().is_empty() {
+                    scan.media_date.as_str()
+                } else {
+                    scan.recorded_media_date.as_str()
+                };
+                mp4_utc_storage_preview(recorded, first)
+                    .unwrap_or_else(|_| format!("Staged time basis: UTC{first}"))
+            } else {
+                format!("Recorded local time (UTC{first})")
+            };
+            ui.set_selected_time_interpretation(interpretation.into());
+        }
+    } else {
+        ui.set_selected_utc_offset("Multiple values".into());
+    }
+    ui.set_metadata_dirty(true);
 }
 
 fn numeric_offset_from_choice(choice: &str) -> &str {
@@ -6079,24 +6312,20 @@ fn display_time_with_offset(
     let recorded = NaiveDateTime::parse_from_str(recorded.trim(), DISPLAY_DATETIME_FORMAT).ok()?;
     let source_offset = fixed_offset_from_exif(source_offset)?;
     let recorded = source_offset.from_local_datetime(&recorded).single()?;
-    if time_display_mode == 1 {
-        Some((
-            recorded
-                .with_timezone(&Utc)
-                .format(DISPLAY_DATETIME_FORMAT)
-                .to_string(),
-            "UTC",
-        ))
-    } else {
-        let kst = FixedOffset::east_opt(9 * 60 * 60)?;
-        Some((
-            recorded
-                .with_timezone(&kst)
-                .format(DISPLAY_DATETIME_FORMAT)
-                .to_string(),
-            "KST",
-        ))
-    }
+    let (minutes, label) = match time_display_mode {
+        1 => (0, "UTC"),
+        3 => (-7 * 60, "PDT"),
+        4 => (-8 * 60, "PST"),
+        _ => (9 * 60, "KST"),
+    };
+    let target = FixedOffset::east_opt(minutes * 60)?;
+    Some((
+        recorded
+            .with_timezone(&target)
+            .format(DISPLAY_DATETIME_FORMAT)
+            .to_string(),
+        label,
+    ))
 }
 
 fn parse_media_date_shift(
@@ -6112,10 +6341,7 @@ fn parse_media_date_shift(
         }
         let parsed = trimmed
             .parse::<i128>()
-            .map_err(|_| format!("{label} must be a non-negative whole number."))?;
-        if parsed < 0 {
-            return Err(format!("{label} must be a non-negative whole number."));
-        }
+            .map_err(|_| format!("{label} must be a whole number."))?;
         Ok(parsed)
     }
 
@@ -6190,7 +6416,16 @@ fn build_shift_media_date_preview(
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or("(unknown)");
-            lines.push(format!("{name}: {current}  ->  {shifted}"));
+            let basis = if is_mp4_path(path) {
+                "UTC storage"
+            } else if is_jpeg_path(path) {
+                "recorded local time"
+            } else {
+                "recorded value"
+            };
+            lines.push(format!(
+                "{name}: {current} ({basis})  ->  {shifted} ({basis})"
+            ));
         }
     }
     if lines.is_empty() {
@@ -6374,13 +6609,12 @@ fn adjust_datetime_segment(value: &str, cursor: i32, delta: i32) -> String {
         .to_string()
 }
 
-fn adjust_nonnegative_shift_value(value: &str, delta: i32) -> String {
+fn adjust_signed_shift_value(value: &str, delta: i32) -> String {
     value
         .trim()
         .parse::<i64>()
         .unwrap_or(0)
         .saturating_add(i64::from(delta))
-        .max(0)
         .to_string()
 }
 
@@ -7045,21 +7279,29 @@ fn set_exif_value(ui: &MainWindow, key: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        adjust_datetime_segment, adjust_nonnegative_shift_value, apply_filename_rename_plan,
+        adjust_datetime_segment, adjust_signed_shift_value, apply_filename_rename_plan,
         auto_format_date_edit, auto_format_date_input, combined_gps_date_time,
         delete_confirmation_message_with_names, display_time_with_offset,
-        displayed_media_date_to_storage,
-        earliest_available_timestamp, estimated_wrapped_line_count, filename_from_media_date,
+        displayed_media_date_to_storage, earliest_available_timestamp,
+        estimated_wrapped_line_count, filename_from_media_date,
         filename_from_media_date_with_reserved, gps_date_time_for_shift, gps_utc_to_kst_display,
-        large_selection_exif_available, media_date_for_storage, parse_combined_gps_date_time,
-        numeric_offset_from_choice, parse_media_date_shift, preview_info_text, preview_media_kind,
-        rename_name_preserving_extension, selection_index_after_deletion, selection_summary,
+        large_selection_exif_available, media_date_for_storage, mp4_utc_storage_preview,
+        numeric_offset_from_choice, parse_combined_gps_date_time, parse_media_date_shift,
+        preview_info_text, preview_media_kind, rename_name_preserving_extension,
+        selection_index_after_deletion, selection_is_blocked_by_unmapped_edit, selection_summary,
         shift_display_datetime, should_mirror_png_date_source, validate_folder_path_input,
         FilenameCollisionResolver, PreviewMediaKind, PreviewResult,
     };
     use chrono::{Local, NaiveDateTime, Utc};
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn path_staged_batch_edits_do_not_block_file_navigation() {
+        assert!(!selection_is_blocked_by_unmapped_edit(true, false, true));
+        assert!(!selection_is_blocked_by_unmapped_edit(false, true, true));
+        assert!(selection_is_blocked_by_unmapped_edit(true, false, false));
+    }
 
     #[test]
     fn inline_time_zone_choice_extracts_offset_and_updates_display_time() {
@@ -7100,6 +7342,18 @@ mod tests {
             "2025-01-19 16:51:24"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mp4_time_basis_preview_shows_the_utc_value_that_will_be_written() {
+        assert_eq!(
+            mp4_utc_storage_preview("2025-01-19 17:46:00", "-07:00").unwrap(),
+            "2025-01-20 00:46:00 UTC"
+        );
+        assert_eq!(
+            mp4_utc_storage_preview("2018-09-05 22:16:05", "+09:00").unwrap(),
+            "2018-09-05 13:16:05 UTC"
+        );
     }
 
     #[test]
@@ -7299,8 +7553,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_negative_media_date_shift_parts() {
-        assert!(parse_media_date_shift("0", "-1", "0", "0").is_err());
+    fn accepts_negative_media_date_shift_parts() {
+        assert_eq!(
+            parse_media_date_shift("0", "-1", "0", "0")
+                .unwrap()
+                .num_seconds(),
+            -3_600
+        );
     }
 
     #[test]
@@ -7395,10 +7654,10 @@ mod tests {
     }
 
     #[test]
-    fn shift_spinner_values_do_not_become_negative() {
-        assert_eq!(adjust_nonnegative_shift_value("0", -1), "0");
-        assert_eq!(adjust_nonnegative_shift_value("9", 1), "10");
-        assert_eq!(adjust_nonnegative_shift_value("invalid", 1), "1");
+    fn shift_spinner_values_cross_zero() {
+        assert_eq!(adjust_signed_shift_value("0", -1), "-1");
+        assert_eq!(adjust_signed_shift_value("9", 1), "10");
+        assert_eq!(adjust_signed_shift_value("invalid", 1), "1");
     }
 
     #[test]

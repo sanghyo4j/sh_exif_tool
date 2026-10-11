@@ -5,6 +5,7 @@ use crate::media::{
     fallback_video_media_type, is_image_path, is_jpeg_path, is_mp4_path, is_mpeg_ts_path,
     is_png_path, is_video_path, MediaScanJob, MediaScanResult,
 };
+use chrono::NaiveDateTime;
 use slint::{ModelRc, StandardListViewItem, VecModel};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
@@ -15,7 +16,10 @@ use std::time::SystemTime;
 
 const DISPLAY_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const TIME_DISPLAY_RECORDED: i32 = 0;
+const TIME_DISPLAY_UTC: i32 = 1;
 const TIME_DISPLAY_KST: i32 = 2;
+const TIME_DISPLAY_PDT: i32 = 3;
+const TIME_DISPLAY_PST: i32 = 4;
 
 #[derive(Clone, Debug)]
 pub struct CachedMediaScan {
@@ -35,8 +39,10 @@ pub struct SelectedEntryDetails {
     pub media_kind: String,
     pub media_type: String,
     pub media_date: String,
+    pub recorded_media_date: String,
     pub metadata_status: String,
     pub time_interpretation: String,
+    pub recorded_offset_minutes: Option<i32>,
     pub exif_metadata: Option<ExifMetadata>,
 }
 
@@ -54,6 +60,7 @@ pub struct SlintApp {
     pub scan_results: Arc<Mutex<HashMap<PathBuf, CachedMediaScan>>>,
     pub scan_epoch: Arc<AtomicU64>,
     selection_anchor: Option<i32>,
+    selected_paths: Vec<PathBuf>,
     dynamic_sort_ready: bool,
 }
 
@@ -72,12 +79,13 @@ impl SlintApp {
             show_only_missing_media_date: false,
             show_only_missing_time_zone_offset: false,
             show_only_duplicate_media_date: false,
-            time_display_mode: TIME_DISPLAY_KST,
+            time_display_mode: TIME_DISPLAY_RECORDED,
             sort_column: 0,
             sort_direction: 0,
             scan_results: Arc::new(Mutex::new(HashMap::new())),
             scan_epoch: Arc::new(AtomicU64::new(0)),
             selection_anchor: None,
+            selected_paths: Vec::new(),
             dynamic_sort_ready: true,
         };
         app.load_folder();
@@ -96,11 +104,13 @@ impl SlintApp {
                 self.files = entries;
                 self.selected_indices.clear();
                 self.selection_anchor = None;
+                self.selected_paths.clear();
             }
             Err(err) => {
                 self.files.clear();
                 self.selected_indices.clear();
                 self.selection_anchor = None;
+                self.selected_paths.clear();
                 eprintln!("Failed to read directory: {} ({err})", self.current_path);
             }
         }
@@ -116,6 +126,7 @@ impl SlintApp {
             self.files.clear();
             self.selected_indices.clear();
             self.selection_anchor = None;
+            self.selected_paths.clear();
             return;
         };
 
@@ -141,6 +152,7 @@ impl SlintApp {
         self.files = entries;
         self.selected_indices.clear();
         self.selection_anchor = None;
+        self.selected_paths.clear();
 
         self.dynamic_sort_ready = false;
     }
@@ -158,6 +170,7 @@ impl SlintApp {
             .retain(|path, _| !deleted.contains(path));
         self.selected_indices.clear();
         self.selection_anchor = None;
+        self.selected_paths.clear();
     }
 
     pub fn get_ui_model(&self) -> ModelRc<UiFileEntry> {
@@ -178,6 +191,7 @@ impl SlintApp {
             media_kind: "folder".into(),
             media_date: "-".into(),
             metadata_status: "-".into(),
+            missing_utc_offset: false,
             duplicate_name: false,
             duplicate_size: false,
             duplicate_modified: false,
@@ -272,7 +286,7 @@ impl SlintApp {
                     "-".to_string()
                 } else {
                     scan.as_ref()
-                        .map(|value| display_media_date(value, self.time_display_mode).0)
+                        .map(|value| display_media_date_with_basis(value, self.time_display_mode))
                         .unwrap_or_else(|| "…".to_string())
                 }
                 .into(),
@@ -284,6 +298,12 @@ impl SlintApp {
                         .unwrap_or("…")
                 }
                 .into(),
+                missing_utc_offset: scan.as_ref().is_some_and(|value| {
+                    value.media_kind == "jpeg"
+                        && !value.media_date.trim().is_empty()
+                        && value.media_date != "-"
+                        && value.recorded_offset_minutes.is_none()
+                }),
                 duplicate_name: duplicate_in_column(1),
                 duplicate_size: duplicate_in_column(2),
                 duplicate_modified: duplicate_in_column(3),
@@ -329,7 +349,7 @@ impl SlintApp {
             let scan = self.scan_result_for(f);
             let media_date = scan
                 .as_ref()
-                .map(|value| display_media_date(value, self.time_display_mode).0)
+                .map(|value| display_media_date_with_basis(value, self.time_display_mode))
                 .unwrap_or_else(|| "…".to_string());
             let metadata = scan
                 .as_ref()
@@ -449,8 +469,7 @@ impl SlintApp {
             // validate an index that came from that same UI model.
             || usize::try_from(index).map_or(true, |idx| idx > self.files.len())
         {
-            self.selected_indices.clear();
-            self.selection_anchor = None;
+            self.clear_selection();
             return;
         }
 
@@ -478,6 +497,7 @@ impl SlintApp {
         // Shift produces an ordered range, Ctrl inserts at the binary-search
         // position, and a plain click contains one item. No full re-sort is
         // needed for every Ctrl click.
+        self.sync_selected_paths_from_indices();
     }
 
     pub fn selected_indices(&self) -> &[i32] {
@@ -511,8 +531,10 @@ impl SlintApp {
                         media_kind: "folder".to_string(),
                         media_type: "Folder".to_string(),
                         media_date: "-".to_string(),
+                        recorded_media_date: "-".to_string(),
                         metadata_status: "-".to_string(),
                         time_interpretation: String::new(),
+                        recorded_offset_minutes: None,
                         exif_metadata: None,
                     });
                 }
@@ -524,10 +546,14 @@ impl SlintApp {
                     .map(|value| value.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Unknown".to_string());
                 let scan = scan_result_from_cache(&cache, entry);
+                let recorded_offset_minutes = scan
+                    .as_ref()
+                    .and_then(|value| value.recorded_offset_minutes);
                 let (
                     media_kind,
                     media_type,
                     media_date,
+                    recorded_media_date,
                     metadata_status,
                     time_interpretation,
                     exif_metadata,
@@ -537,16 +563,23 @@ impl SlintApp {
                         "Folder".to_string(),
                         "-".to_string(),
                         "-".to_string(),
+                        "-".to_string(),
                         String::new(),
                         None,
                     )
                 } else if let Some(scan) = scan {
                     let (display_date, display_basis) =
                         display_media_date(&scan, self.time_display_mode);
+                    let recorded_media_date = if scan.recorded_media_date.trim().is_empty() {
+                        scan.media_date.clone()
+                    } else {
+                        scan.recorded_media_date.clone()
+                    };
                     (
                         scan.media_kind,
                         scan.media_type,
                         display_date,
+                        recorded_media_date,
                         media_metadata_label(&scan.metadata_status).to_string(),
                         display_basis,
                         scan.exif_metadata,
@@ -556,6 +589,7 @@ impl SlintApp {
                         "jpeg".to_string(),
                         "JPEG image".to_string(),
                         "Scanning...".to_string(),
+                        String::new(),
                         "Scanning...".to_string(),
                         String::new(),
                         None,
@@ -565,6 +599,7 @@ impl SlintApp {
                         "png".to_string(),
                         "PNG image".to_string(),
                         "Scanning...".to_string(),
+                        String::new(),
                         "Scanning...".to_string(),
                         String::new(),
                         None,
@@ -575,6 +610,7 @@ impl SlintApp {
                         "mp4".to_string(),
                         media_type.to_string(),
                         "Scanning...".to_string(),
+                        String::new(),
                         "Scanning...".to_string(),
                         String::new(),
                         None,
@@ -584,12 +620,14 @@ impl SlintApp {
                         "mts".to_string(),
                         "AVCHD transport stream".to_string(),
                         "Scanning...".to_string(),
+                        String::new(),
                         "Scanning...".to_string(),
                         String::new(),
                         None,
                     )
                 } else {
                     (
+                        String::new(),
                         String::new(),
                         String::new(),
                         String::new(),
@@ -619,8 +657,10 @@ impl SlintApp {
                     media_kind,
                     media_type,
                     media_date,
+                    recorded_media_date,
                     metadata_status,
                     time_interpretation,
+                    recorded_offset_minutes,
                     exif_metadata,
                 })
             })
@@ -642,7 +682,8 @@ impl SlintApp {
             return None;
         }
         let scan = self.scan_result_for(entry)?;
-        Some((scan.media_kind, scan.media_date, scan.metadata_status))
+        let media_date = display_media_date_with_basis(&scan, self.time_display_mode);
+        Some((scan.media_kind, media_date, scan.metadata_status))
     }
 
     pub fn select_all_visible_entries(&mut self) {
@@ -650,6 +691,7 @@ impl SlintApp {
             .filter_map(|index| i32::try_from(index).ok())
             .collect();
         self.selection_anchor = self.selected_indices.first().copied();
+        self.sync_selected_paths_from_indices();
     }
 
     pub fn select_files_without_exif(&mut self) {
@@ -665,6 +707,7 @@ impl SlintApp {
             .filter_map(|(index, _)| i32::try_from(index + 1).ok())
             .collect();
         self.selection_anchor = self.selected_indices.first().copied();
+        self.sync_selected_paths_from_indices();
     }
 
     pub fn prepare_scan_jobs(&self) -> (u64, Vec<MediaScanJob>) {
@@ -677,7 +720,10 @@ impl SlintApp {
         // Dynamic date filters must not prevent their own background scan.
         // The duplicate-only view hides uncached rows, but every matching file
         // still has to be inspected before duplicate groups can be known.
-        let visible_files: Vec<_> = if self.show_only_duplicate_media_date {
+        let dynamic_filter_enabled = self.show_only_missing_media_date
+            || self.show_only_missing_time_zone_offset
+            || self.show_only_duplicate_media_date;
+        let visible_files: Vec<_> = if dynamic_filter_enabled {
             self.files
                 .iter()
                 .filter(|entry| !entry.is_dir && matches_file_filter(self.file_filter, &entry.path))
@@ -781,7 +827,14 @@ impl SlintApp {
     }
 
     pub fn set_time_display_mode(&mut self, mode: i32) {
-        let mode = if mode == 1 { 1 } else { TIME_DISPLAY_KST };
+        let mode = match mode {
+            TIME_DISPLAY_RECORDED
+            | TIME_DISPLAY_UTC
+            | TIME_DISPLAY_KST
+            | TIME_DISPLAY_PDT
+            | TIME_DISPLAY_PST => mode,
+            _ => TIME_DISPLAY_RECORDED,
+        };
         if self.time_display_mode == mode {
             return;
         }
@@ -790,22 +843,44 @@ impl SlintApp {
         self.restore_selected_paths(&selected_paths);
     }
 
-    fn selected_paths(&self) -> Vec<PathBuf> {
-        self.selected_indices
-            .iter()
-            .filter(|index| **index > 0)
-            .filter_map(|index| self.path_for_ui_index(*index))
-            .collect()
+    pub fn selected_paths(&self) -> Vec<PathBuf> {
+        self.selected_paths.clone()
     }
 
     fn restore_selected_paths(&mut self, paths: &[PathBuf]) {
-        self.selected_indices = paths
+        let restored: Vec<_> = paths
             .iter()
-            .filter_map(|path| self.ui_index_for_path(path))
+            .filter_map(|path| {
+                self.ui_index_for_path(path)
+                    .map(|index| (index, path.clone()))
+            })
             .collect();
+        self.selected_indices = restored.iter().map(|(index, _)| *index).collect();
+        self.selected_paths = restored.into_iter().map(|(_, path)| path).collect();
         self.selected_indices.sort_unstable();
         self.selected_indices.dedup();
         self.selection_anchor = self.selected_indices.first().copied();
+    }
+
+    fn sync_selected_paths_from_indices(&mut self) {
+        let visible = self.visible_files();
+        self.selected_paths = self
+            .selected_indices
+            .iter()
+            .filter_map(|index| usize::try_from(*index).ok()?.checked_sub(1))
+            .filter_map(|index| visible.get(index).map(|entry| entry.path.clone()))
+            .collect();
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selected_indices.clear();
+        self.selection_anchor = None;
+        self.selected_paths.clear();
+    }
+
+    pub fn reconcile_selection_with_visible_files(&mut self) {
+        let paths = self.selected_paths.clone();
+        self.restore_selected_paths(&paths);
     }
 
     fn scan_result_for(&self, entry: &FileSystemEntry) -> Option<MediaScanResult> {
@@ -821,7 +896,7 @@ impl SlintApp {
             .scan_results
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut date_counts = HashMap::<String, usize>::new();
+        let mut date_counts = HashMap::<i64, usize>::new();
         if self.show_only_duplicate_media_date {
             for entry in self
                 .files
@@ -831,15 +906,16 @@ impl SlintApp {
                 let Some(scan) = scan_result_from_cache(&cache, entry) else {
                     continue;
                 };
-                let displayed = display_media_date(&scan, self.time_display_mode).0;
-                let date = displayed.trim();
-                if !media_date_value_is_present(date) {
+                let Some(date) = media_date_sort_value(&scan, self.time_display_mode) else {
                     continue;
-                }
-                *date_counts.entry(date.to_string()).or_default() += 1;
+                };
+                *date_counts.entry(date).or_default() += 1;
             }
         }
 
+        // Metadata-dependent filters update incrementally as scan results arrive.
+        // Selection is retained by path, so rows appearing or disappearing cannot
+        // silently move the selection to a different file.
         let dynamic_filter_enabled = self.show_only_missing_media_date
             || self.show_only_missing_time_zone_offset
             || self.show_only_duplicate_media_date;
@@ -857,18 +933,18 @@ impl SlintApp {
                     return true;
                 }
                 let Some(scan) = scan_result_from_cache(&cache, entry) else {
-                    return self.show_only_missing_media_date
-                        || self.show_only_missing_time_zone_offset;
+                    // An unscanned file is unknown, not missing. It will enter
+                    // the filtered view on the next incremental scan refresh if
+                    // its metadata actually satisfies an enabled condition.
+                    return false;
                 };
-                let is_missing = media_date_is_missing(Some(&scan));
+                let is_missing = media_date_is_missing(&scan);
                 let is_missing_offset = scan.media_kind == "jpeg"
                     && !is_missing
                     && scan.recorded_offset_minutes.is_none();
-                let displayed = display_media_date(&scan, self.time_display_mode).0;
-                let is_duplicate = media_date_value_is_present(displayed.trim())
-                    && date_counts
-                        .get(displayed.trim())
-                        .is_some_and(|count| *count > 1);
+                let is_duplicate = media_date_sort_value(&scan, self.time_display_mode)
+                    .and_then(|date| date_counts.get(&date))
+                    .is_some_and(|count| *count > 1);
                 (self.show_only_missing_media_date && is_missing)
                     || (self.show_only_missing_time_zone_offset && is_missing_offset)
                     || (self.show_only_duplicate_media_date && is_duplicate)
@@ -916,12 +992,10 @@ fn compare_file_entries(
         2 => directional_cmp(left.size.cmp(&right.size), descending),
         3 => option_cmp_missing_last(left.modified, right.modified, descending),
         4 => {
-            let left_date = scan_result_from_cache(cache, left).and_then(|scan| {
-                usable_sort_value(&display_media_date(&scan, time_display_mode).0)
-            });
-            let right_date = scan_result_from_cache(cache, right).and_then(|scan| {
-                usable_sort_value(&display_media_date(&scan, time_display_mode).0)
-            });
+            let left_date = scan_result_from_cache(cache, left)
+                .and_then(|scan| media_date_sort_value(&scan, time_display_mode));
+            let right_date = scan_result_from_cache(cache, right)
+                .and_then(|scan| media_date_sort_value(&scan, time_display_mode));
             option_cmp_missing_last(left_date, right_date, descending)
         }
         5 => {
@@ -934,6 +1008,25 @@ fn compare_file_entries(
         _ => CmpOrdering::Equal,
     };
     primary.then_with(|| natural_name_cmp(&left_name, &right_name))
+}
+
+fn media_date_sort_value(scan: &MediaScanResult, time_display_mode: i32) -> Option<i64> {
+    if let Some(timestamp) = scan.media_date_utc {
+        return Some(timestamp);
+    }
+    let displayed = display_media_date(scan, time_display_mode).0;
+    let recorded = usable_sort_value(&displayed)?;
+    let wall_clock = NaiveDateTime::parse_from_str(&recorded, DISPLAY_DATETIME_FORMAT).ok()?;
+    let assumed_offset_minutes = match time_display_mode {
+        TIME_DISPLAY_KST => 9 * 60,
+        TIME_DISPLAY_PDT => -7 * 60,
+        TIME_DISPLAY_PST => -8 * 60,
+        // Recorded/File Basis has no common offset. Treat an unknown wall
+        // clock as UTC solely for ordering; the Local? warning remains visible.
+        TIME_DISPLAY_RECORDED | TIME_DISPLAY_UTC => 0,
+        _ => 0,
+    };
+    Some(wall_clock.and_utc().timestamp() - i64::from(assumed_offset_minutes) * 60)
 }
 
 fn active_sort_value(
@@ -950,8 +1043,8 @@ fn active_sort_value(
         2 => Some(entry.size.to_string()),
         3 => entry.modified.map(format_time),
         4 => scan_result_from_cache(cache, entry)
-            .map(|scan| display_media_date(&scan, time_display_mode).0)
-            .filter(|value| value != "-" && value != "…" && !value.trim().is_empty()),
+            .and_then(|scan| media_date_sort_value(&scan, time_display_mode))
+            .map(|timestamp| timestamp.to_string()),
         _ => None,
     }
 }
@@ -971,7 +1064,12 @@ fn display_media_date(scan: &MediaScanResult, mode: i32) -> (String, String) {
     }
 
     let timestamp = scan.media_date_utc.unwrap();
-    let offset_minutes = if mode == TIME_DISPLAY_KST { 9 * 60 } else { 0 };
+    let (offset_minutes, label) = match mode {
+        TIME_DISPLAY_KST => (9 * 60, "KST"),
+        TIME_DISPLAY_PDT => (-7 * 60, "PDT"),
+        TIME_DISPLAY_PST => (-8 * 60, "PST"),
+        _ => (0, "UTC"),
+    };
     let Some(utc) = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0) else {
         return (recorded, recorded_basis);
     };
@@ -982,18 +1080,28 @@ fn display_media_date(scan: &MediaScanResult, mode: i32) -> (String, String) {
         utc.with_timezone(&offset)
             .format(DISPLAY_DATETIME_FORMAT)
             .to_string(),
-        if mode == TIME_DISPLAY_KST {
-            "KST"
-        } else {
-            "UTC"
-        }
-        .to_string(),
+        label.to_string(),
     )
 }
 
+fn display_media_date_with_basis(scan: &MediaScanResult, mode: i32) -> String {
+    let (date, basis) = display_media_date(scan, mode);
+    if date == "-" || date == "..." || date.trim().is_empty() || basis.trim().is_empty() {
+        date
+    } else {
+        format!("{date} {basis}")
+    }
+}
+
 fn format_offset_label(minutes: i32) -> String {
-    if minutes == 0 {
-        return "UTC".to_string();
+    match minutes {
+        540 => return "KST".to_string(),
+        -420 => return "PDT".to_string(),
+        -480 => return "PST".to_string(),
+        120 => return "CEST".to_string(),
+        60 => return "CET".to_string(),
+        0 => return "UTC".to_string(),
+        _ => {}
     }
     let sign = if minutes < 0 { '-' } else { '+' };
     let absolute = minutes.abs();
@@ -1127,15 +1235,9 @@ fn scan_result_from_cache(
         .map(|cached| cached.result.clone())
 }
 
-fn media_date_is_missing(scan: Option<&MediaScanResult>) -> bool {
-    scan.is_none_or(|result| {
-        let value = result.media_date.trim();
-        value.is_empty() || matches!(value, "-" | "N/A")
-    })
-}
-
-fn media_date_value_is_present(value: &str) -> bool {
-    !value.is_empty() && !matches!(value, "-" | "N/A" | "Scanning...")
+fn media_date_is_missing(result: &MediaScanResult) -> bool {
+    let value = result.media_date.trim();
+    value.is_empty() || matches!(value, "-" | "N/A")
 }
 
 fn format_time(t: SystemTime) -> String {
@@ -1163,8 +1265,9 @@ fn file_has_exif(path: &std::path::Path, is_dir: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_media_date, format_number_with_commas, matches_file_filter, media_date_is_missing,
-        natural_name_cmp, CachedMediaScan, SlintApp,
+        display_media_date, display_media_date_with_basis, format_number_with_commas,
+        matches_file_filter, media_date_is_missing, media_date_sort_value, natural_name_cmp,
+        CachedMediaScan, SlintApp, TIME_DISPLAY_KST, TIME_DISPLAY_RECORDED,
     };
     use crate::fs::FileSystemEntry;
     use crate::media::{is_image_path, is_video_path, MediaScanResult};
@@ -1197,6 +1300,7 @@ mod tests {
             scan_results: Arc::new(Mutex::new(HashMap::new())),
             scan_epoch: Arc::new(AtomicU64::new(0)),
             selection_anchor: Some(1),
+            selected_paths: vec![PathBuf::from("IMG_10.jpg")],
             dynamic_sort_ready: true,
         }
     }
@@ -1284,15 +1388,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_media_date_filter_keeps_pending_and_empty_dates_only() {
+    fn missing_media_date_requires_a_completed_scan_with_an_empty_date() {
         let result = |media_date: &str| MediaScanResult {
             media_date: media_date.to_string(),
             ..MediaScanResult::default()
         };
-        assert!(media_date_is_missing(None));
-        assert!(media_date_is_missing(Some(&result("-"))));
-        assert!(media_date_is_missing(Some(&result("N/A"))));
-        assert!(!media_date_is_missing(Some(&result("2014-02-04 12:00:00"))));
+        assert!(media_date_is_missing(&result("-")));
+        assert!(media_date_is_missing(&result("N/A")));
+        assert!(!media_date_is_missing(&result("2014-02-04 12:00:00")));
     }
 
     #[test]
@@ -1341,6 +1444,41 @@ mod tests {
             .map(|row| row.name.to_string())
             .collect();
         assert_eq!(names, vec!["IMG_10.jpg", "IMG_2.jpg"]);
+    }
+
+    #[test]
+    fn duplicate_filter_reveals_a_group_as_soon_as_the_second_scan_arrives() {
+        let mut app = sortable_app();
+        app.show_only_duplicate_media_date = true;
+        app.scan_results.lock().unwrap().insert(
+            PathBuf::from("IMG_10.jpg"),
+            CachedMediaScan {
+                size: 0,
+                modified: None,
+                result: MediaScanResult {
+                    media_kind: "jpeg".to_string(),
+                    media_date: "2017-09-01 12:00:00".to_string(),
+                    recorded_media_date: "2017-09-01 12:00:00".to_string(),
+                    ..MediaScanResult::default()
+                },
+            },
+        );
+        assert_eq!(app.file_count(), 0);
+
+        app.scan_results.lock().unwrap().insert(
+            PathBuf::from("IMG_2.jpg"),
+            CachedMediaScan {
+                size: 0,
+                modified: None,
+                result: MediaScanResult {
+                    media_kind: "jpeg".to_string(),
+                    media_date: "2017-09-01 12:00:00".to_string(),
+                    recorded_media_date: "2017-09-01 12:00:00".to_string(),
+                    ..MediaScanResult::default()
+                },
+            },
+        );
+        assert_eq!(app.file_count(), 2);
     }
 
     #[test]
@@ -1442,6 +1580,97 @@ mod tests {
     }
 
     #[test]
+    fn metadata_filter_updates_while_background_scan_is_running() {
+        let mut app = sortable_app();
+        {
+            let mut cache = app.scan_results.lock().unwrap();
+            cache.insert(
+                PathBuf::from("IMG_10.jpg"),
+                CachedMediaScan {
+                    size: 0,
+                    modified: None,
+                    result: MediaScanResult {
+                        media_kind: "jpeg".to_string(),
+                        media_date: "2018-09-06 00:15:53".to_string(),
+                        recorded_media_date: "2018-09-06 00:15:53".to_string(),
+                        recorded_offset_minutes: None,
+                        ..MediaScanResult::default()
+                    },
+                },
+            );
+            cache.insert(
+                PathBuf::from("IMG_2.jpg"),
+                CachedMediaScan {
+                    size: 0,
+                    modified: None,
+                    result: MediaScanResult {
+                        media_kind: "jpeg".to_string(),
+                        media_date: "2025-01-19 17:45:59".to_string(),
+                        recorded_media_date: "2025-01-19 17:45:59".to_string(),
+                        recorded_offset_minutes: Some(540),
+                        ..MediaScanResult::default()
+                    },
+                },
+            );
+        }
+        app.show_only_missing_time_zone_offset = true;
+        app.set_dynamic_sort_ready(false);
+
+        let model = app.get_ui_model();
+        assert_eq!(model.row_count(), 2);
+        assert_eq!(model.row_data(1).unwrap().name.as_str(), "IMG_10.jpg");
+    }
+
+    #[test]
+    fn incremental_filter_refresh_keeps_selection_on_the_same_path() {
+        let mut app = sortable_app();
+        {
+            let mut cache = app.scan_results.lock().unwrap();
+            for (path, media_date) in [
+                ("IMG_10.jpg", "2018-09-06 00:15:53"),
+                ("IMG_2.jpg", "2018-09-06 00:15:54"),
+            ] {
+                cache.insert(
+                    PathBuf::from(path),
+                    CachedMediaScan {
+                        size: 0,
+                        modified: None,
+                        result: MediaScanResult {
+                            media_kind: "jpeg".to_string(),
+                            media_date: media_date.to_string(),
+                            recorded_media_date: media_date.to_string(),
+                            recorded_offset_minutes: None,
+                            ..MediaScanResult::default()
+                        },
+                    },
+                );
+            }
+        }
+        app.show_only_missing_time_zone_offset = true;
+        app.select_ui_index(2, false, false);
+        assert_eq!(app.selected_paths, vec![PathBuf::from("IMG_2.jpg")]);
+
+        app.scan_results.lock().unwrap().insert(
+            PathBuf::from("IMG_10.jpg"),
+            CachedMediaScan {
+                size: 0,
+                modified: None,
+                result: MediaScanResult {
+                    media_kind: "jpeg".to_string(),
+                    media_date: "2018-09-06 00:15:53".to_string(),
+                    recorded_media_date: "2018-09-06 00:15:53".to_string(),
+                    recorded_offset_minutes: Some(540),
+                    ..MediaScanResult::default()
+                },
+            },
+        );
+        app.reconcile_selection_with_visible_files();
+
+        assert_eq!(app.selected_indices(), &[1]);
+        assert_eq!(app.selected_paths, vec![PathBuf::from("IMG_2.jpg")]);
+    }
+
+    #[test]
     fn time_display_converts_only_files_with_an_absolute_instant() {
         let utc_timestamp =
             chrono::NaiveDateTime::parse_from_str("2025-01-19 15:51:24", "%Y-%m-%d %H:%M:%S")
@@ -1457,7 +1686,7 @@ mod tests {
         };
         assert_eq!(
             display_media_date(&paris, 0),
-            ("2025-01-19 16:51:24".to_string(), "UTC+01:00".to_string())
+            ("2025-01-19 16:51:24".to_string(), "CET".to_string())
         );
         assert_eq!(
             display_media_date(&paris, 1),
@@ -1466,6 +1695,14 @@ mod tests {
         assert_eq!(
             display_media_date(&paris, 2),
             ("2025-01-20 00:51:24".to_string(), "KST".to_string())
+        );
+        assert_eq!(
+            display_media_date(&paris, 3),
+            ("2025-01-19 08:51:24".to_string(), "PDT".to_string())
+        );
+        assert_eq!(
+            display_media_date_with_basis(&paris, 4),
+            "2025-01-19 07:51:24 PST"
         );
 
         let unknown = MediaScanResult {
@@ -1477,6 +1714,76 @@ mod tests {
             display_media_date(&unknown, 2),
             ("2019-01-19 20:57:47".to_string(), "Local?".to_string())
         );
+        assert_eq!(
+            display_media_date_with_basis(&unknown, 2),
+            "2019-01-19 20:57:47 Local?"
+        );
+    }
+
+    #[test]
+    fn media_date_sort_key_uses_absolute_time_not_recorded_wall_clock() {
+        let kst = MediaScanResult {
+            recorded_media_date: "2018-09-05 11:11:18".to_string(),
+            media_date: "2018-09-05 11:11:18".to_string(),
+            media_date_utc: Some(200),
+            recorded_offset_minutes: Some(540),
+            ..MediaScanResult::default()
+        };
+        let pdt = MediaScanResult {
+            recorded_media_date: "2018-09-05 11:07:56".to_string(),
+            media_date: "2018-09-05 11:07:56".to_string(),
+            media_date_utc: Some(300),
+            recorded_offset_minutes: Some(-420),
+            ..MediaScanResult::default()
+        };
+        assert!(
+            media_date_sort_value(&kst, TIME_DISPLAY_RECORDED)
+                < media_date_sort_value(&pdt, TIME_DISPLAY_RECORDED)
+        );
+    }
+
+    #[test]
+    fn local_media_date_joins_the_same_timeline_using_the_display_basis() {
+        let known = MediaScanResult {
+            media_date_utc: Some(1_546_644_600),
+            ..MediaScanResult::default()
+        };
+        let local = MediaScanResult {
+            media_date: "2019-01-05 08:31:00".to_string(),
+            recorded_media_date: "2019-01-05 08:31:00".to_string(),
+            ..MediaScanResult::default()
+        };
+
+        assert_eq!(
+            media_date_sort_value(&local, TIME_DISPLAY_KST),
+            Some(1_546_644_660)
+        );
+        assert!(
+            media_date_sort_value(&known, TIME_DISPLAY_KST)
+                < media_date_sort_value(&local, TIME_DISPLAY_KST)
+        );
+    }
+
+    #[test]
+    fn selected_row_partial_refresh_keeps_the_time_basis_suffix() {
+        let app = sortable_app();
+        app.scan_results.lock().unwrap().insert(
+            PathBuf::from("IMG_10.jpg"),
+            CachedMediaScan {
+                size: 0,
+                modified: None,
+                result: MediaScanResult {
+                    media_kind: "jpeg".to_string(),
+                    media_date: "2018-09-08 01:26:06".to_string(),
+                    recorded_media_date: "2018-09-08 01:26:06".to_string(),
+                    metadata_status: "Available".to_string(),
+                    ..MediaScanResult::default()
+                },
+            },
+        );
+
+        let (_, media_date, _) = app.cached_media_fields_for_ui_index(1).unwrap();
+        assert_eq!(media_date, "2018-09-08 01:26:06 Local?");
     }
 
     #[test]

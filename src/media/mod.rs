@@ -4,6 +4,7 @@ mod mpeg_ts;
 mod png;
 
 use crate::exif::ExifMetadata;
+#[cfg(feature = "gui-slint")]
 pub(crate) use png::PngDateSources;
 
 use std::fs::File;
@@ -204,6 +205,14 @@ pub(crate) fn remove_png_date_metadata(
 
 pub fn write_mp4_media_date(path: &Path, display_value: &str) -> Result<(), String> {
     mp4::write_media_date(path, display_value)
+}
+
+pub fn write_mp4_media_date_with_offset(
+    path: &Path,
+    wall_clock_value: &str,
+    offset_minutes: i32,
+) -> Result<(), String> {
+    mp4::write_media_date_with_offset(path, wall_clock_value, offset_minutes)
 }
 
 fn failed_result(media_kind: &str, media_type: &str) -> MediaScanResult {

@@ -305,7 +305,17 @@ export component CustomFileTable inherits Rectangle {
                             vertical-alignment: center;
                         }
                     }
-                    media_date_cell := Text { width: 150px; text: entry.media_date; color: entry.duplicate_media_date ? NativeColors.duplicate : NativeColors.secondary_text; font-weight: entry.duplicate_media_date ? 600 : 400; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; overflow: elide; }
+                    media_date_cell := Text {
+                        width: 150px;
+                        text: entry.media_date;
+                        color: entry.missing_utc_offset ? NativeColors.danger
+                            : entry.duplicate_media_date ? NativeColors.duplicate
+                            : NativeColors.secondary_text;
+                        font-weight: entry.missing_utc_offset || entry.duplicate_media_date ? 600 : 400;
+                        font-size: FontSettings.font_size_pt * 1pt;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
                     metadata_cell := Text { width: 68px; text: entry.metadata_status; color: entry.metadata_status == "!" ? NativeColors.danger : NativeColors.secondary_text; font-size: FontSettings.font_size_pt * 1pt; vertical-alignment: center; horizontal-alignment: center; overflow: elide; }
                 }
 

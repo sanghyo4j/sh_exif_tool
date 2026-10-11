@@ -174,6 +174,7 @@ export component ActionValueRow inherits Rectangle {
 }
 
 export component UtcOffsetInfoRow inherits Rectangle {
+    in property <string> label: "UTC Offset";
     in property <string> value: "Not set";
     in property <bool> multiple: false;
     in-out property <bool> only_missing: true;
@@ -195,7 +196,7 @@ export component UtcOffsetInfoRow inherits Rectangle {
 
     Text {
         x: 14px; y: 0px; width: 126px; height: 30px;
-        text: "UTC Offset";
+        text: root.label;
         font-family: FontSettings.details_font_family;
         color: NativeColors.secondary_text;
         font-size: FontSettings.font_size_pt * 1pt;
@@ -211,13 +212,14 @@ export component UtcOffsetInfoRow inherits Rectangle {
             x: 8px; width: parent.width - 28px; height: 100%;
             text: root.value;
             font-family: FontSettings.details_font_family;
-            font-size: max(8pt, (FontSettings.font_size_pt - 2) * 1pt);
-            color: root.value == "Not set" ? NativeColors.warning : NativeColors.text;
+            font-size: FontSettings.font_size_pt * 1pt;
+            color: root.value == "Not set" ? NativeColors.danger : NativeColors.text;
             vertical-alignment: center; overflow: elide;
         }
         Text {
-            x: parent.width - 22px; width: 14px; height: 100%; text: "v";
-            font-size: 8pt; color: NativeColors.secondary_text;
+            x: parent.width - 22px; width: 14px; height: 100%; text: "▾";
+            font-family: FontSettings.details_font_family;
+            font-size: FontSettings.font_size_pt * 1pt; color: NativeColors.secondary_text;
             horizontal-alignment: center; vertical-alignment: center;
         }
         offset_area := TouchArea { width: 100%; height: 100%; clicked => { offset_popup.show(); } }
@@ -234,16 +236,17 @@ export component UtcOffsetInfoRow inherits Rectangle {
                 Text {
                     x: 8px; width: parent.width - 16px; height: 100%; text: choice;
                     font-family: FontSettings.details_font_family;
-                    font-size: max(8pt, (FontSettings.font_size_pt - 2) * 1pt);
+                    font-size: FontSettings.font_size_pt * 1pt;
                     color: NativeColors.text; vertical-alignment: center; overflow: elide;
                 }
                 choice_area := TouchArea { width: 100%; height: 100%; clicked => {
-                    offset_popup.close();
                     if (choice == "Custom UTC offset...") {
                         root.custom_visible = true;
+                        offset_popup.close();
                     } else {
                         root.custom_visible = false;
                         root.offset_selected(choice, root.only_missing);
+                        offset_popup.close();
                     }
                 } }
             }
@@ -262,6 +265,7 @@ export component UtcOffsetInfoRow inherits Rectangle {
         Text {
             width: 100%; height: 100%; text: "Stage";
             font-family: FontSettings.details_font_family;
+            font-size: FontSettings.font_size_pt * 1pt;
             color: NativeColors.text;
             horizontal-alignment: center; vertical-alignment: center;
         }
@@ -271,23 +275,43 @@ export component UtcOffsetInfoRow inherits Rectangle {
         }
 
     if root.multiple: Rectangle {
-        x: 154px; y: root.custom_visible ? 66px : 34px; width: 16px; height: 16px;
-        background: NativeColors.surface;
-        border-width: 1px;
-        border-color: NativeColors.border;
-        border-radius: 2px;
-        Text { width: 100%; height: 100%; text: root.only_missing ? "✓" : ""; color: NativeColors.accent; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-        TouchArea { width: 100%; height: 100%; clicked => { root.only_missing = !root.only_missing; } }
-    }
-    if root.multiple: Text {
-        x: 178px; y: root.custom_visible ? 62px : 30px;
-        width: max(40px, parent.width - 192px); height: 24px;
-        text: "Only set missing offsets";
-        font-family: FontSettings.details_font_family;
-        color: NativeColors.secondary_text;
-        font-size: max(8pt, (FontSettings.font_size_pt - 1) * 1pt);
-        vertical-alignment: center;
-        overflow: elide;
+        x: 154px; y: root.custom_visible ? 63px : 31px;
+        width: max(40px, parent.width - 168px); height: 24px;
+        background: only_missing_area.has-hover ? NativeColors.hover : transparent;
+
+        Rectangle {
+            x: 1px; y: 3px; width: 18px; height: 18px;
+            background: root.only_missing ? NativeColors.accent : NativeColors.surface;
+            border-width: 1px;
+            border-color: root.only_missing ? NativeColors.accent : #7a7a7a;
+            border-radius: 2px;
+            Text {
+                width: 100%; height: 100%;
+                text: root.only_missing ? "✓" : "";
+                font-family: FontSettings.details_font_family;
+                font-size: FontSettings.font_size_pt * 1pt;
+                color: NativeColors.surface;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            x: 27px; width: parent.width - 27px; height: 100%;
+            text: "Only set missing offsets";
+            font-family: FontSettings.details_font_family;
+            color: NativeColors.secondary_text;
+            font-size: FontSettings.font_size_pt * 1pt;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        only_missing_area := TouchArea {
+            width: 100%; height: 100%;
+            mouse-cursor: pointer;
+            clicked => { root.only_missing = !root.only_missing; }
+        }
     }
 
     HDivider { y: parent.height - 1px; background: NativeColors.divider; }

@@ -1,5 +1,5 @@
 import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
-import { SectionHeader, EditableInfoRow, ReadOnlyInfoRow, UtcOffsetInfoRow, CreateExifRow } from "info_row.slint";
+import { SectionHeader, EditableInfoRow, ReadOnlyInfoRow, ActionValueRow, UtcOffsetInfoRow, CreateExifRow } from "info_row.slint";
 import { FontSettings, NativeColors } from "../theme.slint";
 
 component ToolButton inherits Rectangle {
@@ -361,8 +361,13 @@ export component MetadataPanel inherits Rectangle {
 
                     if root.selected_media_kind == "mp4": SectionHeader { title: "VIDEO"; }
                     if root.selected_media_kind == "mp4": ReadOnlyInfoRow { label: "Media Type"; value: root.selected_media_type; }
-                    if root.selected_media_kind == "mp4": EditableInfoRow { label: "Media Creation Time"; metadata_key: "media_date"; date_input: true; value <=> root.taken_date; status <=> root.taken_date_status; dirty <=> root.taken_date_dirty; date_value_edited() => { root.taken_date_edited() } date_value_adjusted(value, cursor, delta) => { root.date_value_adjusted(value, cursor, delta) } value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
-                    if root.selected_media_kind == "mp4": ReadOnlyInfoRow { label: "Time Basis"; value: root.selected_time_interpretation == "" ? "Unknown" : root.selected_time_interpretation; }
+                    if root.selected_media_kind == "mp4": EditableInfoRow { label: "Media Creation Time" + (root.selected_time_interpretation == "" ? "" : " (" + root.selected_time_interpretation + ")"); metadata_key: "media_date"; date_input: true; value <=> root.taken_date; status <=> root.taken_date_status; dirty <=> root.taken_date_dirty; date_value_edited() => { root.taken_date_edited() } date_value_adjusted(value, cursor, delta) => { root.date_value_adjusted(value, cursor, delta) } value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
+                    if root.selected_media_kind == "mp4": ActionValueRow {
+                        label: "Time Correction";
+                        value: "Shift MP4 Time...";
+                        enabled: root.selected_file_count > 0;
+                        clicked => { root.shift_media_date(); }
+                    }
 
                     if root.selected_media_kind == "mts": SectionHeader { title: "VIDEO"; }
                     if root.selected_media_kind == "mts": ReadOnlyInfoRow { label: "Media Type"; value: root.selected_media_type; }
@@ -394,6 +399,12 @@ export component MetadataPanel inherits Rectangle {
                         multiple: root.selected_file_count > 1;
                         only_missing: root.selected_file_count > 1;
                         offset_selected(value, only_missing) => { root.time_zone_offset_selected(value, only_missing) }
+                    }
+                    if root.selected_media_kind == "jpeg" && root.exif_available: ActionValueRow {
+                        label: "Time Correction";
+                        value: "Shift Photo Time...";
+                        enabled: root.selected_file_count > 0;
+                        clicked => { root.shift_media_date(); }
                     }
                     if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Camera Make"; metadata_key: "camera_make"; value <=> root.camera_make; status <=> root.camera_make_status; dirty <=> root.camera_make_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
                     if root.selected_media_kind == "jpeg" && root.exif_available: EditableInfoRow { label: "Camera Model"; metadata_key: "camera_model"; value <=> root.camera_model; status <=> root.camera_model_status; dirty <=> root.camera_model_dirty; value_edited => { root.metadata_edited(); } metadata_right_clicked(key, value) => { root.exif_tag_right_clicked(key, value); } shortcut_requested(action) => { root.shortcut_requested(action); } }
