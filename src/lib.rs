@@ -6,11 +6,11 @@ pub mod fs;
 pub mod media;
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const BUILD_NUMBER: &str = "67";
+pub const BUILD_NUMBER: &str = "70";
 pub const APP_TITLE: &str = concat!(
     "SH148 Photo Management Tool v",
     env!("CARGO_PKG_VERSION"),
-    " (Build 67)"
+    " (Build 70)"
 );
 
 #[cfg(feature = "gui-slint")]

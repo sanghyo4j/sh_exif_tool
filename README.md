@@ -13,4 +13,4 @@ Keep exactly one of `gui-win32` or `gui-slint` in the default feature list. The 
 
 Release executables use a fixed two-digit build number (`build01` through `build99`).
 The same version and build number must appear in the window title, for example:
-`SH148 Photo Management Tool v0.1.0 (Build 67)`.
+`SH148 Photo Management Tool v0.1.0 (Build 70)`.

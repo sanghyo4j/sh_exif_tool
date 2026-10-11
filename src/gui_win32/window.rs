@@ -14,13 +14,13 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, ClientToScreen, CreateBitmap, CreateCompatibleBitmap,
-    CreateCompatibleDC, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint,
-    FillRect, GetDC, GetStockObject, InvalidateRect, LineTo, MapWindowPoints, MoveToEx, Rectangle,
-    RedrawWindow, ReleaseDC, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor,
-    StretchDIBits, UpdateWindow, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
-    DEFAULT_GUI_FONT, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, DT_WORDBREAK, HALFTONE, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN,
-    RDW_ERASE, RDW_INVALIDATE, SRCCOPY, TRANSPARENT,
+    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, CreateSolidBrush, DeleteDC,
+    DeleteObject, DrawTextW, EndPaint, FillRect, GdiFlush, GetDC, GetStockObject, InvalidateRect,
+    MapWindowPoints, Rectangle, RedrawWindow, ReleaseDC, SelectObject, SetBkMode,
+    SetStretchBltMode, SetTextColor, StretchDIBits, UpdateWindow, AC_SRC_OVER, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DEFAULT_GUI_FONT, DIB_RGB_COLORS, DT_CENTER,
+    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HALFTONE,
+    PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, SRCCOPY, TRANSPARENT,
 };
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
@@ -29,10 +29,10 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::UI::Controls::{
-    ImageList_AddMasked, ImageList_Create, ImageList_Destroy, InitCommonControlsEx, SetWindowTheme,
-    BST_CHECKED, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDRF_DODEFAULT,
+    ImageList_Add, ImageList_Create, ImageList_Destroy, InitCommonControlsEx, SetWindowTheme,
+    ShowScrollBar, BST_CHECKED, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDRF_DODEFAULT,
     CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, EM_GETSEL, EM_REPLACESEL,
-    EM_SETSEL, HIMAGELIST, ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES, ILC_COLOR32, ILC_MASK,
+    EM_SETSEL, HIMAGELIST, ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES, ILC_COLOR32,
     INITCOMMONCONTROLSEX, LVCF_SUBITEM, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
     LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_EDITLABELW,
     LVM_ENSUREVISIBLE, LVM_GETITEMTEXTW, LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT, LVM_GETSUBITEMRECT,
@@ -41,11 +41,12 @@ use windows_sys::Win32::UI::Controls::{
     LVM_SETITEMTEXTW, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR, LVNI_SELECTED, LVN_COLUMNCLICK,
     LVN_ENDLABELEDITW, LVN_GETDISPINFOW, LVN_ITEMCHANGED, LVN_KEYDOWN, LVN_ODFINDITEMW,
     LVSIL_SMALL, LVS_EDITLABELS, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_NOCOLUMNHEADER,
-    LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL, NMHDR, NMLISTVIEW, NMLVCUSTOMDRAW,
-    NMLVDISPINFOW, NMLVFINDITEMW, NMLVKEYDOWN, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_RCLICK,
-    SBARS_SIZEGRIP, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW, TBBUTTON, TBSTATE_ENABLED,
-    TBSTYLE_FLAT, TBSTYLE_TOOLTIPS, TB_ADDBUTTONSW, TB_AUTOSIZE, TB_BUTTONSTRUCTSIZE,
-    TB_ENABLEBUTTON, TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TB_SETIMAGELIST, TOOLBARCLASSNAMEW,
+    LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL, NMHDR, NMITEMACTIVATE, NMLISTVIEW,
+    NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVFINDITEMW, NMLVKEYDOWN, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK,
+    NM_RCLICK, SBARS_SIZEGRIP, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW, TBBUTTON,
+    TBSTATE_ENABLED, TBSTYLE_FLAT, TBSTYLE_TOOLTIPS, TB_ADDBUTTONSW, TB_AUTOSIZE,
+    TB_BUTTONSTRUCTSIZE, TB_ENABLEBUTTON, TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TB_SETIMAGELIST,
+    TOOLBARCLASSNAMEW,
 };
 use windows_sys::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -70,11 +71,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GWLP_USERDATA, HICON, HMENU,
     ICONINFO, IDC_ARROW, IDC_SIZEWE, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
     MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MINMAXINFO, MSG,
-    SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOZORDER, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_GETMINMAXINFO,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
-    WM_SETFONT, WM_SETICON, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_DLGMODALFRAME, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    SB_HORZ, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOZORDER, SW_HIDE, SW_SHOW, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY,
+    WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CAPTION,
+    WS_CHILD, WS_CLIPCHILDREN, WS_EX_DLGMODALFRAME, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL,
 };
 
 use super::model::{FileFilter, FileListModel, SortColumn, TimeDisplayMode};
@@ -581,8 +583,8 @@ unsafe fn create_child_windows(
     SendMessageW(toolbar, TB_BUTTONSTRUCTSIZE, size_of::<TBBUTTON>(), 0);
     let toolbar_images = create_toolbar_image_list();
     SendMessageW(toolbar, TB_SETIMAGELIST, 0, toolbar_images as LPARAM);
-    SendMessageW(toolbar, TB_SETBITMAPSIZE, 0, make_lparam(24, 24));
-    SendMessageW(toolbar, TB_SETBUTTONSIZE, 0, make_lparam(36, 34));
+    SendMessageW(toolbar, TB_SETBITMAPSIZE, 0, make_lparam(20, 20));
+    SendMessageW(toolbar, TB_SETBUTTONSIZE, 0, make_lparam(30, 30));
     let buttons = [
         toolbar_button(0, ID_TOOL_OPEN),
         toolbar_button(1, ID_TOOL_REFRESH),
@@ -2623,7 +2625,10 @@ unsafe fn handle_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
                     GetClientRect(details, &mut client);
                     row.left = client.left;
                     row.right = client.right;
-                    let background = if is_detail_section(&label) {
+                    let selected = detail_row_is_selected(details, draw.nmcd.dwItemSpec as i32);
+                    let background = if selected {
+                        rgb(232, 235, 239)
+                    } else if is_detail_section(&label) {
                         rgb(240, 242, 245)
                     } else {
                         rgb(255, 255, 255)
@@ -2643,7 +2648,12 @@ unsafe fn handle_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
                         .unwrap_or_default();
                     let section = is_detail_section(&label);
                     let staged = state(hwnd).is_some_and(|s| detail_value_is_staged(s, &label));
-                    let background = if section {
+                    let selected = state(hwnd).is_some_and(|s| {
+                        detail_row_is_selected(s.details, draw.nmcd.dwItemSpec as i32)
+                    });
+                    let background = if selected {
+                        rgb(232, 235, 239)
+                    } else if section {
                         rgb(240, 242, 245)
                     } else {
                         rgb(255, 255, 255)
@@ -2670,7 +2680,13 @@ unsafe fn handle_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
                     };
                     if !text.is_empty() {
                         let mut text_rect = cell;
-                        text_rect.left += if section { 8 } else { 6 };
+                        text_rect.left += if section {
+                            8
+                        } else if draw.iSubItem == 0 {
+                            16
+                        } else {
+                            6
+                        };
                         text_rect.right -= 6;
                         SetBkMode(draw.nmcd.hdc, TRANSPARENT as i32);
                         SetTextColor(draw.nmcd.hdc, foreground);
@@ -2689,19 +2705,24 @@ unsafe fn handle_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
                 _ => CDRF_DODEFAULT as LRESULT,
             };
         } else if header.code == NM_CLICK {
-            if let Some(s) = state(hwnd) {
-                clear_details_selection(s.details);
-                SetFocus(s.list);
+            let activate = &*(lparam as *const NMITEMACTIVATE);
+            if activate.iItem >= 0 {
+                if let Some(s) = state(hwnd) {
+                    select_detail_row(s.details, activate.iItem);
+                }
             }
         } else if header.code == NM_RCLICK {
-            show_details_context_menu(hwnd);
-            if let Some(s) = state(hwnd) {
-                clear_details_selection(s.details);
+            let activate = &*(lparam as *const NMITEMACTIVATE);
+            if activate.iItem >= 0 {
+                if let Some(s) = state(hwnd) {
+                    select_detail_row(s.details, activate.iItem);
+                }
             }
+            show_details_context_menu(hwnd);
         } else if header.code == NM_DBLCLK {
-            edit_selected_detail(hwnd);
-            if let Some(s) = state(hwnd) {
-                clear_details_selection(s.details);
+            let activate = &*(lparam as *const NMITEMACTIVATE);
+            if activate.iItem >= 0 {
+                edit_detail_at(hwnd, activate.iItem);
             }
         }
         return 0;
@@ -2829,17 +2850,35 @@ unsafe fn list_view_cell_text(list: HWND, index: i32, subitem: i32) -> String {
     String::from_utf16_lossy(&buffer[..length.min(buffer.len())])
 }
 
-unsafe fn clear_details_selection(details: HWND) {
-    let mut item: LVITEMW = zeroed();
-    item.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
-    item.state = 0;
+unsafe fn select_detail_row(details: HWND, index: i32) {
+    let mut clear: LVITEMW = zeroed();
+    clear.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
     SendMessageW(
         details,
         LVM_SETITEMSTATE,
         usize::MAX,
-        &item as *const _ as LPARAM,
+        &clear as *const _ as LPARAM,
+    );
+    let mut select: LVITEMW = zeroed();
+    select.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+    select.state = LVIS_SELECTED | LVIS_FOCUSED;
+    SendMessageW(
+        details,
+        LVM_SETITEMSTATE,
+        index as usize,
+        &select as *const _ as LPARAM,
     );
     InvalidateRect(details, null(), 0);
+}
+
+unsafe fn detail_row_is_selected(details: HWND, index: i32) -> bool {
+    SendMessageW(
+        details,
+        LVM_GETNEXTITEM,
+        usize::MAX,
+        LVNI_SELECTED as LPARAM,
+    ) as i32
+        == index
 }
 
 fn exif_key_for_detail_label(label: &str) -> Option<&'static str> {
@@ -2900,18 +2939,13 @@ fn detail_key_is_editable(key: &str) -> bool {
     )
 }
 
-unsafe fn edit_selected_detail(hwnd: HWND) {
+unsafe fn edit_detail_at(hwnd: HWND, index: i32) {
     cancel_inline_detail_edit(hwnd);
     let Some(s) = state(hwnd) else { return };
-    let index = SendMessageW(
-        s.details,
-        LVM_GETNEXTITEM,
-        usize::MAX,
-        LVNI_SELECTED as LPARAM,
-    ) as i32;
     if index < 0 {
         return;
     }
+    select_detail_row(s.details, index);
     let selected = selected_files(s);
     if selected.is_empty() {
         return;
@@ -4728,8 +4762,13 @@ unsafe fn handle_scan_complete(hwnd: HWND, lparam: LPARAM) {
 }
 
 unsafe fn update_status(s: &WindowState) {
-    let selected = SendMessageW(s.list, LVM_GETSELECTEDCOUNT, 0, 0);
-    let shown = s.model.rows.iter().filter(|r| !r.is_parent).count();
+    let selected = selected_files(s).len();
+    let shown = s
+        .model
+        .rows
+        .iter()
+        .filter(|row| !row.is_parent && !row.is_dir)
+        .count();
     let unsupported = if s.model.unsupported_files > 0 {
         format!(" ({} unsupported)", s.model.unsupported_files)
     } else {
@@ -5083,14 +5122,15 @@ unsafe fn layout_children(hwnd: HWND) {
         right_width,
         (content_height - preview_height - action_height).max(0),
     );
-    let property_width = 160.min((right_width * 45 / 100).max(105));
+    let mut details_client: RECT = zeroed();
+    GetClientRect(s.details, &mut details_client);
+    let available_width = details_client.right.max(0);
+    let desired_property_width = 160.min((available_width * 45 / 100).max(105));
+    let property_width = desired_property_width.min((available_width - 70).max(0));
+    let value_width = (available_width - property_width - 1).max(0);
     SendMessageW(s.details, LVM_SETCOLUMNWIDTH, 0, property_width as LPARAM);
-    SendMessageW(
-        s.details,
-        LVM_SETCOLUMNWIDTH,
-        1,
-        (right_width - property_width - 4).max(80) as LPARAM,
-    );
+    SendMessageW(s.details, LVM_SETCOLUMNWIDTH, 1, value_width as LPARAM);
+    ShowScrollBar(s.details, SB_HORZ, 0);
     position_child(s.log, 0, th + ph + content_height, width, log_height);
     set_status_parts(s.status, width);
     update_status(s);
@@ -5370,109 +5410,115 @@ const fn make_lparam(low: i32, high: i32) -> LPARAM {
 }
 
 unsafe fn create_toolbar_image_list() -> HIMAGELIST {
-    let images = ImageList_Create(24, 24, ILC_COLOR32 | ILC_MASK, 4, 0);
+    const ICON_SIZE: i32 = 20;
+    let images = ImageList_Create(ICON_SIZE, ICON_SIZE, ILC_COLOR32, 4, 0);
     if images == 0 {
         return 0;
     }
-    for kind in 0..4 {
-        let screen = GetDC(null_mut());
-        if screen.is_null() {
-            continue;
-        }
+    let glyphs = [
+        ('\u{e8b7}', rgb(47, 91, 153)),
+        ('\u{e72c}', rgb(47, 91, 153)),
+        ('\u{e74e}', rgb(71, 85, 105)),
+        ('\u{e7a7}', rgb(71, 85, 105)),
+    ];
+    let screen = GetDC(null_mut());
+    if screen.is_null() {
+        return images;
+    }
+    let font = CreateFontW(
+        -16,
+        0,
+        0,
+        0,
+        400,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        4,
+        0,
+        w!("Segoe MDL2 Assets"),
+    );
+    if font.is_null() {
+        ReleaseDC(null_mut(), screen);
+        return images;
+    }
+    for (glyph, color) in glyphs {
         let dc = CreateCompatibleDC(screen);
-        let bitmap = CreateCompatibleBitmap(screen, 24, 24);
-        if dc.is_null() || bitmap.is_null() {
+        let mut bits = null_mut();
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: ICON_SIZE,
+                biHeight: -ICON_SIZE,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [zeroed()],
+        };
+        let bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+        if dc.is_null() || bitmap.is_null() || bits.is_null() {
             if !dc.is_null() {
                 DeleteDC(dc);
             }
             if !bitmap.is_null() {
                 DeleteObject(bitmap);
             }
-            ReleaseDC(null_mut(), screen);
             continue;
         }
         let old_bitmap = SelectObject(dc, bitmap);
-        let mask_color = rgb(255, 0, 255);
-        let mask_brush = CreateSolidBrush(mask_color);
-        FillRect(
+        let white = CreateSolidBrush(rgb(255, 255, 255));
+        let rect = RECT {
+            left: 0,
+            top: 0,
+            right: ICON_SIZE,
+            bottom: ICON_SIZE,
+        };
+        FillRect(dc, &rect, white);
+        DeleteObject(white);
+        let old_font = SelectObject(dc, font);
+        SetBkMode(dc, TRANSPARENT as i32);
+        SetTextColor(dc, rgb(0, 0, 0));
+        let text = wide(&glyph.to_string());
+        let mut text_rect = rect;
+        DrawTextW(
             dc,
-            &RECT {
-                left: 0,
-                top: 0,
-                right: 24,
-                bottom: 24,
-            },
-            mask_brush,
+            text.as_ptr(),
+            -1,
+            &mut text_rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
-        draw_toolbar_icon(dc, kind);
+        GdiFlush();
+        SelectObject(dc, old_font);
+        let pixels =
+            std::slice::from_raw_parts_mut(bits as *mut u8, (ICON_SIZE * ICON_SIZE * 4) as usize);
+        let red = color & 0xff;
+        let green = (color >> 8) & 0xff;
+        let blue = (color >> 16) & 0xff;
+        for pixel in pixels.chunks_exact_mut(4) {
+            let brightness = (u32::from(pixel[0]) + u32::from(pixel[1]) + u32::from(pixel[2])) / 3;
+            let alpha = 255 - brightness;
+            pixel[0] = (blue * alpha / 255) as u8;
+            pixel[1] = (green * alpha / 255) as u8;
+            pixel[2] = (red * alpha / 255) as u8;
+            pixel[3] = alpha as u8;
+        }
         SelectObject(dc, old_bitmap);
-        ImageList_AddMasked(images, bitmap, mask_color);
-        DeleteObject(mask_brush);
+        ImageList_Add(images, bitmap, null_mut());
         DeleteObject(bitmap);
         DeleteDC(dc);
-        ReleaseDC(null_mut(), screen);
     }
+    DeleteObject(font);
+    ReleaseDC(null_mut(), screen);
     images
-}
-
-unsafe fn draw_toolbar_icon(dc: windows_sys::Win32::Graphics::Gdi::HDC, kind: i32) {
-    let ink = CreatePen(PS_SOLID, 2, rgb(51, 65, 85));
-    let accent = CreatePen(PS_SOLID, 2, rgb(37, 99, 235));
-    let folder = CreateSolidBrush(rgb(245, 183, 55));
-    let surface = CreateSolidBrush(rgb(248, 250, 252));
-    let old_pen = SelectObject(dc, ink);
-    let old_brush = SelectObject(dc, surface);
-    match kind {
-        0 => {
-            SelectObject(dc, folder);
-            Rectangle(dc, 3, 8, 21, 19);
-            Rectangle(dc, 5, 5, 13, 10);
-        }
-        1 => {
-            SelectObject(dc, accent);
-            MoveToEx(dc, 18, 8, null_mut());
-            LineTo(dc, 18, 4);
-            LineTo(dc, 14, 4);
-            MoveToEx(dc, 18, 5, null_mut());
-            LineTo(dc, 20, 9);
-            LineTo(dc, 17, 10);
-            MoveToEx(dc, 6, 16, null_mut());
-            LineTo(dc, 6, 20);
-            LineTo(dc, 10, 20);
-            MoveToEx(dc, 6, 19, null_mut());
-            LineTo(dc, 4, 15);
-            LineTo(dc, 7, 14);
-            MoveToEx(dc, 7, 8, null_mut());
-            LineTo(dc, 10, 5);
-            LineTo(dc, 15, 5);
-            MoveToEx(dc, 17, 16, null_mut());
-            LineTo(dc, 14, 19);
-            LineTo(dc, 9, 19);
-        }
-        2 => {
-            SelectObject(dc, accent);
-            SelectObject(dc, GetStockObject(NULL_BRUSH));
-            Rectangle(dc, 5, 3, 19, 21);
-            Rectangle(dc, 8, 5, 16, 10);
-            Rectangle(dc, 8, 14, 16, 20);
-        }
-        _ => {
-            SelectObject(dc, accent);
-            MoveToEx(dc, 8, 7, null_mut());
-            LineTo(dc, 4, 11);
-            LineTo(dc, 8, 15);
-            MoveToEx(dc, 5, 11, null_mut());
-            LineTo(dc, 14, 11);
-            LineTo(dc, 18, 15);
-            LineTo(dc, 18, 18);
-            LineTo(dc, 11, 18);
-        }
-    }
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-    for object in [ink, accent, folder, surface] {
-        DeleteObject(object);
-    }
 }
 
 const fn toolbar_button(bitmap: i32, command: i32) -> TBBUTTON {
@@ -5498,7 +5544,7 @@ const fn toolbar_separator() -> TBBUTTON {
     }
 }
 unsafe fn set_status_parts(status: HWND, width: i32) {
-    let parts = [(width / 3).max(180), (width * 2 / 3).max(360), -1];
+    let parts = [(width * 38 / 100).max(220), (width * 82 / 100).max(520), -1];
     SendMessageW(status, SB_SETPARTS, 3, parts.as_ptr() as LPARAM);
 }
 unsafe fn set_status_text(status: HWND, part: usize, text: &str) {
